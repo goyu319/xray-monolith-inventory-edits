@@ -2,7 +2,7 @@ name: SQA-Personal-DLSS-FG-Test
 
 on:
   push:
-    branches: [ "personal-bodycam-dlss-frame-generation" ]
+    branches: [ "personal-bodycam-dlss-frame-generation", "sa-fg-v04" ]
     paths-ignore:
       - 'tools/optiscaler/**'
       - '.github/workflows/personal-optiscaler.yml'
@@ -129,6 +129,12 @@ jobs:
           if ((Get-Item -LiteralPath $source).Length -eq 0) { throw "Empty required file: $source" }
           Copy-Item -LiteralPath $source -Destination ./stage/bin/
         }
+        # oneTBB runtime (v0.4 job system / tbbmalloc) must sit beside the exe
+        foreach ($dll in @("tbb12.dll", "tbbmalloc.dll")) {
+          $source = "./sdk/binaries/$dll"
+          if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing TBB runtime: $dll" }
+          Copy-Item -LiteralPath $source -Destination ./stage/bin/
+        }
     - name: Stage verified NVIDIA runtime and licenses
       run: |
         $ErrorActionPreference = "Stop"
@@ -162,7 +168,7 @@ jobs:
     - name: Validate and stage complete install package
       run: |
         $ErrorActionPreference = "Stop"
-        foreach ($file in @("bin/AnomalyDX11AVX.exe", "bin/AnomalyDX11AVX.pdb", "db/mods/00_modded_exes_gamedata.db0")) {
+        foreach ($file in @("bin/AnomalyDX11AVX.exe", "bin/AnomalyDX11AVX.pdb", "bin/tbb12.dll", "bin/tbbmalloc.dll", "db/mods/00_modded_exes_gamedata.db0")) {
           $source = Join-Path ./incoming $file
           if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing required file: $file" }
           if ((Get-Item -LiteralPath $source).Length -eq 0) { throw "Empty required file: $file" }
@@ -184,7 +190,7 @@ jobs:
     # Download this artifact for one ZIP with bin/ and db/ at its root.
     - uses: actions/upload-artifact@v4.6.0
       with:
-        name: Squared-Away-Personal-DLSS-FG-Test-8-Normal-Launch-DX11-AVX
+        name: Squared-Away-DLSS-FG-plus-v04-Stability-DX11-AVX
         path: ./package/
         if-no-files-found: error
         retention-days: 14
