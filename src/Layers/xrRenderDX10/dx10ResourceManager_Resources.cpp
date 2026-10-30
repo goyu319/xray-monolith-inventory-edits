@@ -1121,10 +1121,19 @@ bool CResourceManager::QueueTextureSwap(const ref_texture& texture, u32 new_lod)
 		PROF_THREAD("X-Ray PPL Thread")
 
 		u32 mem = 0;
-		ID3DBaseTexture* surf = ::RImplementation.texture_load(*texture->cName, mem, true, int(new_lod));
+		// Not staging: a staging (r__no_ram_textures off) surface cannot back a shader resource
+		// view, and the live texture's own staging copy was already resolved by ProcessStaging().
+		// Loading it as staging left PendingSRView null, so the swap installed no view and
+		// classified (weapon/character) textures rendered black after a demote/promote.
+		ID3DBaseTexture* surf = ::RImplementation.texture_load(*texture->cName, mem, false, int(new_lod));
 		ID3DShaderResourceView* srv = nullptr;
-		if (surf)
-			HW.pDevice->CreateShaderResourceView(surf, NULL, &srv);
+		if (surf && FAILED(HW.pDevice->CreateShaderResourceView(surf, NULL, &srv)))
+			srv = nullptr;
+		if (surf && !srv)
+		{
+			// Never install a surface without a view: drop it and keep the current one.
+			_RELEASE(surf);
+		}
 
 		texture->PendingSurface = surf;
 		texture->PendingSRView = srv;
