@@ -2,7 +2,7 @@ name: SQA-Personal-DLSS-FG-Test
 
 on:
   push:
-    branches: [ "personal-bodycam-dlss-frame-generation", "sa-fg-v04" ]
+    branches: [ "personal-bodycam-dlss-frame-generation", "sa-fg-v04", "sa-fg-v04-bc031" ]
     paths-ignore:
       - 'tools/optiscaler/**'
       - '.github/workflows/personal-optiscaler.yml'
@@ -190,7 +190,7 @@ jobs:
     # Download this artifact for one ZIP with bin/ and db/ at its root.
     - uses: actions/upload-artifact@v4.6.0
       with:
-        name: Squared-Away-DLSS-FG-plus-v04-Stability-DX11-AVX
+        name: Squared-Away-DLSS-FG-v04-Bodycam031-DX11-AVX
         path: ./package/
         if-no-files-found: error
         retention-days: 14
