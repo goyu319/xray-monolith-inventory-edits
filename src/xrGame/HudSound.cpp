@@ -313,6 +313,10 @@ void HUD_SOUND_COLLECTION_LAYERED::PlaySound(LPCSTR alias, const Fvector& positi
 {
 	PROF_EVENT("HUD_SOUND_COLLECTION_LAYERED::PlaySound");
 	LPCSTR alias_to_play = alias;
+	// Must outlive the scope below: alias_to_play may point into it. With the tbbmalloc pure allocator
+	// a freed block is reused at once, so a block-local string here made the override alias garbage
+	// (no shot played/override silently lost, e.g. SAR *_indoor gunshots).
+	xr_string new_alias;
 	::luabind::functor<::luabind::object> funct;
 	if (ai().script_engine().functor("_G.COnBeforePlayHudSound", funct))
 	{
@@ -363,7 +367,7 @@ void HUD_SOUND_COLLECTION_LAYERED::PlaySound(LPCSTR alias, const Fvector& positi
 				}
 				else
 				{
-					xr_string new_alias = xr_string(section) + "|" + line;
+					new_alias = xr_string(section) + "|" + line;
 					if (!FindSoundItem(new_alias.c_str(), false))
 					{
 						auto old_sound = FindSoundItem(alias, false);
