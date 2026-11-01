@@ -1015,8 +1015,17 @@ bool CActor::cam_FreelookEntryBlend(float viewport_near)
 	Fvector pos = nativePos;
 	pos.add(toWorld(Fvector().mul(m_freelook_blend_pos, w)));
 	const Fvector blendDir = toWorld(localDir), blendUp = toWorld(localUp);
+	Fmatrix native;
+	native.set(right, up, dir, nativePos);
 	Cameras().ApplyDeviceOverride(pos, blendDir, blendUp, Cameras().Fov(), Cameras().Aspect(),
 		g_pGamePersistent->Environment().CurrentEnv->far_plane, viewport_near);
+	// The arms follow the HUD camera, which still holds the native view; move
+	// it with the blend so they stay put on screen instead of sliding in.
+	Fmatrix blended, nativeInverse, delta;
+	blended.set(Cameras().Right(), Cameras().Up(), Cameras().Direction(), Cameras().Position());
+	nativeInverse.invert(native);
+	delta.mul_43(blended, nativeInverse);
+	Cameras().TransformHudCamera(delta);
 	return true;
 }
 

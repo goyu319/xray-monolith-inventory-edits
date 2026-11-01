@@ -44,6 +44,19 @@ public:
         m_cam_info_hud.p.add(delta);
     }
 
+	// Moves the HUD camera by a world-space delta so the arms keep their place
+	// in a view that was overridden after the effectors (freelook entry blend).
+	void TransformHudCamera(const Fmatrix& delta)
+	{
+		Fmatrix hud, moved;
+		hud.set(m_cam_info_hud.r, m_cam_info_hud.n, m_cam_info_hud.d, m_cam_info_hud.p);
+		moved.mul_43(delta, hud);
+		m_cam_info_hud.r = moved.i;
+		m_cam_info_hud.n = moved.j;
+		m_cam_info_hud.d = moved.k;
+		m_cam_info_hud.p = moved.c;
+	}
+
 	IC void hud_camera_Matrix(Fmatrix& M)
 	{
 		M.set(m_cam_info_hud.r, m_cam_info_hud.n, m_cam_info_hud.d, m_cam_info_hud.p);
