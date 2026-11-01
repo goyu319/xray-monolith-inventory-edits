@@ -66,9 +66,10 @@ bool Eligible()
         Msg("[Personal FG] UI content flags=0x%X (1=item,2=item attachment,4=HUD attachment,8=camera UI,16=wearable surface)",uiFlags);
         lastUiFlags=uiFlags;
     }
-    // Actor HUD widgets and wearable glass are composed after the clean-scene
-    // snapshot. Item/camera UI still uses an earlier render path and must block.
-    if(uiFlags & (1u | 2u | 8u))
+    // Actor HUD widgets, wearable glass and held-item 3D UI (detector screens)
+    // are composed after the clean-scene snapshot via ProtectEmbeddedUi().
+    // Item-attachment and camera UI still use an earlier render path and must block.
+    if(uiFlags & (2u | 8u))
     {Status("Suspended for embedded item/camera UI.");return false;}
     if(RImplementation.o.dx10_msaa || !RImplementation.o.ssfx_motionvectors || !dlss::Active())
     {Status("Requires active DLSS/FSR upscaling, SSS motion vectors and MSAA off.");return false;}
@@ -91,7 +92,7 @@ bool NeedsHudless()
 bool ProtectEmbeddedUi()
 {
     return ps_r_dlss_fg && HW.presentationBridge && HW.presentationBridge->GenerationReady() &&
-        dlss::Active() && g_hud && (g_hud->FrameGenerationUiFlags() & 4u);
+        dlss::Active() && g_hud && (g_hud->FrameGenerationUiFlags() & (1u | 4u));
 }
 void BeginSimulation()
 {
