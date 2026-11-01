@@ -217,7 +217,8 @@ void CActor::cam_Set(EActorCameras style)
 float CActor::f_Ladder_cam_limit = 1.f;
 float f_Freelook_cam_limit = PI_DIV_2; // 1.45f;
 float f_Freelook_cam_limit_p = .75f;
-// 1: ending freelook keeps the view; the body/weapon turns to where you look and the pitch is kept.
+// 1: starting or ending freelook never moves the view. On start the pitch limit widens to the current pitch;
+// on end the body/weapon turns to where you look and the pitch is kept.
 // 0: original behaviour, the camera returns to the body direction and the horizon.
 int freelook_keep_view = 1;
 
@@ -326,7 +327,13 @@ void CActor::camUpdateFreelook(float dt)
 					cam_pitch -= PI_MUL_2;
 			}
 
-			if (cam_pitch < -f_Freelook_cam_limit_p)
+			if (freelook_keep_view)
+			{
+				// Do not pull the view toward the pitch limit; widen the limit to include the current pitch.
+				C->lim_pitch.set(_min(-f_Freelook_cam_limit_p, cam_pitch), _max(f_Freelook_cam_limit_p, cam_pitch));
+				cam_freelook = eflEnabled;
+			}
+			else if (cam_pitch < -f_Freelook_cam_limit_p)
 			{
 				float diff_p = angle_difference(cam_pitch, -f_Freelook_cam_limit_p + .05f);
 				if (diff_p < .025)
