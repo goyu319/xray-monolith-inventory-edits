@@ -165,6 +165,7 @@ extern BOOL mouseWheelInvertChangeWeapons;
 extern BOOL monsterStuckFix;
 extern BOOL logTimestamps;
 extern float f_Freelook_cam_limit;
+extern int freelook_keep_view;
 extern int MOUSEBUFFERSIZE;
 extern int KEYBOARDBUFFERSIZE;
 extern BOOL print_bone_warnings;
@@ -3407,6 +3408,7 @@ void CCC_RegisterCommands()
 
 	// Freelook
 	CMD4(CCC_Float, "freelook_cam_limit", &f_Freelook_cam_limit, 0.f, PI);
+	CMD4(CCC_Integer, "freelook_keep_view", &freelook_keep_view, 0, 1);
 
 	// Input buffer sizes
 	CMD4(CCC_Integer, "mouse_buffer_size", &MOUSEBUFFERSIZE, 64, 2048);

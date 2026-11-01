@@ -217,6 +217,9 @@ void CActor::cam_Set(EActorCameras style)
 float CActor::f_Ladder_cam_limit = 1.f;
 float f_Freelook_cam_limit = PI_DIV_2; // 1.45f;
 float f_Freelook_cam_limit_p = .75f;
+// 1: ending freelook keeps the view; the body/weapon turns to where you look and the pitch is kept.
+// 0: original behaviour, the camera returns to the body direction and the horizon.
+int freelook_keep_view = 1;
 
 void CActor::cam_SetLadder()
 {
@@ -362,10 +365,21 @@ void CActor::camUpdateFreelook(float dt)
 				C->lim_yaw.set(0, 0);
 				C->bClampYaw = false;
 			}
+			else if (freelook_keep_view)
+			{
+				// Turn the body toward the camera instead of turning the camera back.
+				old_torso_yaw -= delta * _min(dt * 10.f, 1.f);
+			}
 			else
 			{
 				cam_yaw += delta * _min(dt * 10.f, 1.f);
 			}
+		}
+
+		if (freelook_keep_view)
+		{
+			// Keep the current pitch; it is already inside the normal limits.
+			C->lim_pitch = { -1.5, 1.5 };
 		}
 
 		if (!C->lim_pitch.similar({ -1.5, 1.5 }))
