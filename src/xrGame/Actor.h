@@ -426,6 +426,19 @@ protected:
     Fvector m_reference_camera_base_carrier = {0.f,0.f,0.f};
     Fvector m_reference_camera_effect_carrier = {0.f,0.f,0.f};
     u32 m_reference_camera_release_frame = u32(-1);
+    // Freelook entry blend: the bodycam-composed view of the last frame eases
+    // into the native freelook view instead of snapping to it.
+    u32 m_bodycam_composed_frame = u32(-1);
+    Fvector m_bodycam_composed_pos = {0.f,0.f,0.f};
+    Fvector m_bodycam_composed_dir = {0.f,0.f,1.f};
+    Fvector m_bodycam_composed_up = {0.f,1.f,0.f};
+    bool m_freelook_blend_active = false;
+    float m_freelook_blend_time = 0.f;
+    Fvector m_freelook_blend_pos = {0.f,0.f,0.f}; // last composed view in the native basis
+    Fvector m_freelook_blend_dir = {0.f,0.f,1.f};
+    Fvector m_freelook_blend_up = {0.f,1.f,0.f};
+    void cam_RecordComposedView();
+    bool cam_FreelookEntryBlend(float viewport_near);
     void cam_UpdateAngularBookkeeping();
 	void cam_Lookout(const Fmatrix& xform, float camera_height);
 	void cam_BodycamVisualReset(const CCameraBase* camera);

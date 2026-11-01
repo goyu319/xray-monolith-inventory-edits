@@ -393,5 +393,6 @@ void CActor::cam_FinalizeReference(const PreparedCamera& frame, Fmatrix& cameraW
 	// Reference owns the solved pose, including any scoped surround freeze.
 	// ApplyDevice also publishes native PP; do not apply PP a second time.
 	Cameras().ApplyDevice(frame.viewport_near);
+	cam_RecordComposedView();
 	FirstPerson::PublishCamera();
 }
