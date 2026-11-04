@@ -217,6 +217,10 @@ void CActor::cam_Set(EActorCameras style)
 float CActor::f_Ladder_cam_limit = 1.f;
 float f_Freelook_cam_limit = PI_DIV_2; // 1.45f;
 float f_Freelook_cam_limit_p = .75f;
+// 1: starting or ending freelook never moves the view. On start the pitch limit widens to the current pitch;
+// on end the body/weapon turns to where you look and the pitch is kept.
+// 0: original behaviour, the camera returns to the body direction and the horizon.
+int freelook_keep_view = 1;
 
 void CActor::cam_SetLadder()
 {
@@ -323,7 +327,13 @@ void CActor::camUpdateFreelook(float dt)
 					cam_pitch -= PI_MUL_2;
 			}
 
-			if (cam_pitch < -f_Freelook_cam_limit_p)
+			if (freelook_keep_view)
+			{
+				// Do not pull the view toward the pitch limit; widen the limit to include the current pitch.
+				C->lim_pitch.set(_min(-f_Freelook_cam_limit_p, cam_pitch), _max(f_Freelook_cam_limit_p, cam_pitch));
+				cam_freelook = eflEnabled;
+			}
+			else if (cam_pitch < -f_Freelook_cam_limit_p)
 			{
 				float diff_p = angle_difference(cam_pitch, -f_Freelook_cam_limit_p + .05f);
 				if (diff_p < .025)
@@ -362,10 +372,21 @@ void CActor::camUpdateFreelook(float dt)
 				C->lim_yaw.set(0, 0);
 				C->bClampYaw = false;
 			}
+			else if (freelook_keep_view)
+			{
+				// Turn the body toward the camera instead of turning the camera back.
+				old_torso_yaw -= delta * _min(dt * 10.f, 1.f);
+			}
 			else
 			{
 				cam_yaw += delta * _min(dt * 10.f, 1.f);
 			}
+		}
+
+		if (freelook_keep_view)
+		{
+			// Keep the current pitch; it is already inside the normal limits.
+			C->lim_pitch = { -1.5, 1.5 };
 		}
 
 		if (!C->lim_pitch.similar({ -1.5, 1.5 }))
@@ -905,7 +926,9 @@ void CActor::cam_Finalize(const PreparedCamera& frame)
 		Level().Cameras().UpdateFromCamera(C);
 		if (eacFirstEye == cam_active && !Level().Cameras().GetCamEffector(cefDemo) && !frame.freeze_world_pose)
 		{
-			if (!cam_BodycamVisualUpdate(C, dt, _viewport_near, true))
+			if (cam_BodycamVisualUpdate(C, dt, _viewport_near, true))
+				cam_RecordComposedView();
+			else if (!cam_FreelookEntryBlend(_viewport_near))
 				Cameras().ApplyDevice(_viewport_near);
 		}
 		else if (frame.freeze_world_pose && eacFirstEye == cam_active &&
@@ -918,6 +941,92 @@ void CActor::cam_Finalize(const PreparedCamera& frame)
 			cam_BodycamVisualReset(nullptr); // Third person or demo camera: reseed on the next first-eye frame.
 		FirstPerson::PublishCamera();
 	}
+}
+
+int freelook_entry_blend_ms = 250;
+
+void CActor::cam_RecordComposedView()
+{
+	m_bodycam_composed_frame = Device.dwFrame;
+	m_bodycam_composed_pos = Cameras().Position();
+	m_bodycam_composed_dir = Cameras().Direction();
+	m_bodycam_composed_up = Cameras().Up();
+	m_freelook_blend_active = false;
+}
+
+// Starting freelook drops the bodycam view (Classic composition or the
+// Reference rig) for the native camera in one frame. Ease the difference out
+// instead, in the native camera's basis so the blend follows the freelook.
+bool CActor::cam_FreelookEntryBlend(float viewport_near)
+{
+	if (freelook_entry_blend_ms <= 0 || cam_freelook == eflDisabled || cam_freelook == eflDisabling)
+	{
+		m_freelook_blend_active = false;
+		return false;
+	}
+
+	const Fvector nativePos = Cameras().Position();
+	Fvector right = Cameras().Right(), up = Cameras().Up(), dir = Cameras().Direction();
+	auto toLocal = [&](const Fvector& v) { return Fvector().set(v.dotproduct(right), v.dotproduct(up), v.dotproduct(dir)); };
+
+	if (!m_freelook_blend_active)
+	{
+		if (m_bodycam_composed_frame == u32(-1) || m_bodycam_composed_frame + 1 != Device.dwFrame)
+			return false;
+		Fvector offset;
+		offset.sub(m_bodycam_composed_pos, nativePos);
+		// A large gap is a teleport or a level change, not a view to ease out.
+		if (offset.magnitude() > 1.f)
+			return false;
+		m_freelook_blend_pos = toLocal(offset);
+		m_freelook_blend_dir = toLocal(m_bodycam_composed_dir);
+		m_freelook_blend_up = toLocal(m_bodycam_composed_up);
+		m_freelook_blend_time = 0.f;
+		m_freelook_blend_active = true;
+	}
+	else if (!Device.Paused())
+		m_freelook_blend_time += Device.fTimeDelta;
+
+	const float duration = float(freelook_entry_blend_ms) * 0.001f;
+	const float t = _min(m_freelook_blend_time / duration, 1.f);
+	if (t >= 1.f)
+	{
+		m_freelook_blend_active = false;
+		return false;
+	}
+	const float w = 1.f - t * t * (3.f - 2.f * t);
+	auto toWorld = [&](const Fvector& v) {
+		Fvector out;
+		out.mul(right, v.x);
+		out.mad(up, v.y);
+		out.mad(dir, v.z);
+		return out;
+	};
+	Fvector localDir, localUp;
+	localDir.lerp(Fvector().set(0.f, 0.f, 1.f), m_freelook_blend_dir, w);
+	localUp.lerp(Fvector().set(0.f, 1.f, 0.f), m_freelook_blend_up, w);
+	if (localDir.magnitude() < EPS_L || localUp.magnitude() < EPS_L)
+	{
+		m_freelook_blend_active = false;
+		return false;
+	}
+	localDir.normalize();
+	localUp.normalize();
+	Fvector pos = nativePos;
+	pos.add(toWorld(Fvector().mul(m_freelook_blend_pos, w)));
+	const Fvector blendDir = toWorld(localDir), blendUp = toWorld(localUp);
+	Fmatrix native;
+	native.set(right, up, dir, nativePos);
+	Cameras().ApplyDeviceOverride(pos, blendDir, blendUp, Cameras().Fov(), Cameras().Aspect(),
+		g_pGamePersistent->Environment().CurrentEnv->far_plane, viewport_near);
+	// The arms follow the HUD camera, which still holds the native view; move
+	// it with the blend so they stay put on screen instead of sliding in.
+	Fmatrix blended, nativeInverse, delta;
+	blended.set(Cameras().Right(), Cameras().Up(), Cameras().Direction(), Cameras().Position());
+	nativeInverse.invert(native);
+	delta.mul_43(blended, nativeInverse);
+	Cameras().TransformHudCamera(delta);
+	return true;
 }
 
 // shot effector stuff
