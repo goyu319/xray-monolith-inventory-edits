@@ -9,10 +9,9 @@ namespace discord { class Activity; }
 
 namespace quark_discord
 {
-// Stock S.T.A.L.K.E.R. Anomaly Discord application (the one the Game SDK version used):
-// Discord shows this app's own name and "gamelogo" art.
-inline constexpr char application_id[] = "477910171964801060";
-inline constexpr char application_name[] = "S.T.A.L.K.E.R. Anomaly";
+inline constexpr char application_id[] = "1558958662918078576";
+inline constexpr char application_name[] = "Quark Engine";
+inline constexpr char community_url[] = "https://discord.com/invite/X7GRYsNNEc";
 
 // Local IPC transport. All methods, including destruction, belong to the
 // Discord worker; the game thread only queues a request to clear presence.
