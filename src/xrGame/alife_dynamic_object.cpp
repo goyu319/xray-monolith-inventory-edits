@@ -394,14 +394,14 @@ void CSE_ALifeItemContainer::add_online(const bool& update_registries)
 		}
 		Msg("[AMP-S]   spawning child %d back", *I);
 
-		item->base()->s_flags.or(M_SPAWN_UPDATE);
+		item->base()->s_flags.bit_or(M_SPAWN_UPDATE);
 		CSE_Abstract* abstract = smart_cast<CSE_Abstract*>(item);
 		alife().server().entity_Destroy(abstract);
 
 		child->o_Position = o_Position;
 		child->m_tNodeID = m_tNodeID;
 		alife().server().Process_spawn(tNetPacket, clientID, FALSE, item->base());
-		child->s_flags.and(u16(-1) ^ M_SPAWN_UPDATE);
+		child->s_flags.bit_and(u16(-1) ^ M_SPAWN_UPDATE);
 		child->m_bOnline = true;
 		survivors.push_back(child->ID);
 
