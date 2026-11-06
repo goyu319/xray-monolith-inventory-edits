@@ -1,0 +1,119 @@
+name: GOYU-v051-Build
+
+# GOYU engine: upstream v0.5.1-dev (DLSS 0.71 + DX12 frame generation + bodycam)
+# with the Squared Away inventory hooks and the GOYU freelook / texture fixes.
+on:
+  push:
+    branches: [ "goyu-v051" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOLUTION_FILE_PATH: src/engine-vs2022.sln
+  PACK_GAMEDATA_NAME: 00_modded_exes_gamedata.db0
+
+jobs:
+  gamedata:
+    name: Pack matching gamedata
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v4
+    - name: Pack gamedata
+      working-directory: compressor
+      run: |
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path ./gamedata | Out-Null
+        Copy-Item -Path ../gamedata/* -Destination ./gamedata -Recurse -Force
+        $packer = Start-Process -FilePath "./! compress_gamedata.cmd" -WindowStyle Hidden -Wait -PassThru
+        if ($packer.ExitCode -ne 0) { throw "gamedata packing failed: $($packer.ExitCode)" }
+        if (!(Test-Path -LiteralPath ./gamedata.db0 -PathType Leaf)) { throw "gamedata.db0 was not produced" }
+        if ((Get-Item -LiteralPath ./gamedata.db0).Length -eq 0) { throw "gamedata.db0 is empty" }
+        New-Item -ItemType Directory -Force -Path ../stage/db/mods | Out-Null
+        Copy-Item -LiteralPath ./gamedata.db0 -Destination "../stage/db/mods/$env:PACK_GAMEDATA_NAME"
+    - uses: actions/upload-artifact@v4.6.0
+      with:
+        name: goyu-gamedata
+        path: ./stage/
+        if-no-files-found: error
+        retention-days: 1
+
+  build:
+    name: Build ${{ matrix.configuration }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: DX12
+            exe: AnomalyDX12
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - name: Configure Pagefile
+      uses: al-cheb/configure-pagefile-action@v1.3
+      with:
+        minimum-size: 8GB
+        maximum-size: 8GB
+        disk-root: "C:"
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: microsoft/setup-msbuild@v1.3.1
+      with:
+        msbuild-architecture: "x64"
+    - name: Build executable
+      run: |
+        msbuild /m /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 $env:SOLUTION_FILE_PATH
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Stage executable and symbols
+      run: |
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path ./stage/bin | Out-Null
+        foreach ($ext in @("exe", "pdb")) {
+          $source = "./_build/_game/bin_dbg/${{ matrix.exe }}.$ext"
+          if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing required file: $source" }
+          Copy-Item -LiteralPath $source -Destination ./stage/bin/
+        }
+        foreach ($dll in @("tbb12.dll", "tbbmalloc.dll")) {
+          Copy-Item -LiteralPath "./sdk/binaries/$dll" -Destination ./stage/bin/
+        }
+    - uses: actions/upload-artifact@v4.6.0
+      with:
+        name: goyu-bin-${{ matrix.configuration }}
+        path: ./stage/
+        if-no-files-found: error
+        retention-days: 1
+
+  package:
+    name: Package
+    needs: [build, gamedata]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: goyu-*
+        merge-multiple: true
+        path: ./package
+    - name: Check package
+      run: |
+        $ErrorActionPreference = "Stop"
+        foreach ($file in @("bin/AnomalyDX12.exe", "bin/AnomalyDX12.pdb", "bin/tbb12.dll", "bin/tbbmalloc.dll", "db/mods/00_modded_exes_gamedata.db0")) {
+          if (!(Test-Path -LiteralPath (Join-Path ./package $file) -PathType Leaf)) { throw "Missing required file: $file" }
+        }
+        @{ commit = $env:GITHUB_SHA; base = "v0.5.1-dev" } | ConvertTo-Json | Set-Content ./package/build-manifest.json -Encoding utf8
+    # Download this artifact for one ZIP with bin/ and db/ at its root.
+    - uses: actions/upload-artifact@v4.6.0
+      with:
+        name: GOYU-Engine-v051-SquaredAway-DX12
+        path: ./package/
+        if-no-files-found: error
+        retention-days: 14
