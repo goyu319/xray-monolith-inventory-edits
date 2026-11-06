@@ -25,6 +25,14 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
   - Fomok の Personal FG 一式（DX11 から DX12 提示のブリッジ、スコープ/PiP の FG 修正）：本家の DLSS 0.71 の仕組みに置き換え
 - **ビルド**：`.github/workflows/goyu-build.yml`（push で自動。成果物 `GOYU-Engine-v051-SquaredAway-DX12`）
 - **入れ方**：本家 v0.5.1-dev のパックを先に入れ（Streamline や FSR の DLL、DLSS 0.71 の MOD が必要）、そのあと bin と db をこの成果物で上書き
+- **ユーザー環境での設定（2026-11-06 確認）**：RTX 5070 / Ryzen 7 9800X3D / 2560x1440。FG は **DLSS 3x**、画質は **Quality + プリセット K** で運用
+  - FG の動作はログで確認済み（`Interpolation enabled (3x)`、PostPresent の `presented=3`）
+  - `r__framelimit` は FG 後の**表示フレーム数**にかかる（Reflex の上限 = 倍率 / limit）。上限 149 のままだと 2x でも 149 で頭打ちになる。今は 499（最大 500。2000 にする本家コミットは外している）
+  - 3x/4x では元の描画が大きく落ちる（3x で約 50、4x で約 30）。VRAM 予算を下げても変わらなかったので、5070 での FG 処理の負荷と判断
+  - ゲーム内の FPS 表示は描画フレームのみ。表示フレームは NVIDIA オーバーレイで見る
+  - `r_fg_diagnostics 1`（起動時に確定）で PostPresent の `presented=` がログに出る
+  - 既知・対応しない：PiP スコープを覗いて動かすとざらつく（本家ではスコープ映像が時間方向の再構成を通らない。Fomok 版の PiP 修正は移植していない。ユーザー了承済み）
+- **MO2 の構成（2026-11-06）**：本家パックの 3（Compat Patch remerged 0.71）、4（core v0.5.1）、6（Scope Effects Guard v0.5.1）、Add-on（RC7、Glossy、Better Beef、Anti-Lag、Viper 2）を有効。GSquared.Away.FG.UI.Scope.Patch、GSA031、GDLSS FSR3 Compatibility Patch、旧 G6、旧 3/4/5 は無効。変更前は `modlist.txt.before_v051`
 - **旧ブランチ**：`sa-fg-v04-bc031` / `freelook-keep-view`（Fomok ベース、AnomalyDX11AVX.exe）。下の記録はその時代のもの
 
 ## エンジン（旧：sa-fg-v04-bc031）
