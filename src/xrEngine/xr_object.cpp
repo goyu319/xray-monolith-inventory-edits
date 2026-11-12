@@ -106,6 +106,11 @@ void CObject::cNameVisual_set(shared_str N)
 		}
 
         OnChangeVisual();
+		// The wallmarks engine keeps skeleton wallmarks with a raw pointer to their kinematics.
+		// Drop them before the old model is freed, or the next frame renders through a dangling
+		// pointer (crash in CKinematics::RenderWallmark, e.g. after stripping a corpse's outfit).
+		if (old_k)
+			::Render->remove_SkeletonWallmarksFromObject(old_k);
 		::Render->model_Delete(old_v);
 	}
 	else
@@ -125,6 +130,8 @@ void CObject::cNameVisual_set(shared_str N)
         renderable.visual = nullptr;
         NameVisual = 0;
         OnChangeVisual();
+		if (IKinematics* old_k = old_v ? old_v->dcast_PKinematics() : nullptr)
+			::Render->remove_SkeletonWallmarksFromObject(old_k);
 		::Render->model_Delete(old_v);
 	}
 }
