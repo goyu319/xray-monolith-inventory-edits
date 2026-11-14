@@ -9,6 +9,7 @@
 #include "entity_alive.h"
 #include "inventory_item_impl.h"
 #include "inventory.h"
+#include "InventoryContainer.h"
 #include "xrserver_objects_alife_items.h"
 #include "actor.h"
 #include "UIGameCustom.h"
@@ -2010,6 +2011,24 @@ int CWeapon::GetAmmoCount_forType(shared_str const& ammo_type) const
 		if (pAmmo && (pAmmo->cNameSect() == ammo_type))
 		{
 			res += pAmmo->m_boxCurr;
+			continue;
+		}
+
+		// GOYU: rounds inside a carried Squared Away case count too.
+		// CInventory::Get / GetAny already take ammo out of carried
+		// containers (amp_find_in_containers), so a reload could load from
+		// a case while this count said there was nothing - a shotgun then
+		// refused to start or stopped after the loose shells, and the BM16
+		// picked the one-shell animation. One level, as everywhere else.
+		CInventoryContainer* box = smart_cast<CInventoryContainer*>(*itb);
+		if (!box)
+			continue;
+		for (xr_vector<u16>::const_iterator ci = box->m_items.begin(); box->m_items.end() != ci; ++ci)
+		{
+			CObject* O = Level().Objects.net_Find(*ci);
+			CWeaponAmmo* boxed = O ? smart_cast<CWeaponAmmo*>(O) : NULL;
+			if (boxed && boxed->cNameSect() == ammo_type && boxed->Useful())
+				res += boxed->m_boxCurr;
 		}
 	}
 	return res;
