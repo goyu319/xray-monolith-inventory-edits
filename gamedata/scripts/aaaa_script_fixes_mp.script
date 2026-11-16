@@ -1691,3 +1691,5 @@ function on_game_start()
 
 	fix_squad_offline_teleport()
 end
+
+printf("* GOYU: aaaa_script_fixes_mp.script with Quark speedups loaded")

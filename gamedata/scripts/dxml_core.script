@@ -1073,3 +1073,5 @@ function openXMLFile(xml_file_name)
 	SendScriptCallback("on_xml_read", xml_file_name, xml_obj, {})
 	return xml_obj
 end
+
+printf("* GOYU: dxml_core.script with Quark speedups loaded")

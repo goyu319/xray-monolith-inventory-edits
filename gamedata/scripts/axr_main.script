@@ -749,3 +749,4 @@ function server_entity_on_unregister(se_obj,type_name)
 	end
 	story_objects.unregister(id)
 end
+printf("* GOYU: axr_main.script with Quark speedups loaded")

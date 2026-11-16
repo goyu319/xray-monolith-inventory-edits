@@ -1824,3 +1824,5 @@ mt_g.__newindex = function(t, key, value)
     end
 end
 setmetatable(_G, mt_g)
+
+printf("* GOYU: _g_patches.script with Quark speedups loaded")
