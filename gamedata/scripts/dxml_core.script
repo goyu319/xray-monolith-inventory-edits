@@ -202,6 +202,38 @@ function xml_object(xml_file_name, xml_string, xml_table)
 		xml_table = xml_table,
 	}
 
+	-- Ported from Quark Engine: a query walks the whole document, and the walk parsed every tag anew
+	-- through str_explode (ui\map_spots_16.xml: 110 queries, 1.6 s on every save load). One parse per
+	-- distinct tag text is enough: a changed attribute makes a new key. These tables stay private,
+	-- callers still get a fresh getElement.
+	local parsed_tags = {}
+	local function parsed_tag(self, el)
+		local tag = el.el
+		if tag == nil then
+			return self:getElement(el) or false
+		end
+		local parsed = parsed_tags[tag]
+		if parsed == nil then
+			parsed = self:getElement(el) or false
+			parsed_tags[tag] = parsed
+		end
+		return parsed
+	end
+
+	local function tag_matches(parsed, arg)
+		if arg.name and arg.name ~= parsed.name then
+			return false
+		end
+		if arg.attr then
+			for arg_key, arg_value in pairs(arg.attr) do
+				if arg_value ~= parsed.attr[arg_key] then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
 	local function setParent(node, parent)
 		node.parent = parent
 		if node.kids then
@@ -332,14 +364,13 @@ function xml_object(xml_file_name, xml_string, xml_table)
 		local res = {}
 
 		xml_walk(where, function(v)
-			local el = self:getElement(v)
-			if not el then
+			local parsed = parsed_tag(self, v)
+			if not parsed then
 				return
 			end
 
 			for i = 1, #args do
-				local arg = args[i]
-				if self:checkElement(v, arg) then
+				if tag_matches(parsed, args[i]) then
 					res[#res + 1] = v
 					break
 				end
@@ -359,32 +390,9 @@ function xml_object(xml_file_name, xml_string, xml_table)
 	-- Check if element is fulfilling the args table query
 	-- Args structure is similar to findElement function
 	t.checkElement = function(self, el, args)
-		-- Filter element to match query
-		local check_table = {}
-		local arg = args
-		local v = el
-		local el = self:getElement(v)
-		if not el then return end
-
-		for key, value in pairs(el) do
-			if arg[key] then
-				check_table[key] = value
-			end
-		end
-
-		-- If arg table and filtered element is equal - found element
-		local found = true
-		if arg.name and arg.name ~= check_table.name then
-			found = false
-		elseif check_table.attr then
-			for arg_key, arg_value in pairs(arg.attr) do
-				if arg_value ~= check_table.attr[arg_key] then
-					found = false
-				end
-			end
-		end
-		if found then
-			return el
+		local parsed = parsed_tag(self, el)
+		if parsed and tag_matches(parsed, args) then
+			return self:getElement(el)
 		end
 	end
 
@@ -982,18 +990,31 @@ _G.COnXmlRead = function(xml_file_name, xml_string)
 
 	if xml_string_debug_enabled then print_parser_msg(xml_file_name, "loaded") end
 
-	local xml_table = try(parser.simple_dom, parser, xml_string, parser_options)
-	if not xml_table then
-		print_parser_error(xml_file_name, "error parsing")
-		return xml_string
-	end
-
-	local xml_obj = try(xml_object, xml_file_name, xml_string, xml_table)
+	local xml_obj = try(xml_object, xml_file_name, xml_string, nil)
 	if not xml_obj then
 		print_parser_error(xml_file_name, "error creating xml_obj")
 		return xml_string
 	end
-	if xml_string_debug_enabled then print_parser_msg(xml_file_name, "parsed") end
+
+	-- Ported from Quark Engine: parse on first use of xml_obj.xml_table (every method reaches the DOM
+	-- through it). Callbacks check the file name first, so a file none of them opens skips the Lua parse
+	-- and re-serialisation and reaches the engine as read.
+	local parse_failed = false
+	setmetatable(xml_obj, {__index = function(t, k)
+		if k ~= "xml_table" then
+			return nil
+		end
+		local xml_table = try(parser.simple_dom, parser, xml_string, parser_options)
+		if not xml_table then
+			print_parser_error(xml_file_name, "error parsing")
+			-- callbacks edit an empty document; the file goes back unchanged, as before
+			parse_failed = true
+			xml_table = { el = "!doc", kids = {} }
+		end
+		rawset(t, "xml_table", xml_table)
+		if xml_string_debug_enabled then print_parser_msg(xml_file_name, "parsed") end
+		return xml_table
+	end})
 
 	-- Flags for DXML scripts to change
 	local flags = {
@@ -1002,7 +1023,10 @@ _G.COnXmlRead = function(xml_file_name, xml_string)
 	SendScriptCallback("on_xml_read", xml_file_name, xml_obj, flags)
 	if xml_string_debug_enabled then print_parser_msg(xml_file_name, "callback") end
 
-	xml_string = parser:simple_xml(xml_table)
+	local xml_table = rawget(xml_obj, "xml_table")
+	if xml_table and not parse_failed then
+		xml_string = parser:simple_xml(xml_table)
+	end
 
 	-- Cache parsed file
 	if flags.cache then
@@ -1021,6 +1045,7 @@ function openXMLFile(xml_file_name)
 			while not file_reader:r_eof() do
 				lua_s = lua_s .. string.char(file_reader:r_u8())
 			end
+			getFS():r_close(file_reader)
 			return lua_s
 		end
 	end

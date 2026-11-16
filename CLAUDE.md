@@ -30,6 +30,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
   9. 本家 **v0.6-dev**（`d22882ed5`）をマージ（2026-11-13）：DLSS/FSR 0.72、PiP スコープ中の FG（`r_frame_generation_pip`）とレンズのモーションベクター、VRAM 警告で FG が落ちない、AI の経路修正、物理クラッシュ対策、テクスチャ常駐の改善、#825・#827（作り直し版）ほか。衝突は起動画面の画像だけで、GOYU 側を残した。武器が真っ黒になる修正は本家 v0.6 にもまだ無いので引き続き必要
      - mod 側は DLSS 0.72 と Compat Patch 0.72 が必要。v0.6 のインストーラーは MO2 の modlist や起動設定を書き換えるので使わず、必要な MOD だけ手で入れる
   10. ショットガンがケースの弾でリロードできない問題の修正（2026-11-14）：`CWeapon::GetAmmoCount_forType` がバッグとベルトしか数えず、ケース（`CInventoryContainer`）の中の弾を数えていなかった。弾を取り出す `CInventory::GetAny` はケースの中も探すので、数と実際が食い違っていた。持ち歩いているケースの中の弾も数えるようにした
+  11. Quark Engine（quark-engine-stalker）の gamedata 側の高速化を移植（2026-11-16）：`axr_main.script`（コールバックの呼び出し順をキャッシュ）、`dxml_core.script`（タグの解析結果をキャッシュ、どのMODも開かないXMLは Lua で解析し直さない、ファイルリーダーを閉じる）、`aaaa_script_fixes_mp.script`（スコープ判定のソートをキャッシュ、アノマリー処理でカメラ位置とミュータント位置を1回だけ読む）、`_g_patches.script`（IsWeapon/IsLauncher）。Quark の gamedata は古い版が土台なので丸ごと差し替えず、`QUARK:` の部分だけ移した。メインスレッドのコア固定（`cpu_placement`、`orchestration_threads`）は本家 v0.6 にすでに入っていて動作確認済み
 - **入れていないもの（不要になった）**
   - 屋内銃声の修正：本家に取り込み済み
   - デバイス所持で FG が止まる修正：本家の FG（`FrameGeneration.cpp` の `Eligible()`）にはその停止条件がない
