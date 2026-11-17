@@ -876,7 +876,8 @@ void CRender::add_SkeletonWallmark(const Fmatrix* xf, IKinematics* obj, IWallMar
 
 void CRender::remove_SkeletonWallmarksFromObject(IKinematics* obj)
 {
-    Wallmarks->RemoveSkeletonWallmarksFromObject(static_cast<CKinematics*>(obj));
+    if (Wallmarks && obj)
+        Wallmarks->RemoveSkeletonWallmarksFromObject(static_cast<CKinematics*>(obj));
 }
 
 void CRender::update_Wallmarks()

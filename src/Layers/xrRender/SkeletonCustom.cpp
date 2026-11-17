@@ -949,6 +949,15 @@ void CKinematics::RenderWallmark(intrusive_ptr<CSkeletonWallmark> wm, FVF::LIT* 
 
 void CKinematics::ClearWallmarks()
 {
+#ifndef _EDITOR
+	// The wallmarks engine keeps its own list of skeleton wallmarks that point back at this
+	// model (and at its owner's XFORM). Clearing only our list left those entries behind, so
+	// a model returned to the pool (Depart) or deleted rendered through dangling pointers on
+	// the next frame (crash in CKinematics::RenderWallmark). Take them out of the engine first;
+	// the engine lock is released again before wallmarks_cs is taken, so the two are never held together here.
+	if (::Render)
+		::Render->remove_SkeletonWallmarksFromObject(this);
+#endif
 	xrCriticalSectionGuard guard(wallmarks_cs);
 	//	for (SkeletonWMVecIt it=wallmarks.begin(); it!=wallmarks.end(); it++)
 	//		xr_delete	(*it);
