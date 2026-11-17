@@ -31,6 +31,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
      - mod 側は DLSS 0.72 と Compat Patch 0.72 が必要。v0.6 のインストーラーは MO2 の modlist や起動設定を書き換えるので使わず、必要な MOD だけ手で入れる
   10. ショットガンがケースの弾でリロードできない問題の修正（2026-11-14）：`CWeapon::GetAmmoCount_forType` がバッグとベルトしか数えず、ケース（`CInventoryContainer`）の中の弾を数えていなかった。弾を取り出す `CInventory::GetAny` はケースの中も探すので、数と実際が食い違っていた。持ち歩いているケースの中の弾も数えるようにした
   11. Quark Engine（quark-engine-stalker）の gamedata 側の高速化を移植（2026-11-16）：`axr_main.script`（コールバックの呼び出し順をキャッシュ）、`dxml_core.script`（タグの解析結果をキャッシュ、どのMODも開かないXMLは Lua で解析し直さない、ファイルリーダーを閉じる）、`aaaa_script_fixes_mp.script`（スコープ判定のソートをキャッシュ、アノマリー処理でカメラ位置とミュータント位置を1回だけ読む）、`_g_patches.script`（IsWeapon/IsLauncher）。Quark の gamedata は古い版が土台なので丸ごと差し替えず、`QUARK:` の部分だけ移した。メインスレッドのコア固定（`cpu_placement`、`orchestration_threads`）は本家 v0.6 にすでに入っていて動作確認済み
+  12. 被弾跡（スケルトンのウォールマーク）のクラッシュ修正その2（`054608592`、2026-11-17、Actions 44036170978）：`CKinematics::ClearWallmarks` で、エンジン側（`CWallmarksEngine`）の一覧からもそのモデルの被弾跡を消す。モデルがプールに戻る（Depart）・削除されるときに残り、スコープの PiP 描画中に `CKinematics::RenderWallmark` で落ちていた
 - **入れていないもの（不要になった）**
   - 屋内銃声の修正：本家に取り込み済み
   - デバイス所持で FG が止まる修正：本家の FG（`FrameGeneration.cpp` の `Eligible()`）にはその停止条件がない
