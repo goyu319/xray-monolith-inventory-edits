@@ -3,7 +3,9 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "PainterBloodOwner.h"
 #pragma hdrstop
+#include "BloodProjectionFootprint.h"
 
 #pragma warning(disable:4995)
 #include <d3dx9.h>
@@ -395,6 +397,8 @@ void CSkeletonX_ST::Copy(dxRender_Visual* P)
 {
 	inherited1::Copy(P);
 	CSkeletonX_ST* X = (CSkeletonX_ST*)P;
+    painter_tissue=X->painter_tissue;
+    painter_required_fields=X->painter_required_fields;
 	_Copy((CSkeletonX*)X);
 }
 
@@ -411,13 +415,15 @@ void CSkeletonX_PM::Render(float LOD)
 	}
 	VERIFY(lod_id>=0 && lod_id<int(nSWI.count));
 	FSlideWindow& SW = nSWI.sw[lod_id];
-	_Render(rm_geom, SW.num_verts, SW.offset, SW.num_tris);
+	_Render(rm_geom, vBase, SW.num_verts, SW.offset, SW.num_tris);
 }
 
 void CSkeletonX_ST::Render(float LOD)
 {
 	PROF_EVENT("CSkeletonX_ST::Render");
-	_Render(rm_geom, vCount, 0, dwPrimitives);
+	// vBase/iBase: this child's rows inside its buffers (0 for OGF children,
+	// the packet offsets for runtime children sharing one VB/IB per publication).
+	_Render(rm_geom, vBase, vCount, iBase, dwPrimitives);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -428,6 +434,8 @@ void CSkeletonX_PM::Release()
 
 void CSkeletonX_ST::Release()
 {
+    painter_tissue.reset();
+    painter_required_fields.reset();
 	inherited1::Release();
 }
 
@@ -443,6 +451,9 @@ void CSkeletonX_PM::Load(const char* N, IReader* data, u32 dwFlags)
 #endif	//	USE_DX10
 	vBase = 0;
 	_Load_hw(*this, _verts_);
+#ifdef USE_DX11
+    PainterBloodWarmPrograms(shader); // existing model-load boundary, never first blood draw
+#endif
 }
 
 void CSkeletonX_ST::Load(const char* N, IReader* data, u32 dwFlags)
@@ -456,6 +467,9 @@ void CSkeletonX_ST::Load(const char* N, IReader* data, u32 dwFlags)
 #endif	//	USE_DX10
 	vBase = 0;
 	_Load_hw(*this, _verts_);
+#ifdef USE_DX11
+    PainterBloodWarmPrograms(shader); // source and future sever/dent variants
+#endif
 }
 
 #if defined(USE_DX10) || defined(USE_DX11)
@@ -615,9 +629,14 @@ void CSkeletonX_ext::_Load_hw(Fvisual& V, void* _verts_)
 		{
 			{
 				//	Back up vertex data since we can't read vertex buffer in DX10
-				u32 size = V.vCount * sizeof(vertBoned4W);
-				u32 crc = crc32(_verts_, size);
-				Vertices4W.create(crc, V.vCount, (vertBoned4W*)_verts_);
+				// Runtime children already own this exact software backup. Avoid
+				// inserting each damaged generation into the permanent model cache.
+				if (!Vertices4W.is_unique() || *Vertices4W != _verts_ || Vertices4W.size() != V.vCount)
+				{
+					u32 size = V.vCount * sizeof(vertBoned4W);
+					u32 crc = crc32(_verts_, size);
+					Vertices4W.create(crc, V.vCount, (vertBoned4W*)_verts_);
+				}
 			}
 
 			u32 vStride = D3DXGetDeclVertexSize(dwDecl_4W, 0);
@@ -964,12 +983,20 @@ void CSkeletonX_ext::_CollectBoneFaces(Fvisual* V, u32 iBase, u32 iCount)
 	}
 	R_CHK(V->p_rm_Indices->Unlock());
 #endif	//USE_DX10	//	Don't use hardware buffers in DX10 since we can't read them
+#ifdef USE_DX11
+	// Collection appends a face for every vertex/influence. The parent removes
+	// within-bone duplicates later; remember the window without caching raw lists.
+	m_ProjectionIndexBase = iBase;
+	m_ProjectionIndexCount = iCount;
+#endif
 }
 
 void CSkeletonX_ST::AfterLoad(CKinematics* parent, u16 child_idx)
 {
 	inherited2::AfterLoad(parent, child_idx);
-	inherited2::_CollectBoneFaces(this, iBase, iCount);
+	// An ST child's faces start at 0 of its own index copy (m_Indices on DX10/11,
+	// its own IB on DX9); Fvisual::iBase is the GPU draw offset only.
+	inherited2::_CollectBoneFaces(this, 0, iCount);
 }
 
 void CSkeletonX_PM::AfterLoad(CKinematics* parent, u16 child_idx)
@@ -1114,8 +1141,7 @@ BOOL CSkeletonX_ext::_PickBone(IKinematics::pick_result& r, float dist, const Fv
                                Fvisual* V, u16 bone_id, u32 iBase, u32 iCount)
 {
 	VERIFY(Parent && (ChildIDX!=u16(-1)));
-	CBoneData& BD = Parent->LL_GetData(bone_id);
-	CBoneData::FacesVec* faces = &BD.child_faces[ChildIDX];
+	CBoneData::FacesVec* faces = &Parent->GeometryFaces(bone_id, ChildIDX);
 	BOOL result = FALSE;
 	u16* indices = 0;
 #if defined(USE_DX10) || defined(USE_DX11)
@@ -1162,7 +1188,13 @@ BOOL CSkeletonX_ext::_PickBone(IKinematics::pick_result& r, float dist, const Fv
 BOOL CSkeletonX_ST::PickBone(IKinematics::pick_result& r, float dist, const Fvector& start, const Fvector& dir,
                              u16 bone_id)
 {
-	return inherited2::_PickBone(r, dist, start, dir, this, bone_id, iBase, iCount);
+	return inherited2::_PickBone(r, dist, start, dir, this, bone_id, 0, iCount); // own index copy: base 0
+}
+
+u32 CSkeletonX_PM::PainterPickIndexBase() // triggerhitch: the base PickBone below passes
+{
+	FSlideWindow& SW = nSWI.sw[0];
+	return iBase + SW.offset;
 }
 
 BOOL CSkeletonX_PM::PickBone(IKinematics::pick_result& r, float dist, const Fvector& start, const Fvector& dir,
@@ -1175,7 +1207,7 @@ BOOL CSkeletonX_PM::PickBone(IKinematics::pick_result& r, float dist, const Fvec
 
 void CSkeletonX_ST::EnumBoneVertices(SEnumVerticesCallback& C, u16 bone_id)
 {
-	inherited2::_EnumBoneVertices(C, this, bone_id, iBase, iCount);
+	inherited2::_EnumBoneVertices(C, this, bone_id, 0, iCount); // own index copy: base 0
 }
 
 void CSkeletonX_PM::EnumBoneVertices(SEnumVerticesCallback& C, u16 bone_id)
@@ -1242,7 +1274,8 @@ void CSkeletonX_ext::_FillVerticesHW1W(const Fmatrix& view, CSkeletonWallmark& w
 		float cosa = test_normal.dotproduct(normal);
 		if (cosa < EPS)
 			continue;
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
@@ -1295,7 +1328,8 @@ void CSkeletonX_ext::_FillVerticesHW2W(const Fmatrix& view, CSkeletonWallmark& w
 		float cosa = test_normal.dotproduct(normal);
 		if (cosa < EPS) continue;
 
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
@@ -1342,7 +1376,8 @@ void CSkeletonX_ext::_FillVerticesHW3W(const Fmatrix& view, CSkeletonWallmark& w
 		if (cosa < EPS)
 			continue;
 
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
@@ -1389,7 +1424,8 @@ void CSkeletonX_ext::_FillVerticesHW4W(const Fmatrix& view, CSkeletonWallmark& w
 		if (cosa < EPS)
 			continue;
 
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
@@ -1411,8 +1447,7 @@ void CSkeletonX_ext::_FillVertices(const Fmatrix& view, CSkeletonWallmark& wm, c
                                    Fvisual* V, u16 bone_id, u32 iBase, u32 iCount)
 {
 	VERIFY(Parent && (ChildIDX != u16(-1)));
-	CBoneData& BD = Parent->LL_GetData(bone_id);
-	CBoneData::FacesVec* faces = &BD.child_faces[ChildIDX];
+	CBoneData::FacesVec* faces = &Parent->GeometryFaces(bone_id, ChildIDX);
 	u16* indices = 0;
 #if    defined(USE_DX10) || defined(USE_DX11)
 	indices = *m_Indices;
@@ -1451,7 +1486,7 @@ void CSkeletonX_ext::_FillVertices(const Fmatrix& view, CSkeletonWallmark& wm, c
 void CSkeletonX_ST::FillVertices(const Fmatrix& view, CSkeletonWallmark& wm, const Fvector& normal, float size,
                                  u16 bone_id)
 {
-	inherited2::_FillVertices(view, wm, normal, size, this, bone_id, iBase, iCount);
+	inherited2::_FillVertices(view, wm, normal, size, this, bone_id, 0, iCount); // own index copy: base 0
 }
 
 void CSkeletonX_PM::FillVertices(const Fmatrix& view, CSkeletonWallmark& wm, const Fvector& normal, float size,
@@ -1535,8 +1570,7 @@ IC void TEnumBoneVertices(vertex_buffer_type vertices, u16* indices, CBoneData::
 void CSkeletonX_ext::_EnumBoneVertices(SEnumVerticesCallback& C, Fvisual* V, u16 bone_id, u32 iBase, u32 iCount) const
 {
 	VERIFY(Parent && (ChildIDX!=u16(-1)));
-	CBoneData& BD = Parent->LL_GetData(bone_id);
-	CBoneData::FacesVec* faces = &BD.child_faces[ChildIDX];
+	CBoneData::FacesVec* faces = &Parent->GeometryFaces(bone_id, ChildIDX);
 	u16* indices = 0;
 	//.	R_CHK				(V->pIndices->Lock(iBase,iCount,		(void**)&indices,	D3DLOCK_READONLY));
 
@@ -1582,3 +1616,5 @@ void CSkeletonX_ext::_EnumBoneVertices(SEnumVerticesCallback& C, Fvisual* V, u16
 	CHK_DX(V->p_rm_Indices->Unlock());
 #endif	//	USE_DX10
 }
+
+#include "RuntimeSkinnedChild_impl.h"

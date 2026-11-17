@@ -3,6 +3,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "pch_script.h"
+#include "painter_stream/NativeStream.h"
 #include "xrServer.h"
 #include "xrMessages.h"
 #include "xrServer_Objects_ALife_All.h"
@@ -805,6 +806,7 @@ void xrServer::SendTo_LL(ClientID ID, void* data, u32 size, u32 dwFlags, u32 dwT
 	if ((SV_Client && SV_Client->ID == ID) || (psNET_direct_connect))
 	{
 		// optimize local traffic
+        painter_stream::LocalDeliveryScope delivery(*this);
 		Level().OnMessage(data, size);
 	}
 	else
@@ -875,6 +877,7 @@ if( dbg_net_Draw_Flags.test( dbg_destroy ) )
 		Msg	("xrServer::entity_Destroy : [%d][%s][%s]",P->ID,P->name(),P->name_replace());
 #endif
 	R_ASSERT(P);
+	painter_stream::ServerRetired(*this,*P);
 	entities.erase(P->ID);
 	m_tID_Generator.vfFreeID(P->ID, Device.TimerAsync());
 

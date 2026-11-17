@@ -165,8 +165,17 @@ void Vision::feel_vision_update(Fvector& P, float dt, float vis_threshold)
 				seen.begin(), seen.end(),
 				diff.begin());
 			diff.resize(E - diff.begin());
-			for (u32 i = 0; i < diff.size(); i++)
-				o_delete(diff[i]);
+			if (!diff.empty())
+			{
+				xrSRWLockGuard visible_guard(&lock_visible, false);
+				feel_visible.erase(
+					std::remove_if(feel_visible.begin(), feel_visible.end(),
+						[this](const feel_visible_Item& item)
+						{
+							return std::binary_search(diff.begin(), diff.end(), item.O);
+						}),
+					feel_visible.end());
+			}
 		}
 
 		// Copy results and perform traces

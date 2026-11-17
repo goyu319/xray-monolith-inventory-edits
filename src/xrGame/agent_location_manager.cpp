@@ -13,6 +13,7 @@
 #include "agent_enemy_manager.h"
 #include "ai/stalker/ai_stalker.h"
 #include "cover_point.h"
+#include "painter_ai/EngineCombatAdapter.h"
 
 const float MIN_SUITABLE_ENEMY_DISTANCE = 3.f; //10.f;
 
@@ -129,6 +130,8 @@ bool CAgentLocationManager::suitable(CAI_Stalker* object, const CCoverPoint* loc
 
 void CAgentLocationManager::make_suitable(CAI_Stalker* object, const CCoverPoint* location) const
 {
+	if (painter::combat::engine::owns(*object))
+		return;
 	this->object().member().member(object).cover(location);
 
 	if (!location)

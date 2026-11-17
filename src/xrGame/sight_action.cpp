@@ -390,24 +390,27 @@ void CSightAction::predict_object_position(bool use_exact_position)
 	else
 		m_vector3d = m_object->sight().object_position();
 
-	u32 const count = m_object_to_look->ps_Size();
+	// Native combat requires the present hostile body in the muzzle ray. Its
+	// explicit option changes only motion lead; keep visible-point selection
+	// and the exact measured eye origin shared with ordinary FireObject sight.
+	u32 const count = m_predict_motion ? m_object_to_look->ps_Size() : 0;
 	if (count > 1)
 	{
 		CObject::SavedPosition const current_position = m_object_to_look->ps_Element(count - 1);
 		VERIFY(Device.dwTimeGlobal >= current_position.dwTime);
 
 		CObject::SavedPosition previous_position = m_object_to_look->ps_Element(count - 2);
-		for (int i = 3; (current_position.dwTime == previous_position.dwTime) && (i <= (int)count); ++i)
+		for (int i = 3; (current_position.dwPositionTime == previous_position.dwPositionTime) && (i <= (int)count); ++i)
 			previous_position = m_object_to_look->ps_Element(count - i);
 
 		if (Device.dwTimeGlobal - previous_position.dwTime < 300)
 		{
-			if (current_position.dwTime > previous_position.dwTime)
+			if (current_position.dwPositionTime > previous_position.dwPositionTime)
 			{
 				Fvector offset = Fvector().sub(current_position.vPosition, previous_position.vPosition);
 				offset.y = 0.f;
 				Fvector const velocity = Fvector(offset).div(
-					float(current_position.dwTime - previous_position.dwTime) / 1000.f);
+					float(current_position.dwPositionTime - previous_position.dwPositionTime) / 1000.f);
 				float const predict_time = m_object->aim_predict_time(); //*Device.fTimeDelta;
 				m_vector3d.mad(velocity, predict_time);
 			}

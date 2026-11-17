@@ -969,6 +969,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		contact[0].depth = *depth;
 
 		ret++;
+		// Every further edge contact below is written only while the caller has room for it (maxc).
 
 
 
@@ -976,7 +977,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		for (i=0; i<3; i++) dif[i]=p2[i]-pa0[i];
 		sign = (dDOT14(dif,R2+ibnx) > 0.f) ? REAL(1.0) : REAL(-1.0);
 
-		if(CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibnx,sign,pb1))
+		if(ret<maxc&&CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibnx,sign,pb1))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pb1[i];
 			for (i=0; i<3; i++) dif[i]=pb1[i]-pa0[i];
@@ -986,7 +987,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		}
 
 
-		if(CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibcr,1,pb2))
+		if(ret<maxc&&CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibcr,1,pb2))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pb2[i];
 			for (i=0; i<3; i++) dif[i]=pb2[i]-pa0[i];
@@ -996,7 +997,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		}
 
 
-		if(CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibcr,-1,pb3))
+		if(ret<maxc&&CrossBoxSide44(pa0,R1,iacr,p2,R2,side2,ibcr,-1,pb3))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pb3[i];
 			for (i=0; i<3; i++) dif[i]=pb3[i]-pa0[i];
@@ -1009,7 +1010,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 
 		for (i=0; i<3; i++) dif[i]=p1[i]-pb0[i];
 		sign = (dDOT14(dif,R1+ianx) > 0.f) ? REAL(1.0) : REAL(-1.0);
-		if(CrossBoxSide44(pb0,R2,ibcr,p1,R1,side1,ianx,sign,pa1))
+		if(ret<maxc&&CrossBoxSide44(pb0,R2,ibcr,p1,R1,side1,ianx,sign,pa1))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pa1[i];
 			for (i=0; i<3; i++) dif[i]=pa1[i]-pb0[i];
@@ -1019,7 +1020,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		}
 
 
-		if(CrossBoxSide44(pb0,R2,ibcr,p2,R1,side1,iacr,1,pa2))
+		if(ret<maxc&&CrossBoxSide44(pb0,R2,ibcr,p2,R1,side1,iacr,1,pa2))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pa2[i];
 			for (i=0; i<3; i++) dif[i]=pa2[i]-pb0[i];
@@ -1029,7 +1030,7 @@ int dBoxBox (const dVector3 p1, const dMatrix3 R1,
 		}
 
 
-		if(CrossBoxSide44(pb0,R2,ibcr,p2,R1,side1,iacr,-1,pa3))
+		if(ret<maxc&&CrossBoxSide44(pb0,R2,ibcr,p2,R1,side1,iacr,-1,pa3))
 		{
 			for (i=0; i<3; i++)CONTACT(contact,skip*ret)->pos[i]=pa3[i];
 			for (i=0; i<3; i++) dif[i]=pa3[i]-pb0[i];

@@ -293,8 +293,9 @@ public:
 			lens_cube[CROS_impl::CUBE_FACE_NEG_Z], 0.f);
 		//--DSR-- HeatVision_start
 		float hotness = O->GetHotness();
-		o_hotness_own = ShaderBus::object_hotness(O->renderable.bus_values, hotness);
-		RCache.hemi.set_hotness(hotness, O->GetTransparency(), 0.f, 0.f);			//--DSR-- HeatVision
+		const bool corpse=ps_r2_heatvision > 0 && O->IsThermalCorpse();
+		o_hotness_own = ShaderBus::object_hotness(O->renderable.bus_values, hotness) || corpse;
+		RCache.hemi.set_hotness(hotness, O->GetTransparency(), corpse ? 1.f : 0.f, 0.f);			//--DSR-- HeatVision
 		RCache.hemi.set_glowing(															//--DSR-- SilencerOverheat
 			sil_glow_color.x, 
 			sil_glow_color.y,
@@ -309,20 +310,25 @@ public:
 		// an object's own obj_hotness skips the hot texture check, only for the draw right after apply_object
 		const bool hotness_own = o_hotness_own;
 		o_hotness_own = false;
+		// Tissue-only wound programs (BloodEngine) have no s_base; object lighting still belongs to this draw.
+		float mtl = 0.f;
 		R_constant* C = RCache.get_c_sbase(c_sbase); // get sampler
-		if (0 == C) return;
-		VERIFY(RC_dest_sampler == C->destination);
-		VERIFY(RC_dx10texture == C->type);
-		CTexture* T = RCache.get_ActiveTexture(u32(C->samp.index));
-		VERIFY(T);
-		float mtl = T ? T->m_material : 0.f;
+		if (C)
+		{
+			VERIFY(RC_dest_sampler == C->destination);
+			VERIFY(RC_dx10texture == C->type);
+			CTexture* T = RCache.get_ActiveTexture(u32(C->samp.index));
+			VERIFY(T);
+			mtl = T ? T->m_material : 0.f;
 #ifdef	DEBUG
-        if (ps_r2_ls_flags.test(R2FLAG_GLOBALMATERIAL))	mtl=ps_r2_gmaterial;
+            if (ps_r2_ls_flags.test(R2FLAG_GLOBALMATERIAL))	mtl=ps_r2_gmaterial;
 #endif
-		if (!hotness_own && !(T && T->m_is_hot))						//--DSR-- HeatVision
-			RCache.hemi.set_hotness(0.f, 0.f, 0.f, 0.f);
-		if (!(T && T->m_is_glowing))									//--DSR-- SilencerOverheat
-			RCache.hemi.set_glowing(0.f, 0.f, 0.f, 0.f);
+			if (!hotness_own && !(T && T->m_is_hot))					//--DSR-- HeatVision
+				RCache.hemi.set_hotness(0.f, 0.f, 0.f, 0.f);
+			if (!(T && T->m_is_glowing))								//--DSR-- SilencerOverheat
+				RCache.hemi.set_glowing(0.f, 0.f, 0.f, 0.f);
+		}
+		// Without texture metadata retain apply_object's own heat/corpse/glow values, as before.
 
 		RCache.hemi.set_material(o_hemi, o_sun, 0, (mtl < 5 ? (mtl + .5f) / 4.f : mtl));
 		RCache.hemi.set_pos_faces(o_hemi_cube[CROS_impl::CUBE_FACE_POS_X],
@@ -396,6 +402,8 @@ public:
 	virtual void add_StaticWallmark(IWallMarkArray* pArray, const Fvector& P, float s, CDB::TRI* T, Fvector* V, float ttl, bool ignore_opt, float rotation);
 
 	virtual void add_StaticWallmark(const wm_shader& S, const Fvector& P, float s, CDB::TRI* T, Fvector* V);
+    void add_BloodWallmark(IWallMarkArray* array,const Fvector& P,float size,CDB::TRI* tri,Fvector* verts,
+        float ttl,bool ignore_opt,float rotation,const BloodThermalStamp& stamp) override;
 	virtual void clear_static_wallmarks();
 	virtual void add_SkeletonWallmark(intrusive_ptr<CSkeletonWallmark> wm);
 	virtual void add_SkeletonWallmark(const Fmatrix* xf, CKinematics* obj, ref_shader& sh, const Fvector& start,
@@ -403,6 +411,8 @@ public:
 	virtual void add_SkeletonWallmark(const Fmatrix* xf, IKinematics* obj, IWallMarkArray* pArray, const Fvector& start,
 	                                  const Fvector& dir, float size, float ttl = 0.f, bool ignore_opt = false);
 
+    void add_BloodSkeletonWallmark(const Fmatrix*,IKinematics*,IWallMarkArray*,const Fvector&,
+        const Fvector&,float,float,bool,const BloodThermalStamp&) override;
     virtual void remove_SkeletonWallmarksFromObject(IKinematics* obj);
     virtual void update_Wallmarks();
 

@@ -966,6 +966,9 @@ static class ssfx_blood_decals : public R_constant_setup
 		RCache.set_c(C, ps_ssfx_blood_decals);
 	}
 }    ssfx_blood_decals;
+#ifdef USE_DX11
+R_constant_setup* PainterBloodDecalControls(){return &ssfx_blood_decals;} // exact native live binding
+#endif
 
 static class ssfx_hud_drops_1 : public R_constant_setup
 {

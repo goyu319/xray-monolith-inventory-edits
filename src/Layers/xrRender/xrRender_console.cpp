@@ -3,6 +3,18 @@
 
 #include	"xrRender_console.h"
 #include	"dxRenderDeviceRender.h"
+#include "BloodNativeProfile.h"
+#include "PainterBloodModelSize.h"
+#ifdef USE_DX11
+#include "WallmarksEngine.h"
+#include "BloodGpuParticles.h"
+int r_blood_gpu = 1;
+// Painter runtime geometry publication: 0 synchronous (legacy), 1 prepared off
+// the main thread and committed atomically at a later barrier (default),
+// 2 = 1 plus an install-time byte comparison against the synchronous build.
+int r_painter_publish = 1;
+int r_blood_gpu_create = 1;
+#endif
 
 #include "../../build_config_defines.h"
 #include "Debug/renderdoc_app.h" // r__rdc_capture
@@ -20,6 +32,10 @@ xr_token fsr3_quality_token[] = {
 };
 u32 ps_r_dlss_preset = 0;
 float ps_r_dlss_sharpness = 0.0f;
+// Grass instancing (R12): one instanced draw per grass type and pass instead of 61-blade batches. Off by default;
+// grass types without a matching "<vs>_inst" vertex shader keep the batched path either way.
+u32 ps_r__grass_instancing = 0;
+xr_token grass_instancing_token[] = {{"off", 0}, {"on", 1}, {nullptr, 0}};
 // 1 (default) = Halton raster jitter, 0 = disable it for the whole jitter chain.
 int ps_r_upscaler_jitter = 1;
 // 1 (default) = fill zero motion vectors with camera-only vectors from depth,
@@ -648,6 +664,12 @@ float ps_r2_gloss_min = 0.0f;
 // demonized
 BOOL occq_debug = FALSE;
 BOOL r_blood_decals_on_objects = FALSE;
+float ps_r_blood_decal_model_max_size = PainterBloodModelSize::DefaultLimit;
+// bloodfix 2026-11-13: MiB for all bodies' blood textures together (one table per body, plus the rows in flight to them).
+// Read when the bake worker starts; past it the least recently stained body's blood makes room for new stains.
+int ps_r_blood_bake_memory = 256;
+// MiB for one body's (and its pieces') blood texture; at the cap the body's own oldest stains make room.
+int ps_r_blood_bake_body_memory = 8;
 
 int opt_static = 2;
 int opt_dynamic = 2;
@@ -928,6 +950,135 @@ public:
 		sscanf(args, "%u", &frames);
 		rdc_trigger_capture(frames);
 	}
+};
+
+class CCC_BloodNativeCapture : public IConsole_Command
+{
+    static bool WriteCapture(const BloodNativeProfile::CaptureView& capture)
+    {
+        SYSTEMTIME timestamp;
+        GetSystemTime(&timestamp);
+        string_path name;
+        // All writes use the current game's appdata alias. UTC time, process,
+        // capture and a collision suffix avoid overwriting earlier captures.
+        unsigned suffix = 0;
+        do
+        {
+            xr_sprintf(name, "blood_native_%04u%02u%02u_%02u%02u%02u_%03u_pid%lu_capture%llu_%u.csv",
+                timestamp.wYear, timestamp.wMonth, timestamp.wDay, timestamp.wHour,
+                timestamp.wMinute, timestamp.wSecond, timestamp.wMilliseconds,
+                GetCurrentProcessId(), static_cast<unsigned long long>(capture.captureId), suffix++);
+        }
+        while (FS.exist("$app_data_root$", name));
+
+        IWriter* file = FS.w_open("$app_data_root$", name);
+        if (!file) return false;
+        struct CloseWriter
+        {
+            IWriter*& file;
+            ~CloseWriter() { FS.w_close(file); }
+        } closeWriter{file};
+        if (!file->valid()) return false;
+
+        file->w_string("# blood_native_capture_version,5");
+        file->w_string("# timing,unsmoothed CPU elapsed QPC ticks; not GPU execution time");
+        file->w_string("# overhead,enabled capture adds clock reads atomic operations and event writes; no overhead subtraction");
+        file->w_string("# nesting,stages can overlap and nest; do not sum parent and child durations");
+        file->w_string("# batching,RenderStatic and RenderBody cover each shader batch including traversal culling and nested stream work");
+        file->w_string("# retention,RenderTotal StaticCreate BodyCreate main-thread frame/present/wait scopes and all v5 coarse renderer scopes always eligible; other events require >= 0.1 ms; all details subject to capacity");
+        file->w_string("# frame_semantics,FrameTotal is normal on_idle CPU elapsed after loading checks; PresentWait is CPU elapsed inside Present; neither is a GPU timestamp or displayed-frame duration");
+        file->w_string("# render_phases,DeviceBegin only runs for an active device; RenderCallbacks covers seqRender; RenderStatistics covers optional statistics drawing; R4 scene before/setup/after wallmarks excludes the existing RenderTotal wallmarks scope");
+        file->w_string("# render_nesting,RenderSceneAfterWallmarks contains sun lights combine and final HUD UI; RenderForward can nest inside RenderCombine; early scene returns emit only the before-wallmarks phase; earlier HUD geometry belongs to the before-wallmarks phase; phases can occur multiple times per frame");
+        file->w_string("# worker_frames,worker-capable hit/bullet/ray scopes omit frame IDs; correlate by QPC timestamp and thread");
+        file->w_string("# summaries,count total and max include EVERY admitted scope including filtered and overflow events");
+        file->w_string("# sequence,event slots follow completion order; use begin_ticks to order starts");
+        file->w_string("# stop,scopes admitted before stop finish normally and may end after stop_ticks");
+        file->w_string("# frame_id,4294967295 means unavailable; worker scopes do not read the mutable engine frame counter");
+        file->w_printf("# frequency,%llu\r\n# start_ticks,%llu\r\n# stop_ticks,%llu\r\n",
+            static_cast<unsigned long long>(capture.frequency), static_cast<unsigned long long>(capture.startTicks),
+            static_cast<unsigned long long>(capture.stopTicks));
+        file->w_printf("# capacity,%llu\r\n# retained_attempts,%llu\r\n# recorded,%llu\r\n# overflow,%llu\r\n",
+            static_cast<unsigned long long>(capture.capacity), static_cast<unsigned long long>(capture.attempts),
+            static_cast<unsigned long long>(capture.count), static_cast<unsigned long long>(capture.overflow));
+        file->w_printf("# completed_scopes,%llu\r\n# filtered,%llu\r\n# threshold_ticks,%llu\r\n",
+            static_cast<unsigned long long>(capture.completed), static_cast<unsigned long long>(capture.filtered),
+            static_cast<unsigned long long>(capture.thresholdTicks));
+        const double millisecondsPerTick = 1000.0 / static_cast<double>(capture.frequency);
+        file->w_string("# stage_summary_columns,stage,count,total_ticks,max_ticks,total_cpu_ms,max_cpu_ms");
+        for (std::size_t stage = 0; stage < static_cast<std::size_t>(BloodNativeProfile::Stage::Count); ++stage)
+        {
+            const auto& summary = capture.stages[stage];
+            file->w_printf("# stage_summary,%s,%llu,%llu,%llu,%.9f,%.9f\r\n",
+                BloodNativeProfile::StageName(static_cast<BloodNativeProfile::Stage>(stage)),
+                static_cast<unsigned long long>(summary.count), static_cast<unsigned long long>(summary.totalTicks),
+                static_cast<unsigned long long>(summary.maxTicks), static_cast<double>(summary.totalTicks) * millisecondsPerTick,
+                static_cast<double>(summary.maxTicks) * millisecondsPerTick);
+        }
+
+        file->w_string("sequence,stage,thread_id,frame_id,begin_ticks,duration_ticks,start_ms,cpu_elapsed_ms");
+        for (std::uint64_t index = 0; index < capture.count; ++index)
+        {
+            const auto& event = capture.events[index];
+            file->w_printf("%llu,%s,%u,%u,%llu,%llu,%.9f,%.9f\r\n",
+                static_cast<unsigned long long>(index), BloodNativeProfile::StageName(event.stage),
+                event.threadId, event.frameId, static_cast<unsigned long long>(event.beginTicks),
+                static_cast<unsigned long long>(event.durationTicks),
+                static_cast<double>(event.beginTicks - capture.startTicks) * millisecondsPerTick,
+                static_cast<double>(event.durationTicks) * millisecondsPerTick);
+        }
+        string_path resolved;
+        FS.update_path(resolved, "$app_data_root$", name);
+        Msg("* Blood native capture: %llu scopes, %llu events, %llu overflow (summaries complete); saved %s",
+            static_cast<unsigned long long>(capture.completed), static_cast<unsigned long long>(capture.count),
+            static_cast<unsigned long long>(capture.overflow), resolved);
+        return true;
+    }
+
+public:
+    explicit CCC_BloodNativeCapture(LPCSTR name) : IConsole_Command(name) {}
+    void Save(IWriter*) override {} // Transient: never enable capture via a saved user.ltx.
+    void Info(TInfo& info) override { xr_strcpy(info, "start | stop | dump (transient CPU capture)"); }
+    void Status(TStatus& status) override
+    {
+        xr_strcpy(status, BloodNativeProfile::Instance().Capturing() ? "capturing" : "stopped");
+    }
+    void Execute(LPCSTR args) override
+    {
+        using BloodNativeProfile::Result;
+        auto& recorder = BloodNativeProfile::Instance();
+        Result result;
+        if (xr_strcmp(args, "start") == 0)
+        {
+            result = recorder.Start();
+            if (result == Result::Success)
+                Msg("* Blood native capture started (64 MiB; 0.1 ms event filter, all stage summaries). CPU timings include capture overhead; use stop, then dump.");
+        }
+        else if (xr_strcmp(args, "stop") == 0)
+        {
+            result = recorder.Stop();
+            if (result == Result::Success)
+                Msg("* Blood native capture stopped; %llu scopes finishing. Dump when ready (never waits for workers).",
+                    static_cast<unsigned long long>(recorder.ActiveWriters()));
+        }
+        else if (xr_strcmp(args, "dump") == 0)
+            result = recorder.Dump(WriteCapture);
+        else
+        {
+            InvalidSyntax();
+            return;
+        }
+
+        switch (result)
+        {
+        case Result::Success: break;
+        case Result::CaptureActive: Msg("! Blood native capture is running. Stop before dump or restart."); break;
+        case Result::Busy: Msg("! Blood native capture has pending writers or a command in progress. Retry after they finish."); break;
+        case Result::NoCapture: Msg("! Blood native capture has no data. Use start first."); break;
+        case Result::AllocationFailed: Msg("! Blood native capture could not allocate its buffer; capture remains off."); break;
+        case Result::ClockUnavailable: Msg("! Blood native capture has no usable QPC frequency; capture remains off."); break;
+        case Result::WriteFailed: Msg("! Blood native capture could not write its CSV; stopped data remains available."); break;
+        }
+    }
 };
 
 class CCC_Screenshot : public IConsole_Command
@@ -1580,12 +1731,103 @@ public:
 	virtual void Info(TInfo& I) { xr_strcpy(I, sizeof(I), "tex_res_selftest [count=8] - demote then promote back N loaded textures"); }
 };
 
+#ifdef USE_DX11
+class CCC_BloodGpuMode : public CCC_Integer
+{
+public:
+    CCC_BloodGpuMode(LPCSTR name) : CCC_Integer(name, &r_blood_gpu, 0, 2) {}
+    void Execute(LPCSTR args) override
+    {
+        if (!xr_strcmp(args, "on")) args = "1";
+        else if (!xr_strcmp(args, "off")) args = "0";
+        if (xr_strcmp(args, "0") && xr_strcmp(args, "1") && xr_strcmp(args, "2"))
+        {
+            InvalidSyntax();
+            return;
+        }
+        CCC_Integer::Execute(args);
+        if (r_blood_gpu == 0)
+            Msg("* Blood GPU off: CPU body-wallmark rendering and exact-pose cache; off is saved in user.ltx.");
+        else if (r_blood_gpu == 1)
+            Msg("* Blood GPU on: body marks skin on the GPU in one batch per frame (one bone palette per body); CPU fallback remains available. On is saved in user.ltx.");
+        else
+            Msg("* Blood GPU diagnostic mode 2: all eligible body marks use GPU skinning this session; saving writes normal enabled mode 1.");
+    }
+    void Save(IWriter* writer) override
+    {
+        // Persist the ordinary on/off choice; diagnostic mode is session-only.
+        writer->w_printf("%s %d\r\n", cName, r_blood_gpu == 0 ? 0 : 1);
+    }
+    void Info(TInfo& info) override
+    {
+        xr_strcpy(info, "0/off = CPU; 1/on = hybrid GPU (default); 2 = session diagnostic (saved as 1)");
+    }
+};
+class CCC_BloodGpuCreate : public CCC_Integer
+{
+public:
+    CCC_BloodGpuCreate(LPCSTR name) : CCC_Integer(name, &r_blood_gpu_create, 0, 1) {}
+    void Execute(LPCSTR args) override
+    {
+        if (!xr_strcmp(args, "on")) args = "1";
+        else if (!xr_strcmp(args, "off")) args = "0";
+        if (xr_strcmp(args, "0") && xr_strcmp(args, "1"))
+        {
+            InvalidSyntax();
+            return;
+        }
+        CCC_Integer::Execute(args);
+        if (r_blood_gpu_create)
+            Msg("* Blood GPU creation enabled for newly loaded models. Restart the game after enabling; GPU blood rendering must also be on. CPU fallback remains available.");
+        else
+            Msg("* Blood GPU creation disabled; body marks use CPU creation. Restart the game to release preloaded creation caches.");
+    }
+    void Info(TInfo& info) override
+    {
+        xr_strcpy(info, "0/off = CPU creation; 1/on = experimental GPU creation (default); restart after changing; requires r_blood_gpu on");
+    }
+};
+class CCC_BloodGpuStats : public IConsole_Command
+{
+public:
+    CCC_BloodGpuStats(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = TRUE; }
+    void Execute(LPCSTR) override
+    {
+        if (RImplementation.Wallmarks) RImplementation.Wallmarks->DumpGpuWallmarkStats();
+        else Msg("* Blood GPU: level wallmarks not initialized; mode=%d", r_blood_gpu);
+        const auto particles = BloodGpuParticles::GetCounters();
+        Msg("* Blood GPU particles: batches=%llu sprites_prepared=%llu sprites_drawn=%llu fallbacks=%llu resource_failures=%llu capacity_fallbacks=%llu gpu_bytes=%llu",
+            static_cast<unsigned long long>(particles.batches),
+            static_cast<unsigned long long>(particles.sprites_prepared),
+            static_cast<unsigned long long>(particles.sprites_drawn),
+            static_cast<unsigned long long>(particles.fallbacks),
+            static_cast<unsigned long long>(particles.resource_failures),
+            static_cast<unsigned long long>(particles.capacity_fallbacks),
+            static_cast<unsigned long long>(particles.gpu_bytes));
+    }
+    void Save(IWriter*) override {}
+};
+#endif
 //-----------------------------------------------------------------------
 void xrRender_initconsole()
 {
+#ifdef USE_DX11
+	Msg("* Painter blood burst test: native overlap geometry, independent particle creation and batched GPU blood sprites; saved GPU choice respected; native capture off by default (64 MiB)");
+    CMD1(CCC_BloodGpuMode, "r_blood_gpu");
+    CMD1(CCC_BloodGpuStats, "r_blood_gpu_stats");
+    CMD1(CCC_BloodGpuCreate, "r_blood_gpu_create");
+    CMD4(CCC_Integer, "r_painter_publish", &r_painter_publish, 0, 2);
+    Msg("* Painter GPU creation: enabled by default; saved choice respected; restart required after changing; CPU fallback available.");
+#else
+	Msg("* Painter engine release candidate 6: CPU body-wallmark rendering on this renderer; native capture off by default (64 MiB)");
+#endif
+	CMD1(CCC_BloodNativeCapture, "r_blood_native_capture");
 	CMD3(CCC_Preset, "_preset", &ps_Preset, qpreset_token);
 
 	CMD4(CCC_Integer, "rs_skeleton_update", &psSkeletonUpdate, 2, 128);
+	extern int ps_painter_ragdoll_override;
+	// ragdoll side files (meshes\painter\ragdoll): 0 off, 1 all physics fields, 2 limits/masses only; models loaded later
+	CMD4(CCC_Integer, "painter_ragdoll_override", &ps_painter_ragdoll_override, 0, 2);
 	CMD1(CCC_DumpResources,		"dump_resources");
 
 	CMD4(CCC_Float, "r__dtex_range", &r__dtex_range, 5, 175);
@@ -1657,6 +1899,9 @@ void xrRender_initconsole()
 	CMD2(CCC_tf_MipBias, "r__tf_mipbias", &ps_r__tf_Mipbias); // {-3 +3}
 
 	CMD4(CCC_Integer, "r__blood_decals_on_objects", &r_blood_decals_on_objects, 0, 1);
+	CMD4(CCC_Float, "r__blood_decal_model_max_size", &ps_r_blood_decal_model_max_size, PainterBloodModelSize::MinimumSetting, PainterBloodModelSize::MaximumSetting);
+	CMD4(CCC_Integer, "r__blood_bake_memory", &ps_r_blood_bake_memory, 32, 2048);
+	CMD4(CCC_Integer, "r__blood_bake_body_memory", &ps_r_blood_bake_body_memory, 1, 64);
 
 	// R1
 	CMD4(CCC_Float, "r1_ssa_lod_a", &ps_r1_ssaLOD_A, 16, 96);
@@ -2177,6 +2422,7 @@ void xrRender_initconsole()
 	CMD4(CCC_Integer, "r__cb_dirty_list", &ps_r__cb_dirty_list, 0, 2);
 	CMD3(CCC_Mask, "r__use_precompiled_shaders", &psDeviceFlags2, rsPrecompiledShaders); //Alundaio
 	CMD3(CCC_Mask, "r__enable_grass_shadow", &psDeviceFlags2, rsGrassShadow); //Alundaio
+	CMD3(CCC_Token, "r__grass_instancing", &ps_r__grass_instancing, grass_instancing_token);
 	CMD3(CCC_Mask, "r__no_scale_on_fade", &psDeviceFlags2, rsNoScale); //Alundaio
 #endif
 

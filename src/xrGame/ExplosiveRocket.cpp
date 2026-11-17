@@ -8,6 +8,7 @@
 #include "ExplosiveRocket.h"
 #include "physicsshellholder.h"
 #include "../xrphysics/physicsshell.h"
+#include "painter_voxel/RocketStrike.h" // rpgdirect: the rocket's flight
 
 
 CExplosiveRocket::CExplosiveRocket()
@@ -49,6 +50,9 @@ void CExplosiveRocket::Contact(const Fvector& pos, const Fvector& normal)
 {
 	if (eCollide == m_eState) return;
 
+	// rpgdirect: where the flight ended (the explosion finds the stalker it struck on the way: RocketStrike.h)
+	if (m_bLaunched && m_bEnginePresent)
+		painter_rocket_strike::ended(*cast_game_object(), m_pOwner, m_LaunchXForm.c, pos);
 	if (m_bLaunched)
 		CExplosive::GenExplodeEvent(pos, normal);
 
@@ -57,6 +61,7 @@ void CExplosiveRocket::Contact(const Fvector& pos, const Fvector& normal)
 
 void CExplosiveRocket::net_Destroy()
 {
+	painter_rocket_strike::forget(cast_game_object()->ID()); // rpgdirect: its flight
 	CInventoryItem::net_Destroy();
 	CExplosive::net_Destroy();
 	inherited::net_Destroy();
@@ -81,7 +86,19 @@ void CExplosiveRocket::UpdateCL()
 		inherited::UpdateCL();
 	}
 	else
+	{
+		// rpgdirect: the flight since the last frame against stalkers' bone shapes (RocketStrike.h) - through a shoulder, an
+		// arm or a leg the rocket flew on and went off behind the man; now it detonates at the first body it crosses
+		if (m_bLaunched && m_bEnginePresent && !m_contact.contact && (eEngine == m_eState || eFlying == m_eState) &&
+			m_pPhysicsShell && m_pPhysicsShell->isActive())
+		{
+			Fvector at, normal;
+			m_pPhysicsShell->GetGlobalPositionDynamic(&at);
+			if (painter_rocket_strike::frame(*cast_game_object(), m_pOwner, m_LaunchXForm.c, at, normal))
+				Contact(at, normal);
+		}
 		inherited::UpdateCL();
+	}
 }
 
 

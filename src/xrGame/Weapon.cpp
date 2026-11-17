@@ -190,6 +190,40 @@ void CWeapon::Hit(SHit* pHDS)
 	inherited::Hit(pHDS);
 }
 
+// Item frame from two hand bones, built exactly like the stock code: barrel from the grip bone toward the second bone,
+// roll from the grip bone's up axis, or (left-hand mirror frame) from that bone's axes applied to up_local. World space.
+static bool painter_weapon_hand_frame(IKinematics& V, CEntityAlive const& E, u16 const grip, u16 const second,
+									  Fvector const* const up_local, Fmatrix& result)
+{
+	Fmatrix const& mL = V.LL_GetTransform_safed(second);
+	Fmatrix const& mR = V.LL_GetTransform_safed(grip);
+	Fvector D;
+	D.sub(mL.c, mR.c);
+	if (fis_zero(D.magnitude()))
+	{
+		result.set(E.XFORM());
+		result.c.set(mR.c);
+		return true;
+	}
+	D.normalize();
+	Fvector up = mR.j;
+	if (up_local)
+		mR.transform_dir(up, *up_local);
+	Fvector R;
+	R.crossproduct(up, D);
+	Fvector N;
+	N.crossproduct(D, R);
+	// Coincident/collinear grip axes cannot define an item frame. Retain
+	// the last valid frame until the normal inventory handover completes.
+	if (!_valid(N) || fis_zero(N.square_magnitude()))
+		return false;
+	N.normalize();
+	result.set(R, N, D, mR.c);
+	result.mulA_43(E.XFORM());
+	return true;
+}
+
+
 void CWeapon::UpdateXForm()
 {
 	if (Device.dwFrame == dwXF_Frame)
@@ -229,38 +263,84 @@ void CWeapon::UpdateXForm()
 
 	if (boneR == -1) return;
 
-	if ((HandDependence() == hd1Hand) || (GetState() == eReload) || (!E->g_Alive()))
+	bool const grip_only = (HandDependence() == hd1Hand) || (GetState() == eReload) || (!E->g_Alive());
+	if (grip_only)
 		boneL = boneR2;
+
+	// A killing-blow cut can hide the grip before the inventory item is
+	// detached. Hidden transforms are zero-scaled and cannot define a weapon
+	// orientation; keep the last valid item pose until the handover completes.
+	if (!painter_weapon_grip_chain_visible(*V, boneL) ||
+		!painter_weapon_grip_chain_visible(*V, boneR))
+		return;
 
 	V->CalculateBones_Invalidate();
 	// V->CalculateBones(TRUE);
 
-	Fmatrix& mL = V->LL_GetTransform_safed(u16(boneL));
-	Fmatrix& mR = V->LL_GetTransform_safed(u16(boneR));
-	// Calculate
 	Fmatrix mRes;
-	Fvector R, D, N;
-	D.sub(mL.c, mR.c);
+	if (!painter_weapon_hand_frame(*V, *E, u16(boneR), u16(boneL), 0, mRes))
+		return;
 
-	if (fis_zero(D.magnitude()))
+	// Left-shoulder stance (painter): while a mirrored "_ls" torso clip is up, the weapon sits in the mirror image of the
+	// stock frame, built on the left hand; during the torso crossfade it moves between the two frames by the same weight,
+	// so the rifle travels with the hands instead of jumping.
+	float grip_blend = 0.f;
+	Fmatrix mMirror;
+	if (!m_strapped_mode)
 	{
-		mRes.set(E->XFORM());
-		mRes.c.set(mR.c);
+		CAI_Stalker* const stalker = smart_cast<CAI_Stalker*>(E);
+		u16 grip = BI_NONE, support = BI_NONE, grip2 = BI_NONE;
+		Fvector up_local;
+		if (stalker)
+			grip_blend = stalker->painter_grip_blend();
+		if (grip_blend > 0.f && stalker->painter_mirror_grip(*V, grip, support, grip2, up_local))
+		{
+			u16 const second = grip_only ? grip2 : support;
+			if (!painter_weapon_grip_chain_visible(*V, int(grip)) || !painter_weapon_grip_chain_visible(*V, int(second)) ||
+				!painter_weapon_hand_frame(*V, *E, grip, second, &up_local, mMirror))
+				grip_blend = 0.f;
+		}
+		else
+			grip_blend = 0.f;
 	}
-	else
+
+	if (grip_blend <= 0.f)
 	{
-		D.normalize();
-		R.crossproduct(mR.j, D);
-
-		N.crossproduct(D, R);
-		N.normalize();
-
-		mRes.set(R, N, D, mR.c);
-		mRes.mulA_43(E->XFORM());
+		UpdatePosition(mRes);
+		return;
 	}
 
-	UpdatePosition(mRes);
+	Fmatrix mirror_xform;
+	{
+		// grip offset mirrored across the sagittal plane: S * offset * S
+		Fmatrix S;
+		S.identity();
+		S._11 = -1.f;
+		Fmatrix half;
+		half.mul_43(S, m_Offset);
+		Fmatrix mirror_offset;
+		mirror_offset.mul_43(half, S);
+		mirror_xform.mul(mMirror, mirror_offset);
+	}
+	if (grip_blend >= 1.f)
+	{
+		Position().set(mMirror.c);
+		XFORM().set(mirror_xform);
+		return;
+	}
+	Fmatrix stock_xform;
+	stock_xform.mul(mRes, m_Offset);
+	Fquaternion from, to, mid;
+	from.set(stock_xform);
+	to.set(mirror_xform);
+	mid.slerp(from, to, grip_blend);
+	Fmatrix blended;
+	blended.rotation(mid);
+	blended.c.lerp(stock_xform.c, mirror_xform.c, grip_blend);
+	Position().lerp(mRes.c, mMirror.c, grip_blend);
+	XFORM().set(blended);
 }
+
 
 void CWeapon::UpdateFireDependencies_internal()
 {

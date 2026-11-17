@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "pch_script.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "script_binder_object_wrapper.h"
 #include "script_game_object.h"
 #include "xrServer_Objects_ALife.h"
@@ -223,6 +224,7 @@ void CScriptBinderObjectWrapper::net_Export_static(CScriptBinderObject* script_b
 
 void CScriptBinderObjectWrapper::shedule_Update(u32 time_delta)
 {
+	BloodNativeProfile::Scope profileScript(BloodNativeProfile::Stage::ScriptBinderUpdate);
 	CScriptEngine& script_engine = ai().script_engine();
 	const bool profile = !!psLua_Profile || script_engine.lua_recording();
 

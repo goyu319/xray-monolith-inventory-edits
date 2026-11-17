@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "pch_script.h"
+#include "painter_ai/EngineAttainedPose.h"         // after the precompiled header: anything above it is skipped
 #include "stalker_animation_manager.h"
 #include "ai/stalker/ai_stalker.h"
 #include "game_object_space.h"
@@ -185,8 +186,10 @@ IC void CStalkerAnimationManager::play_head()
 
 IC void CStalkerAnimationManager::play_torso()
 {
-	torso().animation(assign_torso_animation());
+	bool const unchanged = torso().animation(painter_mirrored_torso(assign_torso_animation()));
 	torso().play(m_skeleton_animated, torso_play_callback, false, false);
+	painter_update_grip(!unchanged);
+	painter_update_torso_spine();
 }
 
 void CStalkerAnimationManager::play_legs()
@@ -202,6 +205,24 @@ void CStalkerAnimationManager::play_legs()
 	}
 
 	legs().play(m_skeleton_animated, legs_play_callback, false, false, !fis_zero(m_target_speed));
+
+	// painter_speed_scale: the movement velocity is scaled in stalker_movement_manager_base::speed(); scale the leg
+	// cycle (and, while moving, the torso cycle) by the same factor so the stride length stays the clip's own.
+	// Written every frame (at scale 1 this equals what PlayCycle set), so a scale change in either direction takes
+	// effect on the running cycle; the torso rate returns to the clip's own when the NPC stops moving.
+	{
+		const float scale = object().painter_speed_scale();
+		if (CBlend* blend = legs().blend())
+		{
+			CMotionDef* def = m_skeleton_animated->LL_GetMotionDef(legs().animation());
+			blend->speed = (def ? def->Speed() : 1.f) * scale;
+		}
+		if (CBlend* blend = torso().blend())
+		{
+			CMotionDef* def = m_skeleton_animated->LL_GetMotionDef(torso().animation());
+			blend->speed = (def ? def->Speed() : 1.f) * (fis_zero(m_target_speed) ? 1.f : scale);
+		}
+	}
 
 	if (result && legs().blend())
 	{
@@ -220,6 +241,13 @@ void CStalkerAnimationManager::play_legs()
 
 void CStalkerAnimationManager::update_impl()
 {
+	m_painter_pose_valid = false;
+	// painter grip: a frame without a torso clip (global/script animation, dead, vehicle) holds the weapon in the right hand
+	if (!m_painter_grip_active)
+		m_painter_grip_blend = 0.f;
+	m_painter_grip_active = false;
+	m_painter_torso_spine_valid = false; // set again by play_torso when a torso clip plays this frame
+
 	if (!object().g_Alive())
 		return;
 
@@ -241,6 +269,10 @@ void CStalkerAnimationManager::update_impl()
 	play_legs();
 
 	torso().synchronize(m_skeleton_animated, m_legs);
+	// Record the body category of the clips selected and played this frame.
+	m_painter_pose_body = u8(object().movement().body_state());
+	m_painter_pose_frame = Device.dwFrame;
+	m_painter_pose_valid = true;
 }
 
 void CStalkerAnimationManager::update()
@@ -272,4 +304,20 @@ void CStalkerAnimationManager::update()
 			/* avo: end */
 		}
 	STOP_PROFILE
+}
+
+// A target movement body state alone is not attained stance. Both current
+// animation cycles must have reached their full contribution this frame.
+bool CStalkerAnimationManager::painter_attained_pose(u8& body) const
+{
+    const CBlend* torso = m_torso.blend(); const CBlend* legs = m_legs.blend();
+    if (!torso || !legs) return false;
+    using painter::combat::engine::AppliedPoseChannel;
+    const AppliedPoseChannel t{m_torso.actual(),m_torso.animation()==torso->motionID,
+        torso->blend_state()==CBlend::eAccrue,torso->blendAmount,torso->blendPower};
+    const AppliedPoseChannel l{m_legs.actual(),m_legs.animation()==legs->motionID,
+        legs->blend_state()==CBlend::eAccrue,legs->blendAmount,legs->blendPower};
+    if (!painter::combat::engine::attained_animation_pose(m_painter_pose_valid,
+        m_painter_pose_frame,Device.dwFrame,t,l)) return false;
+    body = m_painter_pose_body; return true;
 }

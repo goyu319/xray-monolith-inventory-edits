@@ -5,7 +5,11 @@
 #include "../../xrEngine/customhud.h"
 #include "../../xrEngine/xr_object.h"
 #include "../xrRender/SkeletonCustom.h"
+#include "../xrRender/BloodNativeProfile.h"
+#include "../xrRender/BloodGpuParticles.h"
 #include "../../xrParticles/ParticlesAsyncManager.h"
+
+extern int r_blood_gpu;
 
 #include "../xrRender/QueryHelper.h"
 #include "../../Include/xrAPI/xrAPI.h"          // pip DRender, the debug-line backend for the scope_debug world overlay
@@ -157,6 +161,7 @@ void CRender::ResetSVPHistory()
 void CRender::Render()
 {
 	if(ps_pfx_volumetric_debug){g_peak_volumetric_debug.Begin(Device.dwFrame);g_peak_volumetric_debug.dx11Seen=true;}
+	BloodNativeProfile::Scope bloodBeforeWallmarks(BloodNativeProfile::Stage::RenderSceneBeforeWallmarks, Device.dwFrame);
 	PIX_EVENT_C(CRender_Render, dx10_marker_frame);
 	dx10_annotate_frame();
 	dlss::EndScene();
@@ -503,11 +508,15 @@ void CRender::renderGBuffer(bool clearGraph)
 	if (Wallmarks)
 	{
 		PIX_EVENT(DEFER_WALLMARKS);
-		Target->phase_wallmarks();
+		{
+			BloodNativeProfile::Scope bloodWallmarkSetup(BloodNativeProfile::Stage::RenderWallmarkSetup, Device.dwFrame);
+			Target->phase_wallmarks();
+		}
 
 		Wallmarks->Render(); // wallmarks has priority as normal geometry
 	}
 
+	BloodNativeProfile::Scope bloodAfterWallmarks(BloodNativeProfile::Stage::RenderSceneAfterWallmarks, Device.dwFrame);
 	// full screen pass to mark msaa-edge pixels in highest stencil bit
 	if (RImplementation.o.dx10_msaa)
 	{
@@ -610,6 +619,7 @@ void CRender::renderSceneLighting(BOOL bSUN, bool svp)
 	// accumulate is replayed into the SVP by the dual_accum hook (inside render_sun_cascade + below)
 	if (bSUN) //bSUN && Device.dwFrame & 1 --Delayed sun update. Worth to check it in future
 	{
+		BloodNativeProfile::Scope bloodSun(BloodNativeProfile::Stage::RenderSun, Device.dwFrame);
 		PIX_EVENT_C(DEFER_SUN, dx10_marker_lights);
 		svp_stats::note_sun();
 		svp_stats::section_begin(svp_stats::SEC_MAIN_LIGHTS);
@@ -693,6 +703,7 @@ void CRender::renderSceneLighting(BOOL bSUN, bool svp)
 	// (it replays the accumulate into the SVP via dual_accum, sharing the maps), non dependant on OCCQ
 	svp_stats::section_begin(svp_stats::SEC_MAIN_LIGHTS); // svp mirror nests here through the hook
 	{
+		BloodNativeProfile::Scope bloodLightsNormal(BloodNativeProfile::Stage::RenderLightsNormal, Device.dwFrame);
 		PIX_EVENT_C(DEFER_LIGHT_NO_OCCQ, dx10_marker_lights);
 		Target->phase_accumulator();
 		render_lights(LP_normal);
@@ -700,6 +711,7 @@ void CRender::renderSceneLighting(BOOL bSUN, bool svp)
 
 	// Lighting, dependant on OCCQ
 	{
+		BloodNativeProfile::Scope bloodLightsPending(BloodNativeProfile::Stage::RenderLightsPending, Device.dwFrame);
 		PIX_EVENT_C(DEFER_LIGHT_OCCQ, dx10_marker_lights);
 		render_lights(LP_pending);
 	}
@@ -752,6 +764,7 @@ void CRender::renderSceneLighting(BOOL bSUN, bool svp)
 
 	// Postprocess
 	{
+		BloodNativeProfile::Scope bloodCombine(BloodNativeProfile::Stage::RenderCombine, Device.dwFrame);
 		PIX_EVENT_C(DEFER_LIGHT_COMBINE, dx10_marker_lights);
 		svp_stats::section_begin(svp_stats::SEC_MAIN_COMBINE);
 		Target->phase_combine();
@@ -770,6 +783,7 @@ void CRender::renderSceneLighting(BOOL bSUN, bool svp)
 
 void CRender::render_forward()
 {
+	BloodNativeProfile::Scope bloodForward(BloodNativeProfile::Stage::RenderForward, Device.dwFrame);
 	RImplementation.o.distortion = RImplementation.o.distortion_enabled; // enable distorion
 
 	//******* Main render - second order geometry (the one, that doesn't support deffering)
@@ -783,6 +797,7 @@ void CRender::render_forward()
 		//	Igor: we don't want to render old lods on next frame.
 		GMBase.r_dsgraph_render_static(1, fwd_clear); // normal level, secondary priority
 		CParticlesAsync::Wait();
+		BloodGpuParticles::Prepare(r_blood_gpu != 0);
 		GMBase.r_dsgraph_render_dynamic(1, fwd_clear);
 		// Effects held for after the upscaler, if this frame is not reconstructed after all
 		if (Target == TargetMain && !Target->DlssEffectsAfterUpscale())
@@ -795,6 +810,7 @@ void CRender::render_forward()
 		// pip main view only, the scope image has no attachment UI
 		if (g_hud && !(Device.true_pip_on && Device.m_SecondViewport.m_render_pass_is_svp))
 		{
+			BloodNativeProfile::Scope bloodHud(BloodNativeProfile::Stage::RenderHud, Device.dwFrame);
 			PROF_EVENT("render_hud");
 			if (!GMBase.RGraph.hasNativeHudAttachments && g_hud->RenderActiveItemUIQuery())
 				GMBase.r_dsgraph_render_hud_ui();

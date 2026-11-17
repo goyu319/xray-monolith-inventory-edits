@@ -116,6 +116,7 @@ public:
 	void check_recently_deactivated();
 	void collision_disable();
 	void collision_enable();
+	IC bool collision_disabled() const { return !!m_flags.test(fl_collision_disable); }
 	virtual void ClearRecentlyDeactivated() { ; }
 	virtual void Collide();
 	virtual void near_callback(CPHObject* obj) { ; }

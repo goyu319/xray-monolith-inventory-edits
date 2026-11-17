@@ -96,6 +96,18 @@ extern XRCORE_API xrDebug Debug;
 
 XRCORE_API void LogStackTrace(LPCSTR header);
 
+// Allocation failure on opted-in threads (Painter worker threads and kernel
+// calls): when the calling thread has a hook, out_of_memory_handler calls it
+// instead of the fatal report. The Painter kernel's hook throws std::bad_alloc
+// into exception-enabled kernel code, which fails only that job. Returns the
+// thread's previous hook.
+typedef int (*xr_oom_hook)(size_t size);
+XRCORE_API xr_oom_hook xr_set_thread_oom_hook(xr_oom_hook hook);
+// Other threads: before the fatal report the handler asks this callback once to
+// release recomputable caches; it retries the allocation if it returns true.
+typedef bool (*xr_oom_release)(size_t size);
+XRCORE_API void xr_set_oom_release(xr_oom_release release);
+
 #include "xrDebug_macros.h"
 
 #endif // xrDebugH

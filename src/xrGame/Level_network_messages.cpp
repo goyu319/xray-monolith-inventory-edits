@@ -2,6 +2,7 @@
 #include "entity.h"
 #include "xrserver_objects.h"
 #include "level.h"
+#include "painter_stream/NativeStream.h"
 #include "xrmessages.h"
 #include "game_cl_base.h"
 #include "net_queue.h"
@@ -73,6 +74,7 @@ void CLevel::ClientReceive()
 	StartProcessQueue();
 	for (NET_Packet* P = net_msg_Retreive(); P; P = net_msg_Retreive())
 	{
+        if(m_painter_spawn_stream)m_painter_spawn_stream->BeginReceive(*P);
 		if (IsDemoSaveStarted())
 		{
 			SavePacket(*P);
@@ -501,6 +503,7 @@ void CLevel::ClientReceive()
 			break;
 		}
 
+        if(m_painter_spawn_stream)m_painter_spawn_stream->EndReceive(*P);
 		net_msg_Release();
 	}
 	EndProcessQueue();
@@ -510,5 +513,12 @@ void CLevel::ClientReceive()
 
 void CLevel::OnMessage(void* data, u32 size)
 {
-	IPureClient::OnMessage(data, size);
+    // Same native IPureClient receive operations; the packet pointer remains
+    // owned/locked until its exact source witness is attached.
+    net_Queue.Lock();
+    NET_Packet* packet=net_Queue.Create();
+    packet->construct(data,size);packet->timeReceive=timeServer_Async();
+    u16 type;packet->r_begin(type);
+    if(m_painter_spawn_stream)m_painter_spawn_stream->PacketQueued(*packet);
+    net_Queue.Unlock();
 };

@@ -2,6 +2,9 @@
 #include "igame_level.h"
 
 #include "xr_object.h"
+#include "PainterLifetimeCookie.h"
+#include "painter_spawn_timing.h"
+namespace { std::atomic<std::uint64_t> painter_object_cookie_counter{0}; }
 #include "../xrcdb/xr_area.h"
 #include "render.h"
 #include "xrLevel.h"
@@ -79,7 +82,10 @@ void CObject::cNameVisual_set(shared_str N)
 		IRenderVisual* old_v = renderable.visual;
 
 		NameVisual = N;
-		renderable.visual = Render->model_Create(*N);
+		{
+			painter_spawn_timing::Measure visual_time(painter_spawn_timing::Current().visual_ms);
+			renderable.visual = Render->model_Create(*N);
+		}
 
 		IKinematics* old_k = old_v ? old_v->dcast_PKinematics() : NULL;
 		IKinematics* new_k = renderable.visual->dcast_PKinematics();
@@ -211,8 +217,10 @@ const Fbox& CObject::BoundingBox() const
 // Purpose :
 //----------------------------------------------------------------------
 CObject::CObject() :
+	m_painter_birth_cookie(painter_lifetime::allocate(painter_object_cookie_counter)),
 	dwFrame_AsCrow (u32(-1))
 {
+	R_ASSERT2(m_painter_birth_cookie!=0,"Native object lifetime cookie exhausted");
 	// Transform
 	Props.storage = 0;
 	setID((u16)-1);
@@ -327,6 +335,7 @@ void CObject::spatial_update(float eps_P, float eps_R)
 		bUpdate = TRUE;
 		PositionStack.push_back(SavedPosition());
 		PositionStack.back().dwTime = Device.dwTimeGlobal;
+		PositionStack.back().dwPositionTime = Device.dwTimeGlobal;
 		PositionStack.back().vPosition = Position();
 	}
 	else
@@ -351,6 +360,7 @@ void CObject::spatial_update(float eps_P, float eps_R)
 				PositionStack[2] = PositionStack[3];
 			}
 			PositionStack.back().dwTime = Device.dwTimeGlobal;
+			PositionStack.back().dwPositionTime = Device.dwTimeGlobal;
 			PositionStack.back().vPosition = Position();
 		}
 	}

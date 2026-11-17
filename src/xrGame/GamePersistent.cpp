@@ -1,5 +1,6 @@
 #include "pch_script.h"
 #include "gamepersistent.h"
+#include "painter_ai/EngineCombatRuntime.h"
 #include "../xrEngine/fmesh.h"
 #include "../xrEngine/xr_ioconsole.h"
 #include "../xrEngine/gamemtllib.h"
@@ -167,6 +168,8 @@ void CGamePersistent::OnAppStart()
 
 void CGamePersistent::OnAppEnd()
 {
+	painter::combat::engine::shutdown_combat_runtime(); // native combat AI: unregister its frame tick at the final shutdown
+
 	if (m_pMainMenu->IsActive())
 		m_pMainMenu->Activate(false);
 

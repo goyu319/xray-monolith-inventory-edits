@@ -14,6 +14,9 @@
 #include <cstring>
 #include <immintrin.h>
 #include <memory>
+#ifdef USE_DX11
+#include "../xrRender/PainterBloodTextureSource.h"
+#endif
 
 // #include "std_classes.h"
 // #include "xr_avi.h"
@@ -954,6 +957,9 @@ _DDS:
 				       &pTexture2D,
 				       0
 			       ), fn);
+#ifdef USE_DX11
+			PainterBloodTextureSource::remember(pTexture2D, fn, S->pointer(), S->length(), IMG, LoadInfo);
+#endif
 			FS.r_close(S);
 			mip_cnt = IMG.MipLevels;
 			// OK

@@ -116,6 +116,11 @@ void manager::unlock_door(door* const door)
 	door->unlock();
 }
 
+void manager::nearest(Fvector const& position, float const radius, doors_type& result) const
+{
+	m_doors.nearest(position, radius, result);
+}
+
 bool manager::is_door_blocked(door* const door) const
 {
 	return door->is_blocked(door_state_open) || door->is_blocked(door_state_closed);

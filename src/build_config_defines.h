@@ -43,6 +43,13 @@
 #define NEW_ANIMS										// use new animations. Please enclose any new animation addions with this define
 //-TWEAKS
 
+// Painter native active ragdoll.  The runtime gate still limits this to
+// verified human stalker shells; actors, mutants and other visuals stay on the
+// stock physics path.
+#ifndef PAINTER_ACTIVE_RAGDOLL_NATIVE
+#define PAINTER_ACTIVE_RAGDOLL_NATIVE
+#endif
+
 #define HOLDERCUSTOM_NEW								// Upgrade CHolderCustom.
 #define CAR_NEW											// Upgrade CCar.
 #define STATIONARYMGUN_NEW								// Upgrade CSE_ALifeStationaryMgun and CWeaponStatMgun.

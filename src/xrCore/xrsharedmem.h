@@ -74,7 +74,11 @@ protected:
 		smem_value* value = p_;
 		if (!value) return;
 		p_ = nullptr;
-		value->dwReference.fetch_sub(1, std::memory_order_release);
+		// BloodEngine runtime meshes (_align_16 == 1) are not in the intern table: the last
+		// reference frees them. Interned values are reclaimed only by the shared container.
+		const bool owned = value->_align_16 == 1;
+		if (value->dwReference.fetch_sub(1, owned ? std::memory_order_acq_rel : std::memory_order_release) == 1 && owned)
+			xr_free(value);
 	}
 
 public:
@@ -106,6 +110,50 @@ public:
 		_dec();
 		p_ = v;
 	}
+
+	// Same object/header layout as interned storage, but not registered in the
+	// global cache. Its final reference releases it immediately. The caller's
+	// CPU/GPU retirement fence remains responsible for dropping that reference.
+	void create_unique(u32 count, const T* ptr)
+	{
+		if (!count) { _dec(); return; }
+		VERIFY(ptr && size_t(count) <= size_t(u32(-1)) / sizeof(T));
+		const u32 bytes = count * sizeof(T);
+		auto* value = static_cast<smem_value*>(Memory.mem_alloc(sizeof(smem_value) + bytes
+#ifdef DEBUG_MEMORY_NAME
+			, "runtime mesh: owned memory"
+#endif
+			, false)); // Header and payload are fully initialized below.
+		value->dwReference.store(1, std::memory_order_relaxed);
+		value->dwCRC = 0;
+		value->dwLength = bytes;
+		value->_align_16 = 1;
+		CopyMemory(value->value, ptr, bytes);
+		_dec();
+		p_ = value;
+	}
+	// As create_unique, but the caller writes all count rows in place before
+	// any reader can observe them (off-thread runtime publication staging).
+	// Returns nullptr and keeps the current value if allocation fails.
+	T* create_unique_uninitialized(u32 count)
+	{
+		if (!count || size_t(count) > size_t(u32(-1)) / sizeof(T)) return nullptr;
+		const u32 bytes = count * sizeof(T);
+		auto* value = static_cast<smem_value*>(Memory.mem_alloc(sizeof(smem_value) + bytes
+#ifdef DEBUG_MEMORY_NAME
+			, "runtime mesh: owned memory"
+#endif
+			, false));
+		if (!value) return nullptr;
+		value->dwReference.store(1, std::memory_order_relaxed);
+		value->dwCRC = 0;
+		value->dwLength = bytes;
+		value->_align_16 = 1;
+		_dec();
+		p_ = value;
+		return reinterpret_cast<T*>(value->value);
+	}
+	bool is_unique() const { return p_ && p_->_align_16 == 1; }
 
 	// assignment & accessors
 	ref_smem<T>& operator=(ref_smem<T> const& rhs)

@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "r4.h"
+#include "../xrRender/RuntimeShaderCache.h"
 #include "../xrRender/ResourceManager.h"
 #include "../xrRender/fbasicvisual.h"
 #include "../../xrEngine/fmesh.h"
@@ -440,6 +441,8 @@ void CRender::level_Unload()
 
 	shader_warmup_stop();
 	scope_vslr_destroy(); // scope reflections hold this level's sectors and captured scene
+	RuntimeShaderCache::Clear(false); // wound child shader handles of this level's NPCs
+
 	GMBase.clear();
 	GMRainWet.clear();
 	for (sun::cascade& cascade : m_sun_cascades)

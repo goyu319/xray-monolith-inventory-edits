@@ -98,6 +98,10 @@ struct script_rq_result
 		range = R.range;
 		element = R.element;
 
+		// Dynamic elements are object/bone indices, never static triangle IDs.
+		// Retain the hit identity/range; material fields remain unavailable.
+		if (R.O) return;
+
 		// demonized: set material params of ray pick result
 		//Msg("no object, check material");
 		auto pTri = Level().ObjectSpace.GetStaticTris() + R.element;

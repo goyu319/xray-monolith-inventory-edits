@@ -11,6 +11,7 @@
 #include "game_cl_base.h"
 #include "xrserver_objects_alife.h"
 #include "script_game_object.h"
+#include "ai/stalker/ai_stalker.h"
 
 #ifdef EXPLOSIVE_CHANGE
 #include "../xrEngine/GameMtlLib.h"
@@ -196,9 +197,25 @@ void CGrenade::Throw()
 		//установить ID того кто кинул гранату
 		pGrenade->SetInitiator(H_Parent()->ID());
 	}
+	// Capture IDs before the existing ownership-reject/activation path. This
+	// callback reports submission; independence is verified on a later update.
+	const bool tactical_local_submit = Local() && H_Parent();
+	CAI_Stalker* const tactical_original_thrower = smart_cast<CAI_Stalker*>(H_Parent());
+	const u16 tactical_thrower_id = tactical_original_thrower ? tactical_original_thrower->ID() : u16(-1);
+	const u16 tactical_item_id = ID();
+	const u16 tactical_projectile_id = m_fake_missile->ID();
 	inherited::Throw();
 	m_fake_missile->processing_activate(); //@sliph
 	m_thrown = true;
+	CAI_Stalker* const tactical_thrower = tactical_local_submit && tactical_original_thrower
+		? smart_cast<CAI_Stalker*>(Level().Objects.net_Find(tactical_thrower_id)) : nullptr;
+	if (tactical_thrower && tactical_thrower == tactical_original_thrower && tactical_thrower->human_being())
+	{
+		::luabind::functor<void> submitted;
+		if (ai().script_engine().functor("_G.CAI_Stalker__TacticalGrenadeSubmitted", submitted))
+			submitted(tactical_thrower->lua_game_object(), tactical_item_id,
+			          tactical_projectile_id, Device.dwTimeGlobal, tactical_thrower->g_Alive());
+	}
 }
 
 

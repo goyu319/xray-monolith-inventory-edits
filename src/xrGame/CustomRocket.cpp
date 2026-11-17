@@ -18,6 +18,7 @@
 #include "../Include/xrRender/RenderVisual.h"
 //#include "CalculateTriangle.h"
 #include "actor.h"
+#include "painter_voxel/RocketStrike.h" // rpgdirect: the rocket's touch
 #ifdef DEBUG
 #include "PHDebug.h"
 #include "game_base_space.h"
@@ -284,6 +285,9 @@ void CCustomRocket::ObjectContactCallback(bool& do_colide, bool bo1, dContact& c
 				DBG_DrawPoint(l_pos,0.05f,D3DCOLOR_XRGB(255,255,(!corrected_pos)*255));
 #endif
 
+			// rpgdirect: what the rocket touched and where (a struck stalker: the explosion goes off at him, RocketStrike.h)
+			painter_rocket_strike::touch(l_this->ID(), l_pOwner ? l_pOwner->ID() : painter_rocket_strike::none,
+				painter_rocket_strike::V3{c.geom.pos[0], c.geom.pos[1], c.geom.pos[2]});
 			l_this->Contact(l_pos, vUp);
 
 			R_ASSERT(l_this->m_pPhysicsShell);

@@ -6,6 +6,7 @@
 #include "PHFracture.h"
 #include "PHJointDestroyInfo.h"
 #include "PHCollideValidator.h"
+#include "PHTether.h"
 //#include "Level.h"
 #include "iphysicsshellholder.h"
 #include "PhysicsShellAnimator.h"
@@ -223,6 +224,7 @@ void CPHShell::PresetActive()
 void CPHShell::Deactivate()
 {
 	VERIFY(ph_world);
+	phtether_shell_gone(this);
 	ph_world->NetRelcase(this);
 
 	if (m_pPhysicsShellAnimatorC)

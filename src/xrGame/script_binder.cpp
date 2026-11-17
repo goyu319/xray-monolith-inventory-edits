@@ -16,6 +16,19 @@
 #include "script_game_object.h"
 #include "gameobject.h"
 #include "level.h"
+#include "../xrEngine/painter_spawn_timing.h"
+
+namespace
+{
+// A script binder call that fails drops the object's script binding (clear()). Say which call and which object first,
+// so a broken binder is not silent. xrGame builds without C++ exception unwinding and luabind reports Lua errors through
+// its error callback (already in the log just above this line); these catch blocks only see what escapes that.
+void painter_binder_failure(CScriptBinder* binder, LPCSTR method)
+{
+	CGameObject* const object = smart_cast<CGameObject*>(binder);
+	Msg("! [script_binder] %s failed on %s; script binding dropped", method, object ? object->cName().c_str() : "?");
+}
+} // namespace
 
 // comment next string when commiting
 //#define DBG_DISABLE_SCRIPTS
@@ -43,6 +56,7 @@ void CScriptBinder::clear()
 	}
 	catch (...)
 	{
+		painter_binder_failure(this, "clear");
 		m_object = 0;
 	}
 	init();
@@ -63,6 +77,7 @@ void CScriptBinder::reinit()
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "reinit");
 			clear();
 		}
 	}
@@ -107,6 +122,7 @@ void CScriptBinder::reload(LPCSTR section)
 	}
 	catch (...)
 	{
+		painter_binder_failure(this, "reload");
 		clear();
 		return;
 	}
@@ -119,6 +135,7 @@ void CScriptBinder::reload(LPCSTR section)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "reload");
 			clear();
 		}
 	}
@@ -135,6 +152,7 @@ void CScriptBinder::reload(LPCSTR section)
 BOOL CScriptBinder::net_Spawn(CSE_Abstract* DC)
 {
 	PROF_EVENT("CScriptBinder::net_Spawn");
+	painter_spawn_timing::Measure script_time(painter_spawn_timing::Current().script_ms);
 #ifdef DEBUG_MEMORY_MANAGER
 	size_t									start = 0;
 	if (g_bMEMO)
@@ -151,6 +169,7 @@ BOOL CScriptBinder::net_Spawn(CSE_Abstract* DC)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "net_Spawn");
 			clear();
 		}
 	}
@@ -180,6 +199,7 @@ void CScriptBinder::net_Destroy()
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "net_Destroy");
 			clear();
 		}
 	}
@@ -234,6 +254,7 @@ void CScriptBinder::shedule_Update(u32 time_delta)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "shedule_Update");
 			clear();
 		}
 	}
@@ -250,6 +271,7 @@ void CScriptBinder::save(NET_Packet& output_packet)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "save");
 			clear();
 		}
 	}
@@ -266,6 +288,7 @@ void CScriptBinder::load(IReader& input_packet)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "load");
 			clear();
 		}
 	}
@@ -281,6 +304,7 @@ BOOL CScriptBinder::net_SaveRelevant()
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "net_SaveRelevant");
 			clear();
 		}
 	}
@@ -299,6 +323,7 @@ void CScriptBinder::net_Relcase(CObject* object)
 		}
 		catch (...)
 		{
+			painter_binder_failure(this, "net_Relcase");
 			clear();
 		}
 	}

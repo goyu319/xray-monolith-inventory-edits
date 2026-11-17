@@ -1,0 +1,24 @@
+// Keep the installed forward material's color, alpha and fog calculation.
+#define main painter_original_main
+#define v2p painter_original_v2p
+#include "model_def_lq.ps"
+#undef v2p
+#undef main
+#include "painter_removal_field.h"
+struct v2p
+{
+    float2 tc0 : TEXCOORD0;
+    float3 c0 : COLOR0;
+    float fog : FOG;
+    float4 hpos : SV_Position;
+    float3 painter_rest : TEXCOORD1;
+};
+float4 main(v2p I) : SV_Target
+{
+    painter_clip_removed(I.painter_rest);
+    painter_original_v2p original;
+    original.tc0=I.tc0;
+    original.c0=I.c0;
+    original.fog=I.fog;
+    return painter_original_main(original);
+}

@@ -12,6 +12,9 @@
 #define	GAMESAVE_SIZE	128
 
 extern u32 ps_r_screenshot_token;
+#ifdef USE_DX11
+void painter_shot_dump_now(const char* shot); // shotdump (diagnostic, -painter_shot_dump): SkeletonCustom.cpp
+#endif
 
 IC u32 convert(float c)
 {
@@ -173,6 +176,7 @@ void CRender::ScreenshotImpl(ScreenshotMode mode, LPCSTR name, CMemoryWriter* me
 				(g_pGameLevel) ? g_pGameLevel->name().c_str() : "mainmenu", ps_r_screenshot_token == 0 ? "jpg" : (ps_r_screenshot_token == 1 ? "png" : "tga"));
 			ID3DBlob* saved = 0;
 #ifdef USE_DX11
+			painter_shot_dump_now(buf); // shotdump (diagnostic): the drawn bodies' data beside the picture
 			CHK_DX(D3DX11SaveTextureToMemory(HW.pContext, pSrcTexture, ps_r_screenshot_token == 0 ? D3DX11_IFF_JPG : (ps_r_screenshot_token == 1 ? D3DX11_IFF_PNG : D3DX11_IFF_BMP), &saved, 0));
 #else
 			CHK_DX(D3DX10SaveTextureToMemory( pSrcTexture, ps_r_screenshot_token == 0 ? D3DX10_IFF_JPG : (ps_r_screenshot_token == 1 ? D3DX10_IFF_PNG : D3DX10_IFF_BMP), &saved, 0));

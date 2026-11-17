@@ -817,6 +817,64 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 	};
 
 	// Load animation
+	// painter: the modded stalker overlays load after the visual's LAST combat-faction bank (soldier, Duty, bandit,
+	// exoskeleton, Monolith and scientist banks used to load after them and won every shared motion name); zombified,
+	// trader and barman banks still load after the overlays and keep their own sets. Only visuals that reference
+	// stalker_animation.omf get the overlays, as before.
+	const auto painter_faction_bank = [](LPCSTR name) -> bool
+	{
+		static LPCSTR const tokens[] = {"stalker_animation", "soldier", "bandit", "exoskeleton", "monolith", "ucheniy"};
+		for (LPCSTR token : tokens)
+			if (strstr(name, token))
+				return true;
+		return false;
+	};
+	const auto load_extra_stalker_animations = [&]()
+	{
+		FS_FileSet extra_anims;
+		FS.file_list(extra_anims, "$game_meshes$", FS_ListFiles, "actors\\modded_stalker_animations\\*.omf");
+		for (auto it = extra_anims.begin(); it != extra_anims.end(); ++it)
+			loadOMF(it->name.c_str());
+	};
+	const auto load_motion_refs = [&](xr_vector<xr_string> const& refs)
+	{
+		bool has_stalker = false;
+		int last_faction = -1;
+		for (u32 k = 0; k < refs.size(); ++k)
+		{
+			if (strstr(refs[k].c_str(), "\\*.omf"))
+				continue;
+			if (strstr(refs[k].c_str(), "stalker_animation"))
+				has_stalker = true;
+			if (painter_faction_bank(refs[k].c_str()))
+				last_faction = int(k);
+		}
+		for (u32 k = 0; k < refs.size(); ++k)
+		{
+			string_path nm;
+			xr_strcpy(nm, refs[k].c_str());
+			if (strstr(nm, "\\*.omf"))
+			{
+				FS_FileSet fset;
+				FS.file_list(fset, "$game_meshes$", FS_ListFiles, nm);
+				FS.file_list(fset, "$level$", FS_ListFiles, nm);
+
+				m_Motions.reserve(fset.size() - 1);
+
+				for (FS_FileSet::iterator it = fset.begin(); it != fset.end(); it++)
+					loadOMF((*it).name.c_str());
+
+				continue;
+			}
+
+			xr_strcat(nm, ".omf");
+			loadOMF(nm);
+
+			if (has_stalker && int(k) == last_faction)
+				load_extra_stalker_animations();
+		}
+	};
+
 	if (data->find_chunk(OGF_S_MOTION_REFS))
 	{
 		string_path items_nm;
@@ -824,85 +882,27 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		u32 set_cnt = _GetItemCount(items_nm);
 		R_ASSERT2(set_cnt<MAX_ANIM_SLOT, make_string("section '%s'\nmodel '%s'", current_player_hud_sect.c_str(), N).c_str());
 		m_Motions.reserve(set_cnt);
+		xr_vector<xr_string> refs;
 		string_path nm;
 		for (u32 k = 0; k < set_cnt; ++k)
 		{
 			_GetItem(items_nm, k, nm);
-
-			if (strstr(nm, "\\*.omf"))
-			{
-				FS_FileSet fset;
-				FS.file_list(fset, "$game_meshes$", FS_ListFiles, nm);
-				FS.file_list(fset, "$level$", FS_ListFiles, nm);
-
-				m_Motions.reserve(fset.size() - 1);
-
-				for (FS_FileSet::iterator it = fset.begin(); it != fset.end(); it++)
-					loadOMF((*it).name.c_str());
-
-				continue;
-			}
-
-			xr_strcat(nm, ".omf");
-			loadOMF(nm);
-
-            //load extra stalker animations
-            if (strstr(nm, "stalker_animation.omf"))
-            {
-                FS_FileSet extra_anims;
-                FS.file_list(extra_anims, "$game_meshes$", FS_ListFiles, "actors\\modded_stalker_animations\\*.omf");
-
-                if (!extra_anims.empty())
-                {
-                    for (auto it = extra_anims.begin(); it != extra_anims.end(); ++it)
-                    {
-                        loadOMF(it->name.c_str());
-                    }
-                }
-            }
+			refs.push_back(nm);
 		}
+		load_motion_refs(refs);
 	}
 	else if (data->find_chunk(OGF_S_MOTION_REFS2))
 	{
 		u32 set_cnt = data->r_u32();
 		m_Motions.reserve(set_cnt);
+		xr_vector<xr_string> refs;
 		string_path nm;
 		for (u32 k = 0; k < set_cnt; ++k)
 		{
 			data->r_stringZ(nm, sizeof(nm));
-
-			if (strstr(nm, "\\*.omf"))
-			{
-				FS_FileSet fset;
-				FS.file_list(fset, "$game_meshes$", FS_ListFiles, nm);
-				FS.file_list(fset, "$level$", FS_ListFiles, nm);
-
-				m_Motions.reserve(fset.size() - 1);
-
-				for (FS_FileSet::iterator it = fset.begin(); it != fset.end(); it++)
-					loadOMF((*it).name.c_str());
-
-				continue;
-			}
-
-			xr_strcat(nm, ".omf");
-			loadOMF(nm);
-
-            //load extra stalker animations
-            if (strstr(nm, "stalker_animation.omf"))
-            {
-                FS_FileSet extra_anims;
-                FS.file_list(extra_anims, "$game_meshes$", FS_ListFiles, "actors\\modded_stalker_animations\\*.omf");
-
-                if (!extra_anims.empty())
-                {
-                    for (auto it = extra_anims.begin(); it != extra_anims.end(); ++it)
-                    {
-                        loadOMF(it->name.c_str());
-                    }
-                }
-            }
+			refs.push_back(nm);
 		}
+		load_motion_refs(refs);
 	}
 	else
 	{

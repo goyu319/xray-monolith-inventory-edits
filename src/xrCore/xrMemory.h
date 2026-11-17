@@ -107,6 +107,10 @@ public:
 };
 
 extern XRCORE_API xrMemory Memory;
+// Per-thread allocation policy for the wound kernel's threads: mem_alloc skips the zero fill and the shared
+// call counter on a thread that enabled it (the kernel never reads memory it did not write: its offline probe
+// runs on the plain CRT allocator with byte-identical outputs). Default off; never enable on renderer threads.
+XRCORE_API void xr_memory_thread_no_zero_fill(bool enable);
 
 #undef ZeroMemory
 #undef CopyMemory

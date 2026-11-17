@@ -250,6 +250,8 @@ void CPHElement::SetTransform(const Fmatrix& m0, motion_history_state history_st
 	PHDynamicData::FMX33toDMX(m33, R);
 	dBodySetRotation(m_body, R);
 	CPHDisablingFull::Reinit();
+	// A deliberate pose change starts a new render history (also activation).
+	m_body_interpolation.SetBody(m_body);
 
 	VERIFY2(dBodyGetPosition(m_body), "not valide safe position");
 	VERIFY2(dBodyGetLinearVel(m_body), "not valide safe velocity");
@@ -274,6 +276,7 @@ void CPHElement::setQuaternion(const Fquaternion& quaternion)
 	dQuaternion q = {-quaternion.w, quaternion.x, quaternion.y, quaternion.z};
 	dBodySetQuaternion(m_body, q);
 	CPHDisablingRotational::Reinit();
+	m_body_interpolation.ResetRotations();
 	m_flags.set(flUpdate,TRUE);
 	m_shell->spatial_move();
 }
@@ -292,6 +295,7 @@ void CPHElement::SetGlobalPositionDynamic(const Fvector& position)
 	VERIFY_BOUNDARIES2(position, phBoundaries, PhysicsRefObject(), "SetGlobalPosition argument ");
 	dBodySetPosition(m_body, position.x, position.y, position.z);
 	CPHDisablingTranslational::Reinit();
+	m_body_interpolation.ResetPositions();
 	m_flags.set(flUpdate,TRUE);
 	m_shell->spatial_move();
 }
@@ -729,7 +733,10 @@ void CPHElement::applyImpact(const SPHImpact& I)
 
 void CPHElement::InterpolateGlobalTransform(Fmatrix* m)
 {
-	if (!m_flags.test(flUpdate))
+	// Enabled bodies retain two fixed-step samples. Render reads must not
+	// consume their interpolation: the fractional frame time changes even when
+	// no new physics step runs. Keep the settled/disabled direct-pose path.
+	if (!m_flags.test(flUpdate) && !dBodyIsEnabled(m_body))
 	{
 		GetGlobalTransformDynamic(m);
 		VERIFY(_valid(*m));
@@ -1708,6 +1715,14 @@ void CPHElement::GetPointVel(Fvector& res_vel, const Fvector& point) const
 	//Fvector	 res_vel;
 	dBodyGetPointVel(get_bodyConst(), point.x, point.y, point.z, res);
 	CopyMemory(&res_vel, res, sizeof(Fvector));
+}
+
+void CPHElement::RefreshFittedPose()
+{
+	VERIFY(isActive());
+	GetGlobalTransformDynamic(&mXFORM);
+	FillInterpolation();
+	m_flags.set(flActivating, FALSE);
 }
 
 void CPHElement::ActivatingPos(const Fmatrix& BoneTransform)

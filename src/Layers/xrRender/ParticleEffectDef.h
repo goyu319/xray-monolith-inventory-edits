@@ -3,6 +3,7 @@
 #define ParticleEffectDefH
 
 #include "Shader.h"
+#include "../../Include/xrRender/BloodEffectId.h"
 
 namespace PAPI
 {
@@ -80,6 +81,8 @@ namespace PS
 		Flags32 m_Flags;
 		// texture
 		shared_str m_ShaderName;
+        // Explicit authored PE metadata. Shared dust materials are never inferred blood.
+        u32 m_BloodEffectId=BloodEffect::None;
 		shared_str m_TextureName;
 		ref_shader m_CachedShader;
 		SFrame m_Frame;

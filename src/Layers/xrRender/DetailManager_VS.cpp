@@ -156,6 +156,10 @@ void CDetailManager::hw_Load_Geom()
 void CDetailManager::hw_Unload()
 {
 	// Destroy VS/VB/IB
+#ifdef USE_DX11
+	hw_InstTypes.clear();
+	hw_InstRelease();
+#endif
 	hw_Geom.destroy();
 	HW.stats_manager.decrement_stats_vb(hw_VB);
 	HW.stats_manager.decrement_stats_ib(hw_IB);

@@ -61,6 +61,7 @@ void CWeaponAK74::script_register	(lua_State *L)
 			
 			.def("IsZoomEnabled", &CWeapon::IsZoomEnabled)
 			.def("IsZoomed", &CWeapon::IsZoomed)
+			.def("IsHudModeNow", &CWeapon::IsHudModeNow)
 			.def("StopZoom", &CWeapon::StopZoom)
 			.def("IsTextureZoomActive", &CWeapon::IsTextureZoomActive)
 			.def("GetZoomFactor", &CWeapon::GetZoomFactorScript)

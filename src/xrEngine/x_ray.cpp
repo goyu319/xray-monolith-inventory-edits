@@ -6,6 +6,7 @@
 // AlexMX - Alexander Maksimchuk
 //-----------------------------------------------------------------------------
 #include "stdafx.h"
+#include "../Include/xrRender/PainterFilePrefetch.h"
 #include "igame_level.h"
 #include "igame_persistent.h"
 
@@ -39,6 +40,7 @@
 #include "xrSash.h"
 #include "MonitorList.h"
 #include "renderdoc_integration.h"
+#include "PainterQuitWatch.h" // quitfix
 
 #define XRAY_MONOLITH_VERSION "X-Ray Monolith v1.5.3"
 
@@ -234,6 +236,13 @@ PROTECT_API void InitSettings()
 #ifdef DEBUG
     Msg("Updated path to system.ltx is %s", fname);
 #endif // #ifdef DEBUG
+	{ // R62: read the configs ahead on 16 threads before the serial parse (see PainterFilePrefetch.h)
+		FS_FileSet configs; FS.file_list(configs, "$game_config$", FS_ListFiles, "*.ltx");
+		std::vector<std::string> paths; paths.reserve(configs.size());
+		for (const FS_File& f : configs) { string_path full; FS.update_path(full, "$game_config$", f.name.c_str()); paths.emplace_back(full); }
+		CTimer prefetch; prefetch.Start(); painter_prefetch::files(paths);
+		Msg("* configs read ahead: %u files in %.0f ms", unsigned(paths.size()), prefetch.GetElapsed_sec() * 1000.f);
+	}
 	pSettings = xr_new<CInifile>(fname, TRUE);
 	CHECK_OR_EXIT(0 != pSettings->section_count(),
 	              make_string("Cannot find file %s.\nReinstalling application may fix this problem.", fname));
@@ -735,6 +744,15 @@ void Startup()
 
 	Device.Run();
 
+	// quitfix: the main loop has ended. From here a teardown stage that does not end within 15 s ends the process and leaves
+	// $logs$/painter_quit_stall.log (the stage, the threads' stacks) instead of a window that is "not responding".
+	{
+		string_path quit_stall = "";
+		if (FS.path_exist("$logs$"))
+			FS.update_path(quit_stall, "$logs$", "painter_quit_stall.log");
+		PainterQuitWatch::arm(quit_stall, 15000, [](const char* text) { Msg("! [quit] %s", text); xrLogger::FlushLog(); });
+	}
+
 	// Discord
 	clearDiscordPresence();
 
@@ -743,18 +761,31 @@ void Startup()
 		unregister_reshade();
 
 	// Destroy APP
+	PainterQuitWatch::stage("spatial");
 	xr_delete(g_SpatialSpacePhysic);
 	xr_delete(g_SpatialSpace);
 	xr_delete(g_SpatialSpaceLights);
+	PainterQuitWatch::stage("game_persistent");
 	DEL_INSTANCE(g_pGamePersistent);
 
+	PainterQuitWatch::stage("application");
 	xr_delete(pApp);
 	pApp = NULL;
 
 	Engine.Event.Dump();
 
+	// quitfix: the game objects are gone. The game module's worker threads are stopped and joined here, on the main thread,
+	// while everything their jobs use still exists - never by a destructor at process exit (PainterQuitWatch.h).
+	PainterQuitWatch::stage("game_workers");
+	{
+		const DWORD quit_workers_started = GetTickCount();
+		PainterQuitWatch::runQuitHooks();
+		Msg("* [quit] game worker threads stopped and joined in %u ms", unsigned(GetTickCount() - quit_workers_started));
+	}
+
 	// Destroying
 	//. destroySound();
+	PainterQuitWatch::stage("input_settings_console");
 	destroyInput();
 
 	if (!g_bBenchmark && !g_SASH.IsRunning())
@@ -767,13 +798,17 @@ void Startup()
 	else
 		Console->Destroy();
 
+	PainterQuitWatch::stage("sound");
 	destroySound();
 
 #ifndef DEDICATED_SERVER
 	free_vid_monitor_list();
 #endif
 
+	PainterQuitWatch::stage("device");
 	destroyEngine();
+	PainterQuitWatch::silence(); // the engine log closes next; the stall file is still written
+	PainterQuitWatch::stage("process_exit");
 }
 
 static INT_PTR CALLBACK logDlgProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)

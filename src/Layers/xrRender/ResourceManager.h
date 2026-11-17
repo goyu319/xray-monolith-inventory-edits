@@ -131,6 +131,9 @@ private:
 	xrCriticalSection creationGuard;
 
 public:
+#ifdef USE_DX11
+    xrCriticalSection& PainterBloodCreationGuard(){return creationGuard;}
+#endif
 	CTextureDescrMngr m_textures_description;
 	xr_vector<std::pair<shared_str, R_constant_setup*>> v_constant_setup;
 	lua_State* LSVM;

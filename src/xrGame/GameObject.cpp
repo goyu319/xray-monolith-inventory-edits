@@ -1,5 +1,8 @@
 #include "pch_script.h"
 #include "GameObject.h"
+#include "PainterKillcamAim.h"
+#include "painter_voxel/PainterExplosions.h"
+#include "painter_ai/EngineCombatAdapter.h"
 //#include "../Include/xrRender/RenderVisual.h"
 #include "../Include/xrRender/RenderVisual.h"
 #include "../xrphysics/PhysicsShell.h"
@@ -35,6 +38,11 @@
 #include "../xrengine/xr_collide_form.h"
 #include "script_attachment_manager.h"
 #include "player_hud.h"
+#include "CharacterPhysicsSupport.h"
+#include "../Layers/xrRender/PainterHitMain.h" // triggerhitch
+#include "debug_renderer.h"
+#include "../xrPhysics/PHElement.h"
+
 extern MagicBox3 MagicMinBox(int iQuantity, const Fvector* akPoint);
 
 #pragma warning(push)
@@ -108,6 +116,9 @@ void CGameObject::reload(LPCSTR section)
 
 void CGameObject::net_Destroy()
 {
+    painter_killcam_aim::retire(*this);
+    painter_explosions::retire(*this);
+	painter::combat::engine::object_destroyed(*this);
 #ifdef DEBUG
 	if (psAI_Flags.test(aiDestroy))
 		Msg					("Destroying client object [%d][%s][%x]",ID(),*cName(),this);
@@ -202,6 +213,7 @@ void CGameObject::OnEvent(NET_Packet& P, u16 type)
 			SHit HDS;
 			HDS.PACKET_TYPE = type;
 			HDS.Read_Packet_Cont(P);
+            painter_explosions::restore_delivery(HDS,*this);
 			//			Msg("Hit received: %d[%d,%d]", HDS.whoID, HDS.weaponID, HDS.BulletID);
 			CObject* Hitter = Level().Objects.net_Find(HDS.whoID);
 			CObject* Weapon = Level().Objects.net_Find(HDS.weaponID);
@@ -225,7 +237,10 @@ void CGameObject::OnEvent(NET_Packet& P, u16 type)
 				break;
 			}
 			SetHitInfo(Hitter, Weapon, HDS.bone(), HDS.p_in_bone_space, HDS.dir);
-			Hit(&HDS);
+			{
+				painter_hit_main::Hit hit_main("received", ID()); // triggerhitch: main-thread time of one received hit
+				Hit(&HDS);
+			}
 			//---------------------------------------------------------------------------
 			if (GameID() != eGameIDSingle)
 			{
@@ -966,6 +981,7 @@ CObject::SavedPosition CGameObject::ps_Element(u32 ID) const
 	VERIFY(ID<ps_Size());
 	inherited::SavedPosition SP = PositionStack[ID];
 	SP.dwTime += Level().timeServer_Delta();
+	SP.dwPositionTime += Level().timeServer_Delta();
 	return SP;
 }
 

@@ -96,6 +96,7 @@ extern ECORE_API int ps_r__LightSleepFrames;
 extern ECORE_API float ps_r__Detail_l_ambient;
 extern ECORE_API float ps_r__Detail_l_aniso;
 extern ECORE_API float ps_r__Detail_density;
+extern ECORE_API u32 ps_r__grass_instancing;
 extern ECORE_API float ps_r__Detail_height;
 extern ECORE_API int ps_r__detail_shadow_cull;
 extern ECORE_API int ps_r__detail_rows;

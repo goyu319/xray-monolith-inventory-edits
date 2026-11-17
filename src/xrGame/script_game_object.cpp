@@ -24,6 +24,7 @@
 #include "inventory.h"
 #include "script_ini_file.h"
 #include "../Include/xrRender/Kinematics.h"
+#include <chrono>
 #include "HangingLamp.h"
 #include "patrol_path_manager.h"
 #include "ai_object_location.h"
@@ -694,6 +695,7 @@ bool CScriptGameObject::is_physical_scope_glass_bone(LPCSTR name)
     IKinematics* model = item->HudItemData()->m_model;
     return model && model->IsPhysicalScopeGlassBone(model->LL_BoneID(name));
 }
+extern int painter_bone_visibility_timing;
 
 void CScriptGameObject::set_bone_visible(u16 bone_id, bool bVisibility, bool bRecursive, bool bHud)
 {
@@ -716,8 +718,47 @@ void CScriptGameObject::set_bone_visible(u16 bone_id, bool bVisibility, bool bRe
 	if (!k)
 		return;
 
-	if (bVisibility != !!k->LL_GetBoneVisible(bone_id))
-		k->LL_SetBoneVisible(bone_id, bVisibility, bRecursive);
+	CPhysicsShellHolder* const painter_vis_holder = object().cast_physics_shell_holder();
+	const auto refresh_physics = [painter_vis_holder]()
+	{
+		// upstream 2026.11: the physics shell follows the visible bones
+		if (!painter_vis_holder) return;
+		CCharacterPhysicsSupport* phys = painter_vis_holder->character_physics_support();
+		if (phys)
+		{
+			// Painter owns the physics of a body it is bound to or holds (fitted stump shell, live wounds): no rebuild there
+			if (phys->PainterVoxelLiveState() <= 0 && !phys->PainterHoldActive())
+				phys->RecreateSkeleton();
+		}
+		else if (painter_vis_holder->m_pPhysicsShell && painter_vis_holder->m_pPhysicsShell->isActive())
+		{
+			painter_vis_holder->deactivate_physics_shell();
+			painter_vis_holder->activate_physic_shell();
+		}
+	};
+	if (!painter_bone_visibility_timing) {
+		if (bVisibility != !!k->LL_GetBoneVisible(bone_id))
+		{
+			k->LL_SetBoneVisible(bone_id, bVisibility, bRecursive);
+			refresh_physics();
+		}
+		return;
+	}
+	// The Lua-visible u16 overload reaches this common path. Timed work starts
+	// after model selection and has no bone-name lookup; the resolved name is
+	// read only after both measurements for log correlation.
+	const auto query_start = std::chrono::steady_clock::now();
+	const bool changed = bVisibility != !!k->LL_GetBoneVisible(bone_id);
+	const auto query_end = std::chrono::steady_clock::now();
+	if (changed) k->LL_SetBoneVisible(bone_id, bVisibility, bRecursive);
+	const auto set_end = std::chrono::steady_clock::now();
+	const auto query_us = std::chrono::duration_cast<std::chrono::microseconds>(query_end-query_start).count();
+	const auto set_us = changed ? std::chrono::duration_cast<std::chrono::microseconds>(set_end-query_end).count() : 0;
+	Msg("[painter-bone-vis-u16] owner=%u time_ms=%u frame=%u bone_id=%u bone=%s recursive=%d changed=%d query_us=%lld set_us=%lld lookup_included=0",
+		unsigned(object().ID()),unsigned(Device.dwTimeGlobal),unsigned(Device.dwFrame),unsigned(bone_id),
+		k->LL_BoneName_dbg(bone_id),int(bRecursive),int(changed),
+		static_cast<long long>(query_us),static_cast<long long>(set_us));
+	if (changed) refresh_physics();
 }
 
 bool CScriptGameObject::is_bone_visible(u16 bone_id, bool bHud)
@@ -1419,6 +1460,24 @@ CGameObject& CScriptGameObject::object() const
 
 //////////////////////////////////////////////////////////////////////////
 // Shader / Textures Magic
+// Read only the model that already exists. A material query must not call the
+// lazy HudItemData factory or fall back to world materials for an absent HUD.
+static IKinematics* material_kinematics(CGameObject& owner, bool hud)
+{
+    if (hud)
+    {
+        if (auto* item = smart_cast<CHudItem*>(&owner))
+        {
+            const auto* data = item->HudItemDataIfPresent();
+            return data ? data->m_model : nullptr;
+        }
+        if (smart_cast<CActor*>(&owner))
+            return g_player_hud && g_player_hud->m_model
+                ? g_player_hud->m_model->dcast_PKinematics() : nullptr;
+    }
+    return owner.Visual() ? owner.Visual()->dcast_PKinematics() : nullptr;
+}
+
 ::luabind::object get_shaders(IRenderVisual* vis)
 {
 	::luabind::object table = ::luabind::newtable(ai().script_engine().lua());

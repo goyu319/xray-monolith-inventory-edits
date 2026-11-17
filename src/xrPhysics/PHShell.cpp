@@ -40,6 +40,7 @@
 #ifdef DEBUG
 #include    "debug_output.h"
 #endif
+#include "PHTether.h"
 IC bool PhOutOfBoundaries(const Fvector& v)
 {
 	return v.y < phBoundaries.y1;
@@ -47,6 +48,7 @@ IC bool PhOutOfBoundaries(const Fvector& v)
 
 CPHShell::~CPHShell()
 {
+	phtether_shell_gone(this);
 	m_pKinematics = 0;
 	VERIFY(!isActive());
 
@@ -750,10 +752,86 @@ void CPHShell::build_FromKinematics(IKinematics* K, BONE_P_MAP* p_geting_map)
 	//CBoneData& bone_data  = m_pKinematics->LL_GetData(0);
 	if (!m_spliter_holder) m_spliter_holder = xr_new<CPHShellSplitterHolder>(this);
 	bool vis_check = false;
-	AddElementRecursive(0, m_pKinematics->LL_GetBoneRoot(), Fidentity, 0, &vis_check);
+	const u16 start=m_fitted_root==BI_NONE?m_pKinematics->LL_GetBoneRoot():m_fitted_root;
+	AddElementRecursive(0,start,m_fitted_parent_bind,0,&vis_check);
 	//R_ASSERT2((*elements.begin())->numberOfGeoms(),"No physics shapes was assigned for model or no shapes in main root bone!!!");
 	//SetCallbacks(BonesCallback);
 	if (m_spliter_holder->isEmpty())ClearBreakInfo();
+}
+
+void CPHShell::FittedPoseCallback(CBoneInstance* B)
+{
+	auto* anchor=cast_PHElement(B->callback_param());
+	VERIFY(anchor);
+	auto* shell=anchor->PHShell();
+	VERIFY(shell&&shell->PKinematics());
+	for(const auto& link:shell->m_fitted_pose_links)
+		if(&shell->PKinematics()->LL_GetBoneInstance(link.bone)==B){
+			Fmatrix pose;
+			anchor->CalculateBoneTransform(pose);
+			B->mTransform.mul_43(pose,link.relative);
+			return;
+		}
+	NODEFAULT;
+}
+
+bool CPHShell::RefreshFittedPose()
+{
+	// Used only for a disabled staging shell, after its ODE bodies and
+	// ObjectInRoot have been explicitly transferred from the current source.
+	if(!isActive()||isEnabled()||elements.empty())return false;
+	for(auto* element:elements)if(!element||!element->isActive())return false;
+	for(auto* element:elements)element->RefreshFittedPose();
+	Fmatrix world;GetGlobalTransformDynamic(&world);
+	SetNotActivating();
+	return true;
+}
+
+bool CPHShell::BindFittedPoseLinks(const std::vector<PHFittedPoseLink>& links,bool apply_now)
+{
+	if(!m_pKinematics||links.size()>m_pKinematics->LL_BoneCount())return false;
+	auto exact=[this](u16 id)->CPHElement*{
+		for(auto* element:elements)if(element->m_SelfID==id)return element;
+		return nullptr;
+	};
+	u64 seen=0;
+	for(const auto& link:links){
+		if(link.bone>=m_pKinematics->LL_BoneCount()||
+		   link.anchor>=m_pKinematics->LL_BoneCount()||
+		   link.bone==link.anchor||(seen&(1ull<<link.bone))||
+		   !_valid(link.relative))return false;
+		if(!exact(link.anchor)||exact(link.bone))return false;
+		seen|=1ull<<link.bone;
+	}
+	m_fitted_pose_links=links;
+	if(apply_now)InstallFittedPoseCallbacks();
+	return true;
+}
+
+void CPHShell::InstallFittedPoseCallbacks()
+{
+	if(m_fitted_pose_links.empty())return;
+	for(const auto& link:m_fitted_pose_links){
+		CPHElement* anchor=nullptr;
+		for(auto* element:elements)if(element->m_SelfID==link.anchor){anchor=element;break;}
+		VERIFY(anchor);
+		auto& bone=m_pKinematics->LL_GetBoneInstance(link.bone);
+		bone.set_callback(bctPhysics,FittedPoseCallback,anchor,TRUE);
+	}
+	m_pKinematics->CalculateBones_Invalidate();
+}
+
+void CPHShell::build_FittedFromKinematics(IKinematics* k,const std::vector<PHFittedBone>& bones,
+	u16 root,const Fmatrix& parent_bind)
+{
+    VERIFY(!m_fitted_bones);
+    m_fitted_bones=&bones;
+    m_fitted_root=root;
+    m_fitted_parent_bind=parent_bind;
+    build_FromKinematics(k,nullptr);
+    m_fitted_bones=nullptr;
+    m_fitted_root=BI_NONE;
+    m_fitted_parent_bind=Fidentity;
 }
 
 void CPHShell::preBuild_FromKinematics(IKinematics* K, BONE_P_MAP* p_geting_map)
@@ -796,8 +874,56 @@ bool shape_is_physic(const SBoneShape& shape)
 	return !no_physics_shape(shape);
 }
 
+static bool painter_trim_shape(SBoneShape& s,const float (*planes)[4],u8 count,bool keep,Fvector& centre,bool& changed)
+{
+	changed=false;
+	for(u8 q=0;q<count;++q){
+		Fvector n;n.set(planes[q][0],planes[q][1],planes[q][2]);const float d=planes[q][3];
+		if(s.type==SBoneShape::stSphere){
+			Fsphere& b=s.sphere;const float c=n.dotproduct(b.P);
+			if(c+b.R<=d)continue;
+			if(c-b.R>=d&&!keep)return false;
+			const float r=_max(.5f*(d-(c-b.R)),.005f);
+			if(r<b.R){b.P.mad(n,-(b.R-r));b.R=r;changed=true;}
+		}else if(s.type==SBoneShape::stBox){
+			Fobb& b=s.box;const Fvector* axis[3]={&b.m_rotate.i,&b.m_rotate.j,&b.m_rotate.k};
+			const float h[3]={b.m_halfsize.x,b.m_halfsize.y,b.m_halfsize.z};float p[3];int k=0;
+			for(int a=0;a<3;++a){p[a]=n.dotproduct(*axis[a]);if(_abs(p[a])>_abs(p[k]))k=a;}
+			const float c=n.dotproduct(b.m_translate);float spread=0.f;for(int a=0;a<3;++a)spread+=_abs(p[a])*h[a];
+			if(c+spread<=d)continue;
+			if(c-spread>=d&&!keep)return false;
+			const float rest=c+spread-_abs(p[k])*h[k],t=(d-rest)/p[k];float lo=-h[k],hi=h[k];
+			if(p[k]>0.f)hi=_min(hi,t);else lo=_max(lo,t);
+			if(hi-lo<.01f){if(p[k]>0.f){lo=-h[k];hi=_min(h[k],lo+.01f);}else{hi=h[k];lo=_max(-h[k],hi-.01f);}}
+			b.m_translate.mad(*axis[k],.5f*(lo+hi));const float half=.5f*(hi-lo);
+			if(k==0)b.m_halfsize.x=half;else if(k==1)b.m_halfsize.y=half;else b.m_halfsize.z=half;
+			changed=true;
+		}else if(s.type==SBoneShape::stCylinder){
+			Fcylinder& b=s.cylinder;Fvector a=b.m_direction;a.normalize_safe();const float qa=n.dotproduct(a);
+			const float c=n.dotproduct(b.m_center),h=.5f*b.m_height,e=b.m_radius*_sqrt(_max(0.f,1.f-qa*qa));
+			if(c+_abs(qa)*h+e<=d)continue;
+			if(c-_abs(qa)*h-e>=d&&!keep)return false;
+			if(_abs(qa)<.3f){if(c<=d||keep)continue;return false;}
+			const float t=(d-c-e)/qa;float lo=-h,hi=h;
+			if(qa>0.f)hi=_min(hi,t);else lo=_max(lo,t);
+			if(hi-lo<.01f){if(qa>0.f){lo=-h;hi=_min(h,lo+.01f);}else{hi=h;lo=_max(-h,hi-.01f);}}
+			b.m_center.mad(a,.5f*(lo+hi));b.m_height=hi-lo;changed=true;
+		}
+	}
+	centre.set(s.type==SBoneShape::stSphere?s.sphere.P:s.type==SBoneShape::stBox?s.box.m_translate:s.cylinder.m_center);
+	return true;
+}
+// bodyjitter3: a bone's shape placed in its element's frame, as CPHGeometryOwner::add_Shape(shape, offset) places it.
+static SBoneShape painter_shape_in(const SBoneShape& shape,const Fmatrix& offset)
+{
+	SBoneShape s=shape;
+	if(s.type==SBoneShape::stBox)s.box.transform(shape.box,offset);
+	else if(s.type==SBoneShape::stSphere)offset.transform_tiny(s.sphere.P);
+	else if(s.type==SBoneShape::stCylinder){offset.transform_tiny(s.cylinder.m_center);offset.transform_dir(s.cylinder.m_direction);}
+	return s;
+}
 void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix global_parent, u16 element_number,
-                                   bool* vis_check)
+	                               bool* vis_check,u16 original_element)
 {
 	//CBoneInstance& B  = m_pKinematics->LL_GetBoneInstance(u16(id));
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -807,6 +933,22 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 
 	const IBoneData& bone_data = m_pKinematics->GetBoneData(u16(id));
 	const SJointIKData& joint_data = bone_data.get_IK_data();
+	if(!root_e||(!no_physics_shape(bone_data.get_shape())&&joint_data.type!=jtRigid))
+		original_element=id;
+	const PHFittedBone* fitted=nullptr;
+	if(m_fitted_bones)for(const auto& candidate:*m_fitted_bones)
+		if(candidate.bone==id){fitted=&candidate;break;}
+	const PHFittedBone* painter_trim_root=nullptr; // bodyjitter3: the retained element a rigid bone is part of
+	bool reuse_rigid=false;
+	if(m_fitted_bones&&!fitted&&root_e&&joint_data.type==jtRigid&&
+	   original_element==root_e->m_SelfID){
+		for(const auto& candidate:*m_fitted_bones)
+			if(candidate.bone==root_e->m_SelfID&&candidate.retain_original_shape){reuse_rigid=true;painter_trim_root=&candidate;break;}
+	}
+	const bool physical=m_fitted_bones ?
+		((fitted&&(fitted->retain_original_shape||!fitted->boxes.empty()))||reuse_rigid)&&
+		(fitted&&!fitted->retain_original_shape||!no_physics_shape(bone_data.get_shape())):
+		!no_physics_shape(bone_data.get_shape());
 	Fmatrix fm_position;
 	fm_position.set(bone_data.get_bind_transform());
 	fm_position.mulA_43(global_parent);
@@ -814,21 +956,21 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 	mask.assign(m_pKinematics->LL_GetBonesVisible());
 	bool no_visible = !mask.is(1ui64 << (u64)id);
 	bool lvis_check = false;
-	if (no_visible)
+	if (no_visible&&!reuse_rigid)
 	{
 		//for (vecBonesIt it=bone_data.children.begin(); bone_data.children.end() != it; ++it)
 		//AddElementRecursive       (root_e,(*it)->GetSelfID(),fm_position,element_number,&lvis_check);
 		//IBoneData &ibone_data = bone_data;
 		u16 num_children = bone_data.GetNumChildren();
 		for (u16 i = 0; i < num_children; ++i)
-			AddElementRecursive(root_e, bone_data.GetChild(i).GetSelfID(), fm_position, element_number, &lvis_check);
+			AddElementRecursive(root_e, bone_data.GetChild(i).GetSelfID(), fm_position, element_number, &lvis_check,original_element);
 
 		return;
 	}
 
 	CPhysicsElement* E = 0;
 	CPhysicsJoint* J = 0;
-	bool breakable = joint_data.ik_flags.test(SJointIKData::flBreakable) &&
+	bool breakable = !m_fitted_bones && joint_data.ik_flags.test(SJointIKData::flBreakable) &&
 		root_e &&
 		!(
 			no_physics_shape(bone_data.get_shape()) &&
@@ -850,10 +992,11 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 	/////////////////////////////////////////////////////////////////////
 
 	bool element_added = false; //set true when if elemen created and added by this call
+	bool painter_shape_added=true; // bodyjitter3: false when a cut back rigid part kept no shape
 	u16 splitter_position = 0;
 	u16 fracture_num = u16(-1);
 
-	if (!no_physics_shape(bone_data.get_shape()) || !root_e) //
+	if (physical || !root_e) //
 	{
 		if (joint_data.type == jtRigid && root_e) //
 		{
@@ -885,9 +1028,24 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 			}
 			else
 			{
-				root_e->add_Shape(bone_data.get_shape(), vs_root_position);
-				root_e->add_Mass(bone_data.get_shape(), vs_root_position, bone_data.get_center_of_mass(),
-				                 bone_data.get_mass());
+				if(fitted&&!fitted->retain_original_shape){
+					float volume=0.f;for(const auto& box:fitted->boxes)volume+=box.m_halfsize.x*box.m_halfsize.y*box.m_halfsize.z;
+					for(const auto& box:fitted->boxes){SBoneShape shape;shape.type=SBoneShape::stBox;shape.box=box;
+						root_e->add_Shape(shape,vs_root_position);
+						const float fraction=box.m_halfsize.x*box.m_halfsize.y*box.m_halfsize.z/volume;
+						root_e->add_Mass(shape,vs_root_position,fitted->mass_center,fitted->mass*fraction);
+						root_e->last_geom()->set_bone_id(id);}
+				}else if(!fitted&&painter_trim_root&&painter_trim_root->trims){ // bodyjitter3: a rigid part of an element cut back at a cut
+					SBoneShape shape=painter_shape_in(bone_data.get_shape(),vs_root_position);Fvector centre;bool changed=false;
+					if(painter_trim_shape(shape,painter_trim_root->trim,painter_trim_root->trims,false,centre,changed)){
+						Fvector com;vs_root_position.transform_tiny(com,bone_data.get_center_of_mass());
+						root_e->add_Shape(shape);
+						root_e->add_Mass(shape,Fidentity,changed?centre:com,bone_data.get_mass());
+					}else painter_shape_added=false;
+				}else{
+					root_e->add_Shape(bone_data.get_shape(), vs_root_position);
+					root_e->add_Mass(bone_data.get_shape(), vs_root_position, bone_data.get_center_of_mass(),
+						bone_data.get_mass());}
 			}
 
 
@@ -904,10 +1062,22 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 			//fm_position.transform_tiny(mc,bone_data.center_of_mass);
 			E->set_ParentElement(root_e);
 			///B.set_callback(BonesCallback1,E);
-			if (!no_physics_shape(bone_data.get_shape()))
+			if (physical)
 			{
-				E->add_Shape(bone_data.get_shape());
-				E->setMassMC(bone_data.get_mass(), bone_data.get_center_of_mass());
+				if(fitted&&!fitted->retain_original_shape){
+					for(const auto& box:fitted->boxes){E->add_Box(box);E->last_geom()->set_bone_id(id);}
+					E->setMassMC(fitted->mass,fitted->mass_center);
+					dMass mass;dMassSetZero(&mass);mass.mass=fitted->mass;
+					for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)mass.I[r*4+c]=fitted->inertia[r*3+c];
+					E->setInertia(mass);
+				}else if(fitted&&fitted->trims){ // bodyjitter3: the native shape cut back at the cut
+					SBoneShape shape=bone_data.get_shape();Fvector centre;bool changed=false;
+					painter_trim_shape(shape,fitted->trim,fitted->trims,true,centre,changed);
+					E->add_Shape(shape);
+					E->setMassMC(bone_data.get_mass(),changed?centre:bone_data.get_center_of_mass());
+				}else{
+					E->add_Shape(bone_data.get_shape());
+					E->setMassMC(bone_data.get_mass(), bone_data.get_center_of_mass());}
 			}
 			element_number = u16(elements.size());
 			add_Element(E);
@@ -942,7 +1112,7 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 		E = root_e;
 	}
 
-	if (!no_physics_shape(bone_data.get_shape()))
+	if (physical&&painter_shape_added)
 	{
 		CODEGeom* added_geom = E->last_geom();
 		if (added_geom)
@@ -977,7 +1147,11 @@ void CPHShell::AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix glob
 	//IBoneData &ibone_data = bone_data;
 	u16 num_children = bone_data.GetNumChildren();
 	for (u16 i = 0; i < num_children; ++i)
-		AddElementRecursive(E, bone_data.GetChild(i).GetSelfID(), fm_position, element_number, arg_check);
+		AddElementRecursive(E, bone_data.GetChild(i).GetSelfID(), fm_position, element_number, arg_check,original_element);
+	// bodyjitter3: an element cut back at a cut weighs what stays of the element it replaces (fitted->mass, P_prepare_FittedShell):
+	// the mass of its cut back shapes and rigid parts, scaled.
+	if(element_added&&fitted&&fitted->retain_original_shape&&fitted->trims&&fitted->mass>0.f){dMass m=*E->getMassTensor();
+		if(m.mass>0.f){const float scale=fitted->mass/m.mass;m.mass*=scale;for(int q=0;q<12;++q)m.I[q]*=scale;E->setInertia(m);}}
 	/////////////////////////////////////////////////////////////////////////////////////
 	if (breakable)
 	{
@@ -1140,6 +1314,7 @@ void CPHShell::SetCallbacks()
 		}
 	};
 	for_each_bone_id(*PKinematics(), set_bone_reference(*PKinematics()));
+	InstallFittedPoseCallbacks();
 
 	//element_position_in_set_calbacks=u16(-1);
 
@@ -1666,6 +1841,116 @@ void CPHShell::CollideAll()
 {
 	CPHObject::Collide();
 	CPHObject::reinit_single();
+}
+
+int PainterShellSelfContacts(dGeomID limb, dGeomID torso, CPHIsland* island, int max_contacts);
+bool PainterGeomsTouch(dGeomID a, dGeomID b);
+
+u16 CPHShell::SetLimbTorsoCollision(const u16* limb_bones, u16 limb_count, const u16* torso_bones, u16 torso_count)
+{
+	m_limb_count = 0;
+	m_torso_count = 0;
+	m_limb_torso_armed = 0;
+	for (u16 i = 0; i < limb_count && m_limb_count < limb_torso_max; ++i)
+	{
+		CPhysicsElement* E = limb_bones[i] == BI_NONE ? NULL : get_Element(limb_bones[i]);
+		if (!E || !E->numberOfGeoms())
+			continue;
+		bool known = false;
+		for (u8 k = 0; k < m_limb_count; ++k)
+			known = known || m_limb_bone[k] == E->m_SelfID;
+		if (known)
+			continue;
+		m_limb_bone[m_limb_count] = E->m_SelfID;
+		m_limb_geoms[m_limb_count] = E->numberOfGeoms();
+		++m_limb_count;
+	}
+	for (u16 i = 0; i < torso_count && m_torso_count < limb_torso_max; ++i)
+	{
+		CPhysicsElement* E = torso_bones[i] == BI_NONE || !PKinematics() ? NULL : get_PhysicsParrentElement(torso_bones[i]);
+		if (!E)
+			continue;
+		bool known = false;
+		for (u8 k = 0; k < m_torso_count; ++k)
+			known = known || m_torso_bone[k] == E->m_SelfID;
+		for (u8 k = 0; k < m_limb_count; ++k)
+			known = known || m_limb_bone[k] == E->m_SelfID;
+		if (!known)
+			m_torso_bone[m_torso_count++] = E->m_SelfID;
+	}
+	if (!m_torso_count)
+		m_limb_count = 0;
+	return u16(m_limb_count * m_torso_count);
+}
+
+void CPHShell::Collide()
+{
+	CPHObject::Collide();
+	if (m_limb_count && !collision_disabled())
+		CollideLimbTorso();
+}
+
+// Forearms and hands against the torso of the same body. Elements are looked up by bone on every step because
+// splits and severs move or remove them. A pair joined by a joint is never tested; a pair that overlapped when
+// this was set up is only tested for contact until it has come apart once.
+void CPHShell::CollideLimbTorso()
+{
+	CPHElement* limb[limb_torso_max] = {};
+	CPHElement* torso[limb_torso_max] = {};
+	for (CPHElement* E : elements)
+	{
+		if (!E->isActive())
+			continue;
+		for (u8 i = 0; i < m_limb_count; ++i)
+			if (E->m_SelfID == m_limb_bone[i])
+				limb[i] = E;
+		for (u8 k = 0; k < m_torso_count; ++k)
+			if (E->m_SelfID == m_torso_bone[k])
+				torso[k] = E;
+	}
+	u64 jointed = 0;
+	for (CPHJoint* J : joints)
+	{
+		CPHElement* first = J->PFirstElement();
+		CPHElement* second = J->PSecondElement();
+		for (u8 i = 0; i < m_limb_count; ++i)
+			for (u8 k = 0; k < m_torso_count; ++k)
+				if (limb[i] && torso[k] && ((first == limb[i] && second == torso[k]) || (first == torso[k] && second == limb[i])))
+					jointed |= u64(1) << (i * limb_torso_max + k);
+	}
+	CPHIsland* island = DActiveIsland();
+	for (u8 i = 0; i < m_limb_count; ++i)
+	{
+		CPHElement* L = limb[i];
+		if (!L)
+			continue;
+		const u16 geoms = _min(m_limb_geoms[i], L->numberOfGeoms());
+		for (u8 k = 0; k < m_torso_count; ++k)
+		{
+			CPHElement* T = torso[k];
+			const u64 bit = u64(1) << (i * limb_torso_max + k);
+			dGeomID torso_geom = T && T != L && !(jointed & bit) ? T->dSpacedGeometry() : NULL;
+			if (!torso_geom)
+				continue;
+			const bool armed = !!(m_limb_torso_armed & bit);
+			bool touching = false;
+			for (u16 g = 0; g < geoms; ++g)
+			{
+				dGeomID limb_geom = L->geometry(g)->geometry_transform();
+				if (!limb_geom)
+					continue;
+				if (armed)
+					PainterShellSelfContacts(limb_geom, torso_geom, island, 3);
+				else if (PainterGeomsTouch(limb_geom, torso_geom))
+				{
+					touching = true;
+					break;
+				}
+			}
+			if (!armed && !touching)
+				m_limb_torso_armed |= bit;
+		}
+	}
 }
 
 void CPHShell::RegisterToCLGroup(CGID g)

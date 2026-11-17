@@ -4,6 +4,7 @@
 
 #include "stdafx.h"
 #pragma hdrstop
+#include "BloodProjectionFootprint.h"
 
 #pragma warning(disable:4995)
 #include <d3dx9.h>
@@ -173,6 +174,7 @@ void CSkeletonX::AfterLoad(CKinematics* parent, u16 child_idx)
 void CSkeletonX::_Copy(CSkeletonX* B)
 {
 	Parent = NULL;
+    m_original_skin_proxy_child=B->m_original_skin_proxy_child;
 	ChildIDX = B->ChildIDX;
 	scope_surface_cached = B->scope_surface_cached;
 	scope_surface_frames = B->scope_surface_frames;
@@ -181,6 +183,12 @@ void CSkeletonX::_Copy(CSkeletonX* B)
 	Vertices3W = B->Vertices3W;
 	Vertices4W = B->Vertices4W;
 	BonesUsed = B->BonesUsed;
+#ifdef USE_DX11
+	m_ProjectionSource = B->m_ProjectionSource;
+    m_WallmarkOwnership=B->m_WallmarkOwnership;m_WallmarkSourceChild=B->m_WallmarkSourceChild;m_WallmarkSourceFaces=B->m_WallmarkSourceFaces;
+	m_ProjectionIndexBase = B->m_ProjectionIndexBase;
+	m_ProjectionIndexCount = B->m_ProjectionIndexCount;
+#endif
 
 	// caution - overlapped (union)
 	cache_DiscardID = B->cache_DiscardID;
@@ -196,7 +204,7 @@ void CSkeletonX::_Copy(CSkeletonX* B)
 }
 
 //////////////////////////////////////////////////////////////////////
-void CSkeletonX::_Render(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount)
+void CSkeletonX::_Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount)
 {
     // Preserve upstream hiding of opaque parts sharing a kept glass bone.
     // The bone itself stays animated, so the glass does not collapse or freeze.
@@ -278,7 +286,7 @@ void CSkeletonX::_Render(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount)
 			RCache.set_xform_world(W);
 			//
 			RCache.set_Geometry(hGeom);
-			RCache.Render(D3DPT_TRIANGLELIST, 0, 0, vCount, iOffset, pCount);
+			RCache.Render(D3DPT_TRIANGLELIST, vBase, 0, vCount, iOffset, pCount);
 			RCache.stat.r.s_dynamic_inst.add(vCount);
 		}
 		break;
@@ -321,7 +329,7 @@ void CSkeletonX::_Render(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount)
 
 			// render
 			RCache.set_Geometry(hGeom);
-			RCache.Render(D3DPT_TRIANGLELIST, 0, 0, vCount, iOffset, pCount);
+			RCache.Render(D3DPT_TRIANGLELIST, vBase, 0, vCount, iOffset, pCount);
 			if (RM_SKINNING_1B == RenderMode)
 				RCache.stat.r.s_dynamic_1B.add(vCount);
 			else if (RM_SKINNING_2B == RenderMode)
@@ -402,7 +410,19 @@ void CSkeletonX::_Load(const char* N, IReader* data, u32& dwVertCount)
 	s_bones_array_prev_const = "sbones_array_prev";
 	xr_vector<u16> bids;
 
-	// Load vertices
+	// Read only this already-loaded child's authored material declaration.
+    m_original_skin_proxy_child.reset();
+    try { if(data->find_chunk(OGF_TEXTURE)){string256 texture;data->r_stringZ(texture,sizeof(texture));
+        if(painter_skin_proxy::admitted_material(texture)){
+            m_original_skin_proxy_child=std::make_shared<painter_skin_proxy::Source>();
+            m_original_skin_proxy_child->authored_materials=texture;}} } catch(...) { m_original_skin_proxy_child.reset(); }
+    // Optional full original-face provenance. Unknown/malformed data keeps
+    // original-death coverage but cannot qualify a fitted group.
+    try { if(m_original_skin_proxy_child&&data->find_chunk(OGF_INDICES)){
+        const u32 n=data->r_u32();if(!n||n%3||n>196605||std::size_t(n)*2>std::size_t(data->elapsed()))throw std::runtime_error("skin_proxy_indices");
+        for(u32 f=0;f<n/3;++f){painter_skin_proxy::Triangle t;t.face=f;for(unsigned a=0;a<3;++a)t.vertices[a]=data->r_u16();m_original_skin_proxy_child->triangles.push_back(t);}
+    }} catch(...) { if(m_original_skin_proxy_child)m_original_skin_proxy_child->triangles.clear(); }
+    // Load vertices
 	R_ASSERT(data->find_chunk(OGF_VERTICES));
 
 	//u16			hw_bones_cnt		= u16((HW.Caps.geometry.dwRegisters-22)/3);
@@ -433,6 +453,7 @@ void CSkeletonX::_Load(const char* N, IReader* data, u32& dwVertCount)
 		{
 			size = dwVertCount * sizeof(vertBoned1W);
 			vertBoned1W* pVO = (vertBoned1W*)data->pointer();
+            try { if(m_original_skin_proxy_child&&!painter_skin_proxy::append_raw(*m_original_skin_proxy_child,1,pVO,dwVertCount,std::size_t(data->elapsed())))m_original_skin_proxy_child.reset(); } catch(...) { m_original_skin_proxy_child.reset(); }
 
 			for (it = 0; it < dwVertCount; ++it)
 			{
@@ -478,6 +499,7 @@ void CSkeletonX::_Load(const char* N, IReader* data, u32& dwVertCount)
 		{
 			size = dwVertCount * sizeof(vertBoned2W);
 			vertBoned2W* pVO = (vertBoned2W*)data->pointer();
+            try { if(m_original_skin_proxy_child&&!painter_skin_proxy::append_raw(*m_original_skin_proxy_child,2,pVO,dwVertCount,std::size_t(data->elapsed())))m_original_skin_proxy_child.reset(); } catch(...) { m_original_skin_proxy_child.reset(); }
 
 			for (it = 0; it < dwVertCount; ++it)
 			{
@@ -513,6 +535,7 @@ void CSkeletonX::_Load(const char* N, IReader* data, u32& dwVertCount)
 		{
 			size = dwVertCount * sizeof(vertBoned3W);
 			vertBoned3W* pVO = (vertBoned3W*)data->pointer();
+            try { if(m_original_skin_proxy_child&&!painter_skin_proxy::append_raw(*m_original_skin_proxy_child,3,pVO,dwVertCount,std::size_t(data->elapsed())))m_original_skin_proxy_child.reset(); } catch(...) { m_original_skin_proxy_child.reset(); }
 
 			for (it = 0; it < dwVertCount; ++it)
 			{
@@ -545,6 +568,7 @@ void CSkeletonX::_Load(const char* N, IReader* data, u32& dwVertCount)
 		{
 			size = dwVertCount * sizeof(vertBoned4W);
 			vertBoned4W* pVO = (vertBoned4W*)data->pointer();
+            try { if(m_original_skin_proxy_child&&!painter_skin_proxy::append_raw(*m_original_skin_proxy_child,4,pVO,dwVertCount,std::size_t(data->elapsed())))m_original_skin_proxy_child.reset(); } catch(...) { m_original_skin_proxy_child.reset(); }
 
 			for (it = 0; it < dwVertCount; ++it)
 			{
@@ -749,29 +773,108 @@ void get_pos_bones(const vertBoned4W& vert, Fvector& p, CKinematics* Parent)
 // Wallmarks
 //-----------------------------------------------------------------------------------------------------
 #include "cl_intersect.h"
+#ifdef USE_DX11
+#include "PainterSkinOwnershipGpu.h"
+#include "PainterSkinOwnershipPick.h"
+#endif
+
+#ifdef USE_DX11
+// triggerhitch: the arrays _PickBone reads (its vertex array choice, its index pointer) and its per-face work, for
+// CKinematics::LL_PickNearest: every vertex posed by the same get_pos_bones, the same ownership test as _PickBoneSoft*W.
+const u16* CSkeletonX::PainterPickIndices()
+{
+    u16* indices = *m_Indices;
+    return indices ? indices + PainterPickIndexBase() : nullptr;
+}
+size_t CSkeletonX::PainterPickIndexCount()
+{
+    const size_t total = m_Indices.size(), base = PainterPickIndexBase();
+    return base <= total ? total - base : 0;
+}
+const void* CSkeletonX::PainterPickVertexKey()
+{
+    if (*Vertices1W) return *Vertices1W;
+    if (*Vertices2W) return *Vertices2W;
+    if (*Vertices3W) return *Vertices3W;
+    return *Vertices4W;
+}
+u32 CSkeletonX::PainterPickVertexCount()
+{
+    if (*Vertices1W) return Vertices1W.size();
+    if (*Vertices2W) return Vertices2W.size();
+    if (*Vertices3W) return Vertices3W.size();
+    return Vertices4W.size();
+}
+bool CSkeletonX::PainterPoseVertices(Fvector* out, u32 count)
+{
+    if (!out || !count || count != PainterPickVertexCount() || !PainterPickVertexKey()) return false;
+    if (*Vertices1W) { for (u32 i = 0; i < count; ++i) get_pos_bones(Vertices1W[i], out[i], Parent); return true; }
+    if (*Vertices2W) { for (u32 i = 0; i < count; ++i) get_pos_bones(Vertices2W[i], out[i], Parent); return true; }
+    if (*Vertices3W) { for (u32 i = 0; i < count; ++i) get_pos_bones(Vertices3W[i], out[i], Parent); return true; }
+    for (u32 i = 0; i < count; ++i) get_pos_bones(Vertices4W[i], out[i], Parent);
+    return true;
+}
+bool CSkeletonX::PainterPickAccept(u32 primitive, const u16* indices, float u, float v)
+{
+    const auto owner = Parent->LL_RuntimeSkinOwnershipGpu();
+    const auto* field = owner ? owner->field.get() : nullptr;
+    if (*Vertices1W) return PainterSkinOwnershipPick::at_barycentric(field, ChildIDX, primitive, Vertices1W, indices, u, v);
+    if (*Vertices2W) return PainterSkinOwnershipPick::at_barycentric(field, ChildIDX, primitive, Vertices2W, indices, u, v);
+    if (*Vertices3W) return PainterSkinOwnershipPick::at_barycentric(field, ChildIDX, primitive, Vertices3W, indices, u, v);
+    return PainterSkinOwnershipPick::at_barycentric(field, ChildIDX, primitive, Vertices4W, indices, u, v);
+}
+#endif
 
 BOOL CSkeletonX::_PickBoneSoft1W(IKinematics::pick_result& r, float dist, const Fvector& S, const Fvector& D,
                                  u16* indices, CBoneData::FacesVec& faces)
 {
+#ifdef USE_DX11
+    const auto owner=Parent->LL_RuntimeSkinOwnershipGpu();
+    const auto*field=owner?owner->field.get():nullptr;
+    return pick_bone<vertBoned1W>(Vertices1W, Parent, r, dist, S, D, indices, faces,
+        [&](u32 primitive,float u,float v){return PainterSkinOwnershipPick::at_barycentric(field,ChildIDX,primitive,Vertices1W,indices,u,v);});
+#else
 	return pick_bone<vertBoned1W>(Vertices1W, Parent, r, dist, S, D, indices, faces);
+#endif
 }
 
 BOOL CSkeletonX::_PickBoneSoft2W(IKinematics::pick_result& r, float dist, const Fvector& S, const Fvector& D,
                                  u16* indices, CBoneData::FacesVec& faces)
 {
+#ifdef USE_DX11
+    const auto owner=Parent->LL_RuntimeSkinOwnershipGpu();
+    const auto*field=owner?owner->field.get():nullptr;
+    return pick_bone<vertBoned2W>(Vertices2W, Parent, r, dist, S, D, indices, faces,
+        [&](u32 primitive,float u,float v){return PainterSkinOwnershipPick::at_barycentric(field,ChildIDX,primitive,Vertices2W,indices,u,v);});
+#else
 	return pick_bone<vertBoned2W>(Vertices2W, Parent, r, dist, S, D, indices, faces);
+#endif
 }
 
 BOOL CSkeletonX::_PickBoneSoft3W(IKinematics::pick_result& r, float dist, const Fvector& S, const Fvector& D,
                                  u16* indices, CBoneData::FacesVec& faces)
 {
+#ifdef USE_DX11
+    const auto owner=Parent->LL_RuntimeSkinOwnershipGpu();
+    const auto*field=owner?owner->field.get():nullptr;
+    return pick_bone<vertBoned3W>(Vertices3W, Parent, r, dist, S, D, indices, faces,
+        [&](u32 primitive,float u,float v){return PainterSkinOwnershipPick::at_barycentric(field,ChildIDX,primitive,Vertices3W,indices,u,v);});
+#else
 	return pick_bone<vertBoned3W>(Vertices3W, Parent, r, dist, S, D, indices, faces);
+#endif
 }
 
 BOOL CSkeletonX::_PickBoneSoft4W(IKinematics::pick_result& r, float dist, const Fvector& S, const Fvector& D,
                                  u16* indices, CBoneData::FacesVec& faces)
 {
+#ifdef USE_DX11
+    const auto owner=Parent->LL_RuntimeSkinOwnershipGpu();
+    const auto*field=owner?owner->field.get():nullptr;
+    return pick_bone<vertBoned4W>(Vertices4W, Parent, r, dist, S, D, indices, faces,
+        [&](u32 primitive,float u,float v){return PainterSkinOwnershipPick::at_barycentric(field,ChildIDX,primitive,Vertices4W,indices,u,v);});
+#else
 	return pick_bone<vertBoned4W>(Vertices4W, Parent, r, dist, S, D, indices, faces);
+#endif
 }
 
 /*
@@ -818,6 +921,214 @@ BOOL CSkeletonX::_PickBoneSoft2W	(Fvector& normal, float& dist, const Fvector& S
 }
 */
 // Fill Vertices
+#ifdef USE_DX11
+extern int r_blood_gpu, r_blood_gpu_create;
+
+void CSkeletonX::FinalizeProjectionSource(const xr_vector<xr_vector<CBoneData::FacesVec>>* faces, bool force) noexcept
+{
+    // Exposed anatomy is deliberately not a blood decal receiver. Its picking
+    // face lists remain intact, but allocating duplicate GPU projection data
+    // for these potentially huge surfaces has no consumer.
+    if (!receives_wallmarks) return;
+    CacheProjectionSource(m_ProjectionIndexBase, m_ProjectionIndexCount, faces, force);
+}
+
+void CSkeletonX::AssignWallmarkOwnership(CSkeletonWallmark::WMFace&face,u32 triangle)const
+{
+    CSkeletonWallmark::AssignOwnership(face,m_WallmarkOwnership,ChildIDX,triangle);
+    if(!m_WallmarkOwnership&&m_WallmarkSourceFaces){face.source_child=m_WallmarkSourceChild;
+        face.source_face=triangle<m_WallmarkSourceFaces->size()?(*m_WallmarkSourceFaces)[triangle]:~0u;}
+}
+
+void CSkeletonX::CacheProjectionSource(u32 iBase, u32 iCount, const xr_vector<xr_vector<CBoneData::FacesVec>>* face_table, bool force) noexcept
+{
+	if (m_ProjectionSource || (!force && (!r_blood_gpu || !r_blood_gpu_create)) || !Parent ||
+		ChildIDX == u16(-1) || !*m_Indices) return;
+	g_blood_projection_cpu.cache_attempts.fetch_add(1, std::memory_order_relaxed);
+	auto invalid_source = []()
+	{
+		g_blood_projection_cpu.cache_invalid.fetch_add(1, std::memory_order_relaxed);
+	};
+	try
+	{
+		const u16 bone_count = Parent->LL_BoneCount();
+        if (face_table && face_table->size()!=bone_count) { invalid_source(); return; }
+        if (face_table) for(const auto& bone:*face_table) if(ChildIDX>=bone.size()) { invalid_source(); return; }
+        auto faces_for=[&](u16 b)->const CBoneData::FacesVec& {
+            return face_table ? (*face_table)[b][ChildIDX] : Parent->GeometryFaces(b,ChildIDX);
+        };
+		if (!bone_count || bone_count > BloodGpuProjection::Backend::MaxPaletteBones) { invalid_source(); return; }
+		size_t count = 0;
+		for (u16 b = 0; b < bone_count; ++b)
+		{
+			const auto& faces = faces_for(b);
+			count += faces.size() * size_t(3);
+			if (count > BloodGpuProjection::Backend::MaxSourceIndices) { invalid_source(); return; }
+		}
+		if (!count)
+		{
+			g_blood_projection_cpu.cache_empty.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		if (iBase > m_Indices.size() || iCount > m_Indices.size() - iBase) { invalid_source(); return; }
+		// OGF indices are u16. This temporary remap is bounded to 256 KiB and
+		// exists only during model load. Unreferenced rows are not exported, so
+		// unused/invalid payload cannot introduce a new admission failure.
+		const size_t vertex_count = std::min(size_t(1u << 16), std::max(
+			std::max(size_t(Vertices1W.size()), size_t(Vertices2W.size())),
+			std::max(size_t(Vertices3W.size()), size_t(Vertices4W.size()))));
+		CSkeletonWallmark::ProjectionVector<u32> remap(vertex_count, u32(-1));
+		u32 unique_count = 0;
+		for (u16 b = 0; b < bone_count; ++b)
+			for (u16 face : faces_for(b))
+			{
+				if (u32(face) * 3 + 2 >= iCount) { invalid_source(); return; }
+				for (u32 k = 0; k < 3; ++k)
+				{
+					const u32 index = m_Indices[iBase + u32(face) * 3 + k];
+					if (index >= remap.size()) { invalid_source(); return; }
+					if (remap[index] == u32(-1)) remap[index] = unique_count++;
+				}
+			}
+		auto source = std::allocate_shared<CSkeletonWallmark::ProjectionSource>(
+			CSkeletonWallmark::CacheAllocator<CSkeletonWallmark::ProjectionSource>{});
+		if (!source->ReserveBudget(unique_count * sizeof(BloodGpuProjection::InputVertex) +
+			count * sizeof(u32) +
+			bone_count * sizeof(CSkeletonWallmark::ProjectionSource::Range))) return;
+		source->vertices.resize(unique_count);
+		source->indices.resize(count);
+		source->bones.resize(bone_count);
+		for (u32 index = 0; index < remap.size(); ++index)
+		{
+			if (remap[index] == u32(-1)) continue;
+			auto& out = source->vertices[remap[index]];
+			Fvector p;
+			if (*Vertices1W && index < Vertices1W.size())
+			{
+				const auto& v = Vertices1W[index]; p = v.P; out.job = 1;
+				for (u32& id : out.ids) id = u16(v.matrix);
+			}
+			else if (*Vertices2W && index < Vertices2W.size())
+			{
+				const auto& v = Vertices2W[index]; p = v.P; out.job = 2;
+				out.ids[0] = v.matrix0; out.ids[1] = out.ids[2] = out.ids[3] = v.matrix1;
+				out.weights[0] = v.w;
+			}
+			else if (*Vertices3W && index < Vertices3W.size())
+			{
+				const auto& v = Vertices3W[index]; v.get_pos(p); out.job = 3;
+				out.ids[0] = v.m[0]; out.ids[1] = v.m[1]; out.ids[2] = out.ids[3] = v.m[2];
+				out.weights[0] = v.w[0]; out.weights[1] = v.w[1];
+			}
+			else if (*Vertices4W && index < Vertices4W.size())
+			{
+				const auto& v = Vertices4W[index]; v.get_pos(p); out.job = 4;
+				for (u32 j = 0; j < 4; ++j) out.ids[j] = v.m[j];
+				for (u32 j = 0; j < 3; ++j) out.weights[j] = v.w[j];
+			}
+			else { invalid_source(); return; }
+			for (u32 id : out.ids) if (id >= bone_count) { invalid_source(); return; }
+			out.p[0] = p.x; out.p[1] = p.y; out.p[2] = p.z;
+		}
+		source->source_faces.reserve(count/3);
+		u32 cursor = 0;
+		for (u16 b = 0; b < bone_count; ++b)
+		{
+			auto& range = source->bones[b];
+			range.first_vertex = cursor;
+			for (u16 face : faces_for(b))
+			{
+                source->source_faces.push_back(face);
+				for (u32 k = 0; k < 3; ++k)
+				{
+					// Match FillVertices' software replicas exactly, including its
+					// index base (which intentionally does not add Fvisual::vBase).
+					const u32 index = m_Indices[iBase + u32(face) * 3 + k];
+					source->indices[cursor++] = remap[index];
+				}
+			}
+			range.vertex_count = cursor - range.first_vertex;
+		}
+		if(!source->BindOwnership(m_WallmarkOwnership,ChildIDX,m_WallmarkSourceChild,m_WallmarkSourceFaces.get())){invalid_source();return;}
+		source->BuildProjectionBounds();
+		CSkeletonWallmark::ProjectionSource::Publish(source);
+		m_ProjectionSource = std::move(source);
+		g_blood_projection_cpu.cache_built.fetch_add(1, std::memory_order_relaxed);
+	}
+	catch (...)
+	{
+		g_blood_projection_cpu.cache_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+	} // Optional caches cannot make model loading fail.
+}
+
+bool CSkeletonX::AppendProjectionRanges(const U16Vec& bones,
+	CSkeletonWallmark::ProjectionSnapshot& hit, bool require_gpu_ready) const
+{
+	// Accessories/empty children with no selected faces cannot affect this hit.
+	// Inspect only face-list metadata; an unrelated uncached child must not force
+	// a real body candidate on another child back to CPU projection.
+	// (was: any child without a projection source failed every decal, even one that selects none of its faces)
+	bool has_faces = false;
+	for (u16 b : bones)
+	{
+		if (!Parent || b >= Parent->LL_BoneCount() || ChildIDX == u16(-1)) return false;
+		if ((!require_gpu_ready && m_ProjectionSource && b<m_ProjectionSource->bones.size())
+            ? m_ProjectionSource->bones[b].vertex_count>0
+            : !Parent->GeometryFaces(b, ChildIDX).empty()) { has_faces = true; break; }
+	}
+	if (!has_faces) return true;
+	if (!m_ProjectionSource || m_ProjectionSource->bones.size() != hit.hit_pose.size())
+	{
+		g_blood_projection_cpu.cache_missing.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	if (require_gpu_ready && m_ProjectionSource->gpu_epoch.load(std::memory_order_relaxed) != hit.epoch)
+	{
+		g_blood_projection_cpu.source_cold.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	for (u16 b : bones)
+	{
+		if (b >= m_ProjectionSource->bones.size()) return false;
+		const auto& range = m_ProjectionSource->bones[b];
+		if (!range.vertex_count) continue;
+        auto append=[&](u32 first,u32 count) {
+            if (count>BloodGpuProjection::Backend::MaxCandidateVertices-hit.candidate_vertices) return false;
+            // Coalesce only within this bone; retain the original bone ordering
+            // and duplicate face membership exactly.
+            hit.ranges.push_back({m_ProjectionSource,first,count});
+            hit.candidate_vertices+=count;
+            return true;
+        };
+        const auto& bounds=m_ProjectionSource->projection_bounds;
+        const size_t expected=(m_ProjectionSource->indices.size()+BloodProjectionBounds::BlockVertices-1)/BloodProjectionBounds::BlockVertices;
+        if (!hit.square_footprint || bounds.size()!=expected || bounds.empty()) {
+            if (!append(range.first_vertex,range.vertex_count)) return false;
+            continue;
+        }
+        const u32 before_candidates=hit.candidate_vertices;
+        const u32 end=range.first_vertex+range.vertex_count;
+        u32 first=range.first_vertex, run=first;
+        while (first<end) {
+            const u32 block=first/BloodProjectionBounds::BlockVertices;
+            const u32 next=(std::min)(end,(block+1)*BloodProjectionBounds::BlockVertices);
+            if (BloodProjectionBounds::Outside(bounds[block],hit.hit_pose,hit.view,BloodProjectionFootprint::Depth)) {
+                if (first>run && !append(run,first-run)) return false;
+                run=next;
+            }
+            first=next;
+        }
+        if (end>run && !append(run,end-run)) return false;
+        // Existing callers use a nonzero candidate count to retain a mark's
+        // placement across later mesh revisions. Keep one proven-outside
+        // triangle when this entire bone culled: projection still emits no
+        // faces, and filtering cannot silently shorten the mark's lifetime.
+        if (hit.candidate_vertices==before_candidates && !append(range.first_vertex,3)) return false;
+	}
+	return true;
+}
+#endif
+
 void CSkeletonX::_FillVerticesSoft1W(const Fmatrix& view, CSkeletonWallmark& wm, const Fvector& normal, float size,
                                      u16* indices, CBoneData::FacesVec& faces)
 {
@@ -846,7 +1157,8 @@ void CSkeletonX::_FillVerticesSoft1W(const Fmatrix& view, CSkeletonWallmark& wm,
 		test_normal.mknormal(p[0], p[1], p[2]);
 		float cosa = test_normal.dotproduct(normal);
 		if (cosa < EPS) continue;
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
@@ -856,6 +1168,9 @@ void CSkeletonX::_FillVerticesSoft1W(const Fmatrix& view, CSkeletonWallmark& wm,
 				uv.x = (1 + UV.x) * .5f;
 				uv.y = (1 - UV.y) * .5f;
 			}
+#ifdef USE_DX11
+            AssignWallmarkOwnership(F,*it);
+#endif
 			wm.m_Faces.push_back(F);
 		}
 	}
@@ -869,33 +1184,31 @@ void CSkeletonX::_FillVerticesSoft2W(const Fmatrix& view, CSkeletonWallmark& wm,
 	{
 		Fvector p[3];
 		u32 idx = (*it) * 3;
-		CSkeletonWallmark::WMFace F;
 		for (u32 k = 0; k < 3; k++)
 		{
-			Fvector P0, P1;
-
-			vertBoned2W& vert = Vertices2W[indices[idx + k]];
-			F.bone_id[k][0] = vert.matrix0;
-			F.bone_id[k][1] = vert.matrix1;
-			F.bone_id[k][2] = F.bone_id[k][1];
-			F.bone_id[k][3] = F.bone_id[k][1];
-			F.weight[k][0] = vert.w;
-			F.weight[k][1] = 0.f;
-			F.weight[k][2] = 0.f;
-
-			Fmatrix& xform0 = Parent->LL_GetBoneInstance(F.bone_id[k][0]).mRenderTransform;
-			Fmatrix& xform1 = Parent->LL_GetBoneInstance(F.bone_id[k][1]).mRenderTransform;
-			F.vert[k].set(vert.P);
-			xform0.transform_tiny(P0, F.vert[k]);
-			xform1.transform_tiny(P1, F.vert[k]);
-			p[k].lerp(P0, P1, F.weight[k][0]);
+			const vertBoned2W& vert = Vertices2W[indices[idx + k]];
+			get_pos_bones(vert, p[k], Parent);
 		}
 		Fvector test_normal;
 		test_normal.mknormal(p[0], p[1], p[2]);
 		float cosa = test_normal.dotproduct(normal);
 		if (cosa < EPS) continue;
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
+			CSkeletonWallmark::WMFace F;
+			for (u32 k = 0; k < 3; k++)
+			{
+				const vertBoned2W& vert = Vertices2W[indices[idx + k]];
+				F.bone_id[k][0] = vert.matrix0;
+				F.bone_id[k][1] = vert.matrix1;
+				F.bone_id[k][2] = F.bone_id[k][1];
+				F.bone_id[k][3] = F.bone_id[k][1];
+				F.weight[k][0] = vert.w;
+				F.weight[k][1] = 0.f;
+				F.weight[k][2] = 0.f;
+				F.vert[k].set(vert.P);
+			}
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
 			{
@@ -904,6 +1217,9 @@ void CSkeletonX::_FillVerticesSoft2W(const Fmatrix& view, CSkeletonWallmark& wm,
 				uv.x = (1 + UV.x) * .5f;
 				uv.y = (1 - UV.y) * .5f;
 			}
+#ifdef USE_DX11
+            AssignWallmarkOwnership(F,*it);
+#endif
 			wm.m_Faces.push_back(F);
 		}
 	}
@@ -917,19 +1233,9 @@ void CSkeletonX::_FillVerticesSoft3W(const Fmatrix& view, CSkeletonWallmark& wm,
 	{
 		Fvector p[3];
 		u32 idx = (*it) * 3;
-		CSkeletonWallmark::WMFace F;
-
 		for (u32 k = 0; k < 3; k++)
 		{
 			const vertBoned3W& vert = Vertices3W[indices[idx + k]];
-			F.bone_id[k][0] = vert.m[0];
-			F.bone_id[k][1] = vert.m[1];
-			F.bone_id[k][2] = vert.m[2];
-			F.bone_id[k][3] = F.bone_id[k][2];
-			F.weight[k][0] = vert.w[0];
-			F.weight[k][1] = vert.w[1];
-			F.weight[k][2] = 0.f;
-			vert.get_pos(F.vert[k]);
 			get_pos_bones(vert, p[k], Parent);
 		}
 		Fvector test_normal;
@@ -937,8 +1243,22 @@ void CSkeletonX::_FillVerticesSoft3W(const Fmatrix& view, CSkeletonWallmark& wm,
 		float cosa = test_normal.dotproduct(normal);
 		if (cosa < EPS) continue;
 
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
 		{
+			CSkeletonWallmark::WMFace F;
+			for (u32 k = 0; k < 3; k++)
+			{
+				const vertBoned3W& vert = Vertices3W[indices[idx + k]];
+				F.bone_id[k][0] = vert.m[0];
+				F.bone_id[k][1] = vert.m[1];
+				F.bone_id[k][2] = vert.m[2];
+				F.bone_id[k][3] = F.bone_id[k][2];
+				F.weight[k][0] = vert.w[0];
+				F.weight[k][1] = vert.w[1];
+				F.weight[k][2] = 0.f;
+				vert.get_pos(F.vert[k]);
+			}
 			Fvector UV;
 			for (u32 k = 0; k < 3; k++)
 			{
@@ -947,6 +1267,9 @@ void CSkeletonX::_FillVerticesSoft3W(const Fmatrix& view, CSkeletonWallmark& wm,
 				uv.x = (1 + UV.x) * .5f;
 				uv.y = (1 - UV.y) * .5f;
 			}
+#ifdef USE_DX11
+            AssignWallmarkOwnership(F,*it);
+#endif
 			wm.m_Faces.push_back(F);
 		}
 	}
@@ -960,8 +1283,117 @@ void CSkeletonX::_FillVerticesSoft4W(const Fmatrix& view, CSkeletonWallmark& wm,
 	{
 		Fvector p[3];
 		u32 idx = (*it) * 3;
-		CSkeletonWallmark::WMFace F;
+		for (u32 k = 0; k < 3; k++)
+		{
+			const vertBoned4W& vert = Vertices4W[indices[idx + k]];
+			get_pos_bones(vert, p[k], Parent);
+		}
+		Fvector test_normal;
+		test_normal.mknormal(p[0], p[1], p[2]);
+		float cosa = test_normal.dotproduct(normal);
+		if (cosa < EPS) continue;
 
+		if (BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+			(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p)))
+		{
+			CSkeletonWallmark::WMFace F;
+			for (u32 k = 0; k < 3; k++)
+			{
+				const vertBoned4W& vert = Vertices4W[indices[idx + k]];
+				F.bone_id[k][0] = vert.m[0];
+				F.bone_id[k][1] = vert.m[1];
+				F.bone_id[k][2] = vert.m[2];
+				F.bone_id[k][3] = vert.m[3];
+				F.weight[k][0] = vert.w[0];
+				F.weight[k][1] = vert.w[1];
+				F.weight[k][2] = vert.w[2];
+				CSkeletonWallmark::WMFace::LinksFrom4W(F.bone_id[k], F.weight[k]); // R27: 4W slots -> link-rule layout
+				vert.get_pos(F.vert[k]);
+			}
+			Fvector UV;
+			for (u32 k = 0; k < 3; k++)
+			{
+				Fvector2& uv = F.uv[k];
+				view.transform_tiny(UV, p[k]);
+				uv.x = (1 + UV.x) * .5f;
+				uv.y = (1 - UV.y) * .5f;
+			}
+#ifdef USE_DX11
+            AssignWallmarkOwnership(F,*it);
+#endif
+			wm.m_Faces.push_back(F);
+		}
+	}
+}
+
+#ifdef USE_DX11
+// wallmarkpick (2026-11-16): one face of _FillVerticesSoft*W (the dispatch order of _FillVertices: 1W, 2W, 3W, else 4W) with its
+// three corners given - CKinematics' posed copy, made by the same get_pos_bones from the same bone render matrices. The same
+// normal, outer and footprint / sphere tests, the same face record (bones, weights, rest position, uv, ownership).
+void CSkeletonX::PainterFillPosed(const Fmatrix& view, CSkeletonWallmark& wm, const Fvector& normal, float size, u16 face, const Fvector* posed)
+{
+	const u16* indices = PainterPickIndices();
+	if (!indices || !posed) return;
+	const u32 idx = u32(face) * 3;
+	Fvector p[3];
+	p[0] = posed[0];
+	p[1] = posed[1];
+	p[2] = posed[2];
+	Fvector test_normal;
+	test_normal.mknormal(p[0], p[1], p[2]);
+	float cosa = test_normal.dotproduct(normal);
+	if (cosa < EPS) return;
+	if (!(BloodProjectionFootprint::Outer(wm.ContactPoint(), normal, size, p, wm.m_OuterDepth) &&
+		(wm.m_SquareFootprint ? BloodProjectionFootprint::Intersects(view, p) : CDB::TestSphereTri(wm.ContactPoint(), size, p))))
+		return;
+	CSkeletonWallmark::WMFace F;
+	if (*Vertices1W)
+	{
+		for (u32 k = 0; k < 3; k++)
+		{
+			vertBoned1W& vert = Vertices1W[indices[idx + k]];
+			F.bone_id[k][0] = (u16)vert.matrix;
+			F.bone_id[k][1] = F.bone_id[k][0];
+			F.bone_id[k][2] = F.bone_id[k][0];
+			F.bone_id[k][3] = F.bone_id[k][0];
+			F.weight[k][0] = 0.f;
+			F.weight[k][1] = 0.f;
+			F.weight[k][2] = 0.f;
+			F.vert[k].set(vert.P);
+		}
+	}
+	else if (*Vertices2W)
+	{
+		for (u32 k = 0; k < 3; k++)
+		{
+			const vertBoned2W& vert = Vertices2W[indices[idx + k]];
+			F.bone_id[k][0] = vert.matrix0;
+			F.bone_id[k][1] = vert.matrix1;
+			F.bone_id[k][2] = F.bone_id[k][1];
+			F.bone_id[k][3] = F.bone_id[k][1];
+			F.weight[k][0] = vert.w;
+			F.weight[k][1] = 0.f;
+			F.weight[k][2] = 0.f;
+			F.vert[k].set(vert.P);
+		}
+	}
+	else if (*Vertices3W)
+	{
+		for (u32 k = 0; k < 3; k++)
+		{
+			const vertBoned3W& vert = Vertices3W[indices[idx + k]];
+			F.bone_id[k][0] = vert.m[0];
+			F.bone_id[k][1] = vert.m[1];
+			F.bone_id[k][2] = vert.m[2];
+			F.bone_id[k][3] = F.bone_id[k][2];
+			F.weight[k][0] = vert.w[0];
+			F.weight[k][1] = vert.w[1];
+			F.weight[k][2] = 0.f;
+			vert.get_pos(F.vert[k]);
+		}
+	}
+	else
+	{
 		for (u32 k = 0; k < 3; k++)
 		{
 			const vertBoned4W& vert = Vertices4W[indices[idx + k]];
@@ -972,28 +1404,22 @@ void CSkeletonX::_FillVerticesSoft4W(const Fmatrix& view, CSkeletonWallmark& wm,
 			F.weight[k][0] = vert.w[0];
 			F.weight[k][1] = vert.w[1];
 			F.weight[k][2] = vert.w[2];
+			CSkeletonWallmark::WMFace::LinksFrom4W(F.bone_id[k], F.weight[k]); // R27: 4W slots -> link-rule layout
 			vert.get_pos(F.vert[k]);
-			get_pos_bones(vert, p[k], Parent);
-		}
-		Fvector test_normal;
-		test_normal.mknormal(p[0], p[1], p[2]);
-		float cosa = test_normal.dotproduct(normal);
-		if (cosa < EPS) continue;
-
-		if (CDB::TestSphereTri(wm.ContactPoint(), size, p))
-		{
-			Fvector UV;
-			for (u32 k = 0; k < 3; k++)
-			{
-				Fvector2& uv = F.uv[k];
-				view.transform_tiny(UV, p[k]);
-				uv.x = (1 + UV.x) * .5f;
-				uv.y = (1 - UV.y) * .5f;
-			}
-			wm.m_Faces.push_back(F);
 		}
 	}
+	Fvector UV;
+	for (u32 k = 0; k < 3; k++)
+	{
+		Fvector2& uv = F.uv[k];
+		view.transform_tiny(UV, p[k]);
+		uv.x = (1 + UV.x) * .5f;
+		uv.y = (1 - UV.y) * .5f;
+	}
+	AssignWallmarkOwnership(F, face);
+	wm.m_Faces.push_back(F);
 }
+#endif
 
 #if defined(USE_DX10) || defined(USE_DX11)
 void CSkeletonX::_DuplicateIndices(const char* N, IReader* data)
@@ -1010,3 +1436,18 @@ void CSkeletonX::_DuplicateIndices(const char* N, IReader* data)
 	m_Indices.create(crc, iCount, (u16*)data->pointer());
 }
 #endif	//	USE_DX10
+
+// Transfer the small original source after complete model loading. No software
+// vertex arrays or hardware-buffer decode is involved. Parent clones share it.
+bool CSkeletonX::AppendOriginalSkinProxySource(painter_skin_proxy::Source& out,bool opaque)
+{
+    if(!m_original_skin_proxy_child||out.vertices.size()+m_original_skin_proxy_child->vertices.size()>16384)return false;
+    const auto base=std::uint32_t(out.vertices.size());bool valid=ChildIDX!=u16(-1)&&!m_original_skin_proxy_child->triangles.empty()&&out.triangles.size()+m_original_skin_proxy_child->triangles.size()<=131072;
+    for(const auto& t:m_original_skin_proxy_child->triangles)for(auto i:t.vertices)valid=valid&&i<m_original_skin_proxy_child->vertices.size();
+    if(!valid)out.complete_triangles=false;
+    if(valid){for(auto t:m_original_skin_proxy_child->triangles){t.child=ChildIDX;for(auto& i:t.vertices)i+=base;out.triangles.push_back(t);}if(opaque)out.opaque_children.push_back(ChildIDX);}
+    out.vertices.insert(out.vertices.end(),m_original_skin_proxy_child->vertices.begin(),m_original_skin_proxy_child->vertices.end());
+    m_original_skin_proxy_child.reset();
+    return true;
+}
+

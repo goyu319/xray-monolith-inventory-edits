@@ -405,6 +405,24 @@ public:
 	ref_constant hwc_s_consts;
 	ref_constant hwc_s_xform;
 	ref_constant hwc_s_array;
+#ifdef USE_DX11
+	// Grass instancing (r__grass_instancing): each grass type's two lod elements get an instanced twin whose passes
+	// use the "<vs>_inst" vertex shader. The twin reads every blade's five rows (transform, colour, terrain normal and
+	// alpha) from hw_InstBuffer by SV_InstanceID, so one draw covers a whole type. Types without such a shader, or a
+	// device without no-overwrite maps on buffer views, keep the batched path.
+	struct InstancedType { ref_selement lod[2]; };
+	xr_vector<InstancedType> hw_InstTypes;
+	bool hw_InstSupported = false;
+	ID3D11Buffer* hw_InstBuffer = nullptr;
+	ID3D11ShaderResourceView* hw_InstSRV = nullptr;
+	u32 hw_InstCapacity = 0; // rows (float4)
+	u32 hw_InstCursor = 0; // rows written this frame
+	u32 hw_InstFrame = u32(-1);
+	ref_selement hw_Instanced(const ref_selement& source);
+	Fvector4* hw_InstMap(u32 rows);
+	void hw_InstRelease();
+	void hw_Render_instanced(CDetail& Object, xr_vector<SlotItemVec*>& vis, u32 vOffset, u32 iOffset, light* L);
+#endif
 	void hw_Load();
 	void hw_Load_Geom();
 	void hw_Load_Shaders();

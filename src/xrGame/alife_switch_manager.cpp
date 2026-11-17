@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "painter_stream/NativeStream.h"
 #include "alife_switch_manager.h"
 #include "xrServer_Objects_ALife.h"
 #include "alife_graph_registry.h"
@@ -85,6 +86,7 @@ CALifeSwitchManager::~CALifeSwitchManager()
 
 void CALifeSwitchManager::add_online(CSE_ALifeDynamicObject* object, bool update_registries)
 {
+	painter_stream::OnlineBundleScope bundle(*object);
 	START_PROFILE("ALife/switch/add_online")
 		VERIFY((ai().game_graph().vertex(object->m_tGraphID)->level_id() == graph().level().level_id()));
 
@@ -113,6 +115,7 @@ void CALifeSwitchManager::add_online(CSE_ALifeDynamicObject* object, bool update
 void CALifeSwitchManager::remove_online(CSE_ALifeDynamicObject* object, bool update_registries)
 {
 	START_PROFILE("ALife/switch/remove_online")
+		painter_stream::Offline(*object);
 		object->m_bOnline = false;
 
 		// Drop client-only children (m_bALifeControl=false, e.g. an online npc's

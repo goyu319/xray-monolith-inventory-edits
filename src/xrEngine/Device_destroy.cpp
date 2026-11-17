@@ -5,6 +5,7 @@
 #include "IGame_Persistent.h"
 #include "xr_IOConsole.h"
 #include "MonitorList.h"
+#include "PainterQuitWatch.h" // quitfix: teardown stage names
 
 void CRenderDevice::_Destroy(BOOL bKeepTextures)
 {
@@ -14,7 +15,9 @@ void CRenderDevice::_Destroy(BOOL bKeepTextures)
 	b_is_Ready = FALSE;
 	Statistic->OnDeviceDestroy();
 	m_imgui.OnDeviceDestroy();
+	PainterQuitWatch::stage("render_destroy");
 	::Render->destroy();
+	PainterQuitWatch::stage("device_resources");
 	m_pRender->OnDeviceDestroy(bKeepTextures);
 	//Resources->OnDeviceDestroy (bKeepTextures);
 	//RCache.OnDeviceDestroy ();
@@ -30,12 +33,15 @@ void CRenderDevice::Destroy(void)
 
 	ShowCursor(TRUE);
 	ClipCursor(NULL);
+	PainterQuitWatch::stage("device_validate");
 	m_pRender->ValidateHW();
 
 	_Destroy(FALSE);
 
 	// real destroy
+	PainterQuitWatch::stage("device_hw");
 	m_pRender->DestroyHW();
+	PainterQuitWatch::stage("device_done");
 
 	//xr_delete (Resources);
 	//HW.DestroyDevice ();

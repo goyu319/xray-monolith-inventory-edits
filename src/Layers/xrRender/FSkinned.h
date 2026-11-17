@@ -14,6 +14,10 @@
 #	include	"SkeletonX.h"
 #endif
 struct SEnumVerticesCallback;
+struct RuntimeSkinChild;
+struct PainterTissueGpu;
+struct RuntimeRequiredFields;
+#include <memory>
 
 class CSkeletonX_ext : public CSkeletonX // shared code for SkeletonX derivates
 {
@@ -61,6 +65,14 @@ public:
 	{
 	}
 
+    std::shared_ptr<PainterTissueGpu> painter_tissue;
+    std::shared_ptr<RuntimeRequiredFields> painter_required_fields;
+	bool BuildRuntime(const RuntimeSkinChild& data, CKinematics* owner, const dxRender_Visual& material);
+	// Publish-barrier half of an off-thread staged child (RuntimeGeometryStage.h).
+	bool AdoptRuntime(struct RuntimeStagedChild& staged, CKinematics* owner, const dxRender_Visual& material,
+	                  struct RuntimeShaderReuse& reuse);
+	// r_painter_publish 2: field and GPU-byte comparison with a BuildRuntime reference.
+	bool RuntimeMatches(CSkeletonX_ST& reference, char* diff, size_t diff_size);
 	virtual void Render(float LOD);
 	virtual void Load(const char* N, IReader* data, u32 dwFlags);
 	virtual void Copy(dxRender_Visual* pFrom);
@@ -82,6 +94,7 @@ private:
 	typedef FProgressive inherited1;
 	typedef CSkeletonX_ext inherited2;
 public:
+	virtual u32 PainterPickIndexBase(); // triggerhitch: the index base of PickBone below
 	CSkeletonX_PM()
 	{
 	}

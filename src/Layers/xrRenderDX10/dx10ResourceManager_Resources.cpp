@@ -145,6 +145,7 @@ void CResourceManager::_DeletePass(const SPass* P)
 }
 
 //--------------------------------------------------------------------------------------------------------------
+#include "../xrRender/PainterSoftShader.h"
 SVS* CResourceManager::_CreateVS(LPCSTR _name)
 {
 	xrCriticalSectionGuard guard(creationGuard);
@@ -224,6 +225,14 @@ SVS* CResourceManager::_CreateVS(LPCSTR _name)
 		HRESULT const _hr = ::Render->shader_compile(name, (DWORD const*)data, size, c_entry, c_target,
 		                                             D3D10_SHADER_PACK_MATRIX_ROW_MAJOR, (void*&)_vs);
 
+		if (FAILED(_hr) && PainterSoftShaderActive())
+		{
+			Msg("! [painter] runtime material vertex shader refused: %s", name);
+			m_vs.erase(m_vs.find(N));
+			_vs->dwFlags &= ~xr_resource_flagged::RF_REGISTERED;
+			xr_delete(_vs);
+			return nullptr;
+		}
 		VERIFY(SUCCEEDED(_hr));
 
 		CHECK_OR_EXIT(
@@ -355,6 +364,14 @@ SPS* CResourceManager::_CreatePS(LPCSTR _name)
 		HRESULT const _hr = ::Render->shader_compile(name, (DWORD const*)data, size, c_entry, c_target,
 		                                             D3D10_SHADER_PACK_MATRIX_ROW_MAJOR, (void*&)_ps);
 
+		if (FAILED(_hr) && PainterSoftShaderActive())
+		{
+			Msg("! [painter] runtime material pixel shader refused: %s", name);
+			m_ps.erase(m_ps.find(N));
+			_ps->dwFlags &= ~xr_resource_flagged::RF_REGISTERED;
+			xr_delete(_ps);
+			return nullptr;
+		}
 		VERIFY(SUCCEEDED(_hr));
 
 		CHECK_OR_EXIT(

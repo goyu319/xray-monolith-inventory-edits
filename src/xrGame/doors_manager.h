@@ -31,6 +31,7 @@ namespace doors
 		void lock_door(door* door);
 		void unlock_door(door* door);
 		bool is_door_blocked(door* door) const;
+		void nearest(Fvector const& position, float radius, doors_type& result) const;
 
 	public:
 		bool actualize_doors_state(actor& npc, float average_speed);

@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "painter_stream/NativeStream.h"
 #include "xrServer_Objects_ALife.h"
 #include "xrServer_Objects_ALife_Items.h" // AMP: CSE_ALifeItemContainer
 #include "alife_simulator.h"
@@ -201,6 +202,7 @@ void CSE_ALifeDynamicObject::try_switch_online()
 		return;
 	}
 
+	painter_stream::OrdinaryOnlineScope ordinary(*this);
 	alife().switch_online(this);
 }
 

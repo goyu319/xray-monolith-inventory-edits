@@ -211,6 +211,7 @@ void CPEDef::ExecuteCollision(PAPI::Particle* particles, u32 p_cnt, float dt, CP
 //------------------------------------------------------------------------------
 BOOL CPEDef::Load(IReader& F)
 {
+    m_BloodEffectId=BloodEffect::None; // Legacy binary has no authored blood ID.
 	R_ASSERT(F.find_chunk(PED_CHUNK_VERSION));
 	u16 version = F.r_u16();
 
@@ -296,6 +297,8 @@ BOOL CPEDef::Load(IReader& F)
 
 BOOL CPEDef::Load2(CInifile& ini)
 {
+    m_BloodEffectId=ini.line_exist("sprite","blood_effect_id") ? ini.r_u32("sprite","blood_effect_id") : BloodEffect::None;
+    if(!BloodEffect::IsParticle(m_BloodEffectId))m_BloodEffectId=BloodEffect::None;
 	//.	u16 version		= ini.r_u16("_effect", "version");
 	if (ini.line_exist("_effect", "update_step")) 
 	{
@@ -374,6 +377,7 @@ void CPEDef::Save2(CInifile& ini)
 	{
 		ini.w_string("sprite", "shader", m_ShaderName.c_str());
 		ini.w_string("sprite", "texture", m_TextureName.c_str());
+        if(BloodEffect::IsParticle(m_BloodEffectId))ini.w_u32("sprite","blood_effect_id",m_BloodEffectId);
 	}
 
 	if (m_Flags.is(dfFramed))

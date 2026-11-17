@@ -6,6 +6,8 @@
 
 
 #include "weaponammo.h"
+#include "painter_hit_ammo.h"
+#include "painter_fragment_source.h"
 #include "tracer.h"
 
 //коэфициенты и параметры патрона
@@ -46,6 +48,8 @@ struct SBullet
 	u16 parent_id; //ID персонажа который иницировал действие
 	u16 weapon_id; //ID оружия из которого была выпущены пуля
 	LPCSTR catridgeSection;
+	PainterHitAmmo ammo; // owned across magazine pop, bullet/event copies
+	PainterFragmentSource painter_fragment; // local emitted source, copied by bullet events; never serialized
 	static u32 bulletCount;
 	u32 bulletId;
 
@@ -53,6 +57,7 @@ struct SBullet
 	Fvector tracer_start_position;
 
 	Fvector start_position;
+	Fvector shot_origin; // the muzzle: start_position moves to every ricochet / exit point, this stays (near misses)
 	Fvector start_velocity;
 	u32 born_time;
 	float life_time;

@@ -30,6 +30,7 @@ protected:
 	enum { RM_SKINNING_SOFT, RM_SINGLE, RM_SKINNING_1B, RM_SKINNING_2B, RM_SKINNING_3B, RM_SKINNING_4B };
 
 	CKinematics* Parent; // setted up by parent
+    std::shared_ptr<painter_skin_proxy::Source> m_original_skin_proxy_child;
 	ref_smem<vertBoned1W> Vertices1W; // shared
 	ref_smem<vertBoned2W> Vertices2W; // shared
 	ref_smem<vertBoned3W> Vertices3W; // shared
@@ -58,8 +59,19 @@ protected:
 	};
 
 	void _Copy(CSkeletonX* V);
+#ifdef USE_DX11
+	std::shared_ptr<const CSkeletonWallmark::ProjectionSource> m_ProjectionSource;
+    std::shared_ptr<PainterWallmarkOwnershipGpu> m_WallmarkOwnership;
+    u32 m_WallmarkSourceChild=~0u;
+    std::shared_ptr<const std::vector<u32>> m_WallmarkSourceFaces;
+    void AssignWallmarkOwnership(CSkeletonWallmark::WMFace&face,u32 triangle)const;
+	u32 m_ProjectionIndexBase = 0, m_ProjectionIndexCount = 0;
+	void CacheProjectionSource(u32 iBase, u32 iCount, const xr_vector<xr_vector<CBoneData::FacesVec>>* faces = nullptr, bool force = false) noexcept;
+#endif
 	void _Render_soft(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount, CBoneInstance* bones);
-	void _Render(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount);
+	// vBase: DrawIndexed base vertex (Fvisual::vBase; non-zero for runtime
+	// children that share one packet VB). Ignored by the software path.
+	void _Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount);
 	void _Load(const char* N, IReader* data, u32& dwVertCount);
 
 	virtual void _Load_hw(Fvisual& V, void* data) = 0;
@@ -125,6 +137,30 @@ public:
 	const void* SVP_SkeletonOwner() const { return Parent; }
 	// pip append each dedup bind-pose vertex, model space, with its global dominant bone id
 	void SVP_GatherVerts(xr_vector<Fvector>& positions, xr_vector<u16>& bones);
+    bool receives_wallmarks = true;
+    // triggerhitch: what PickBone reads, for CKinematics::LL_PickNearest's posed memo (PainterPickNearest.h)
+    CKinematics* PainterPickParent() const { return Parent; }
+    virtual u32 PainterPickIndexBase() { return 0; } // the index base PickBone passes (CSkeletonX_PM: its window)
+#ifdef USE_DX11
+    const u16* PainterPickIndices();
+    size_t PainterPickIndexCount();
+    const void* PainterPickVertexKey();
+    u32 PainterPickVertexCount();
+    bool PainterPoseVertices(Fvector* out, u32 count);
+    bool PainterPickAccept(u32 primitive, const u16* indices, float u, float v);
+    // wallmarkpick: one face of _FillVerticesSoft*W with its posed corners given (CKinematics::AddWallmark, PainterWallmarkScan.h)
+    void PainterFillPosed(const Fmatrix& view, CSkeletonWallmark& wm, const Fvector& normal, float size, u16 face, const Fvector* posed);
+#endif
+#ifdef USE_DX11
+	// Called by CKinematics::Load only after its bone-face sort/unique phase.
+	void FinalizeProjectionSource(const xr_vector<xr_vector<CBoneData::FacesVec>>* faces = nullptr, bool force = false) noexcept;
+	bool AppendProjectionRanges(const U16Vec& bones, CSkeletonWallmark::ProjectionSnapshot& hit, bool require_gpu_ready = true) const;
+	bool HasProjectionSource() const { return m_ProjectionSource!=nullptr; }
+    void SetWallmarkOwnership(const std::shared_ptr<PainterWallmarkOwnershipGpu>&field){m_WallmarkOwnership=field;}
+    void SetWallmarkProvenance(u32 child,const std::vector<u32>&faces){m_WallmarkSourceChild=child;m_WallmarkSourceFaces=std::make_shared<const std::vector<u32>>(faces);}
+	const CSkeletonWallmark::ProjectionSource* ProjectionSourceKey() const { return m_ProjectionSource.get(); }
+	const std::shared_ptr<const CSkeletonWallmark::ProjectionSource>& ProjectionSourceHandle() const { return m_ProjectionSource; }
+#endif
 
 	//--DSR-- SilencerOverheat_start
 	BOOL has_bone_id(u16 bone_id)
@@ -144,6 +180,8 @@ public:
 		ChildIDX = u16(-1);
 	}
 
+	u16 GeometryChildIndex() const { return ChildIDX; }
+    bool AppendOriginalSkinProxySource(painter_skin_proxy::Source&,bool opaque=false);
 	virtual void SetParent(CKinematics* K) { Parent = K; }
 	virtual void AfterLoad(CKinematics* parent, u16 child_idx) =0;
 	virtual void EnumBoneVertices(SEnumVerticesCallback& C, u16 bone_id) =0;
@@ -161,9 +199,10 @@ protected:
 #endif	//	USE_DX10
 };
 
-template <typename T_vertex, typename T_buffer>
+struct SkeletonPickAcceptAll {bool operator()(u32,float,float)const noexcept{return true;}};
+template <typename T_vertex, typename T_buffer, typename T_accept=SkeletonPickAcceptAll>
 BOOL pick_bone(T_buffer vertices, CKinematics* Parent, IKinematics::pick_result& r, float dist, const Fvector& S,
-               const Fvector& D, u16* indices, CBoneData::FacesVec& faces)
+               const Fvector& D, u16* indices, CBoneData::FacesVec& faces, T_accept accept=T_accept{})
 {
 	for (CBoneData::FacesVecIt it = faces.begin(); it != faces.end(); it++)
 	{
@@ -177,6 +216,7 @@ BOOL pick_bone(T_buffer vertices, CKinematics* Parent, IKinematics::pick_result&
 		r.dist = flt_max;
 		if (CDB::TestRayTri(S, D, r.tri, u, v, r.dist, true) && (r.dist < dist))
 		{
+			if(!accept(*it,u,v))continue;
 			r.normal.mknormal(r.tri[0], r.tri[1], r.tri[2]);
 			return TRUE;
 		};

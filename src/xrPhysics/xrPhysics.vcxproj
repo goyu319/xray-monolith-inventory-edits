@@ -373,6 +373,7 @@
     <ClCompile Include="PHActorCharacter.cpp" />
     <ClCompile Include="PHAICharacter.cpp" />
     <ClCompile Include="PHCapture.cpp" />
+    <ClCompile Include="PHTether.cpp" />
     <ClCompile Include="PHCaptureInit.cpp" />
     <ClCompile Include="PHCharacter.cpp" />
     <ClCompile Include="PHCollideValidator.cpp" />
@@ -451,6 +452,8 @@
     <ClInclude Include="icollisiondamagereceiver.h" />
     <ClInclude Include="IElevatorState.h" />
     <ClInclude Include="IPHCapture.h" />
+    <ClInclude Include="IPHTether.h" />
+    <ClInclude Include="PHTether.h" />
     <ClInclude Include="IPHStaticGeomShell.h" />
     <ClInclude Include="IPHWorld.h" />
     <ClInclude Include="IPhysicsShellHolder.h" />

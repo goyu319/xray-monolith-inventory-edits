@@ -3,6 +3,9 @@
 #define ParticleGroupH
 
 #include "../xrRender/dxParticleCustom.h"
+#include "../../Include/xrRender/BloodParticleColor.h"
+#include "../../Include/xrRender/BloodParticleSize.h"
+#include "../../Include/xrRender/BloodParticleThermalSource.h"
 
 namespace PS
 {
@@ -82,6 +85,14 @@ namespace PS
 		Fvector m_InitialPosition;
 	public:
 		xrCriticalSection onframe_lock;
+        BloodParticleColor m_SpriteColor;
+        BloodParticleSize m_SpriteSize;
+        BloodParticleThermalSource m_BloodThermalSource;
+
+        bool SetBloodThermalSource(bool known,bool corpse,u32 death) override;
+ // 2026-10-17: a group scales its effects' sprites like it tints them
+        bool SetColorScale(float r,float g,float b) override;
+        bool SetSizeScale(float value) override;
 		using VisualVec = xr_vector<dxRender_Visual*>;
 		using VisualVecIt = VisualVec::iterator;
 
@@ -143,7 +154,8 @@ namespace PS
 
 		virtual void Copy(dxRender_Visual* pFrom)
 		{
-			FATAL("Can't duplicate particle system - NOT IMPLEMENTED");
+			m_SpriteColor=BloodParticleColor{};
+            FATAL("Can't duplicate particle system - NOT IMPLEMENTED");
 		}
 
 		virtual void OnDeviceCreate();

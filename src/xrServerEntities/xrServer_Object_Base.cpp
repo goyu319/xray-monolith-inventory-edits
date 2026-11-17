@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "../xrEngine/PainterLifetimeCookie.h"
 #include "xrServer_Objects.h"
 #include "xrMessages.h"
 #include "game_base_space.h"
@@ -80,6 +81,9 @@ void CPureServerObject::save(NET_Packet& tNetPacket)
 ////////////////////////////////////////////////////////////////////////////
 CSE_Abstract::CSE_Abstract(LPCSTR caSection)
 {
+    static std::atomic<std::uint64_t> next_birth{0};
+    m_painter_birth_cookie=painter_lifetime::allocate(next_birth);
+    R_ASSERT2(m_painter_birth_cookie,"Native server birth cookie exhausted");
 	m_editor_flags.zero();
 	RespawnTime = 0;
 	net_Ready = FALSE;

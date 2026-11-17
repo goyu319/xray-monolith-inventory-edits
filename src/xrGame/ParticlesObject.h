@@ -2,6 +2,7 @@
 #define ParticlesObjectH
 
 #include "../xrEngine/PS_instance.h"
+#include "../xrParticles/PacketPlayback.h"
 
 extern const Fvector zero_vel;
 
@@ -18,6 +19,8 @@ protected:
 	bool m_bStopping; //вызвана функция Stop()
 
 	bool NeedUpdate = false;
+	bool m_HasPlayed = false;
+	ParticlePacketPlayback m_PacketPlayback;
 	
 public:
 	virtual ~CParticlesObject();
@@ -37,6 +40,8 @@ public:
 
 	void play_at_pos(const Fvector& pos, BOOL xform = FALSE);
 	virtual void Play(bool bHudMode);
+	bool PlayPacket(bool bHudMode);
+	bool AdvancePacketPlayback(IParticleCustom* visual, u32 now) override;
 	void Stop(BOOL bDefferedStop = TRUE);
 	// virtual BOOL Locked() { return mt_dt; }
 

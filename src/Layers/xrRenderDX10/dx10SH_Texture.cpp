@@ -203,6 +203,21 @@ CTexture::~CTexture()
 	DEV->_DeleteTexture(this);
 }
 
+#ifdef USE_DX11
+// Owner-thread adoption for private dynamic resources. Native textures/views
+// already exist; never wait for loading or ask the driver to allocate here.
+bool CTexture::surface_set_prepared(ID3DBaseTexture* surf, ID3DShaderResourceView* view)
+{
+    if(flags.bLoading || !surf || !view || !cName.size() || !strstr(cName.c_str(), "$user$"))return false;
+    surf->AddRef();view->AddRef();
+    auto* oldSurface=pSurface;auto* oldView=m_pSRView;
+    pSurface=surf;m_pSRView=view;desc_cache=nullptr;
+    flags.bUser=true;flags.bLoaded=true;flags.bLoadedAsStaging=false;
+    bind=xr_make_delegate(this,&CTexture::apply_normal);
+    _RELEASE(oldSurface);_RELEASE(oldView);
+    return true;
+}
+#endif
 void CTexture::surface_set(ID3DBaseTexture* surf)
 {
 	while (IsLoading())
@@ -273,6 +288,9 @@ void CTexture::surface_set(ID3DBaseTexture* surf)
 		else
 			CHK_DX(HW.pDevice->CreateShaderResourceView(pSurface, NULL, &m_pSRView));
 	}
+#ifdef USE_DX11
+    PainterBloodTextureSource::publish(&painter_blood_snapshot, pSurface, m_pSRView, cName.c_str());
+#endif
 }
 
 ID3DBaseTexture* CTexture::surface_get()
@@ -438,6 +456,9 @@ void CTexture::ProcessStaging()
 		VERIFY(!"CTexture::ProcessStaging unsupported dimensions.");
 	}
 
+#ifdef USE_DX11
+    PainterBloodTextureSource::propagate(pSurface, pTargetSurface);
+#endif
 	HW.pContext->CopyResource(pTargetSurface, pSurface);
 	/*
 	for( int i=0; i<iNumSubresources; ++i)
@@ -908,6 +929,9 @@ void CTexture::Load()
 		if (pSurface && bCreateView)
 			CHK_DX(HW.pDevice->CreateShaderResourceView(pSurface, NULL, &m_pSRView));
 	}
+#ifdef USE_DX11
+    PainterBloodTextureSource::publish(&painter_blood_snapshot, pSurface, m_pSRView, cName.c_str());
+#endif
 	PostLoad();
 	flags.bLoading = false;
 	flags.bLoaded = true;

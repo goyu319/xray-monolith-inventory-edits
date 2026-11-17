@@ -9,7 +9,8 @@
 // Construction/Destruction
 //////////////////////////////////////////////////////////////////////
 
-int rsDVB_Size = 4096; //512+1024; //what the fuck. it should be 4096
+// 64K-triangle wallmark reservations use 4.5 MiB; retain room for stream users.
+int rsDVB_Size = 16384;
 int rsDIB_Size = 512;
 
 void _VertexStream::Create()

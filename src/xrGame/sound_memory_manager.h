@@ -9,6 +9,7 @@
 #pragma once
 
 #include "memory_space.h"
+#include "painter_ai/OwnSoundCapture.h"
 
 #ifdef DEBUG
 #	define USE_SELECTED_SOUND
@@ -48,6 +49,7 @@ private:
 	DELAYED_SOUND_OBJECTS m_delayed_objects;
 
 private:
+	painter::combat::engine::OwnSoundCapture m_personal_sounds;
 	SOUNDS* m_sounds;
 	typedef xr_unordered_flat_map<u16, u32> OBJECT_INDEX_CACHE;
 	mutable OBJECT_INDEX_CACHE m_object_indices;
@@ -99,6 +101,7 @@ public:
 	void enable(const CObject* object, bool enable);
 
 public:
+	const painter::combat::engine::OwnSoundCapture& personal_sounds() const { return m_personal_sounds; }
 	IC const SOUNDS& objects() const;
 	const CSoundObject* object_by_id(u16 id) const;
 #ifdef USE_SELECTED_SOUND

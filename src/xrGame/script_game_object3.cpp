@@ -7,6 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////
 
 #include "pch_script.h"
+#include <chrono>
 #include "script_game_object.h"
 #include "script_game_object_impl.h"
 #include "ai_space.h"
@@ -35,6 +36,7 @@
 #include "smart_cover_loophole.h"
 #include "movement_manager_space.h"
 #include "detail_path_manager_space.h"
+#include "detail_path_manager.h"
 #include "level_debug.h"
 #include "ai/monsters/BaseMonster/base_monster.h"
 #include "ai/monsters/control_path_builder_base.h"
@@ -1900,6 +1902,310 @@ Fvector CScriptGameObject::head_orientation() const
 	return (Fvector().setHP(-r.yaw, -r.pitch));
 }
 
+void CScriptGameObject::set_painter_gait(int gait)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_gait!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_gait(u8(gait < 0 ? 0 : (gait > 2 ? 2 : gait)));
+}
+
+int CScriptGameObject::painter_gait() const
+{
+	CAI_Stalker const* stalker = smart_cast<CAI_Stalker const*>(&object());
+	return stalker ? int(stalker->painter_gait_effective()) : 0;
+}
+
+float CScriptGameObject::painter_speed_scale() const
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_speed_scale!", object().cNameSect().c_str()).c_str());
+		return 1.f;
+	}
+	return stalker->painter_speed_scale();
+}
+
+void CScriptGameObject::set_painter_speed_scale(float scale)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_speed_scale!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_speed_scale(scale);
+}
+
+float CScriptGameObject::painter_lean() const
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_lean!", object().cNameSect().c_str()).c_str());
+		return 0.f;
+	}
+	return stalker->painter_lean();
+}
+
+void CScriptGameObject::set_painter_lean(float lean)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_lean!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_lean(lean);
+}
+
+void CScriptGameObject::painter_throw_target(const Fvector& position)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_throw_target!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	if (!_valid(position))
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: painter_throw_target got an invalid position", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->painter_throw(position, nullptr);
+}
+
+void CScriptGameObject::painter_throw_through(const Fvector& door, const Fvector& target)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_throw_through!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	if (!_valid(door) || !_valid(target))
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: painter_throw_through got an invalid position", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->painter_throw(target, &door);
+}
+
+bool CScriptGameObject::painter_throw_clear()
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_throw_clear!", object().cNameSect().c_str()).c_str());
+		return false;
+	}
+	return stalker->throw_enabled();
+}
+
+// The aimed throw (painter_throw_target / painter_throw_through) as solved now: clear (the arc misses geometry), reason
+// (ok, no_target, no_grenade, out_of_range, door_behind, no_arc, blocked), release (where the grenade leaves the hand),
+// target (where it is aimed: a door throw re-aims onto the line from the release point through the door point),
+// blocked_at (where the arc hits something, when blocked) and speed. Solving needs the grenade in hand.
+::luabind::object CScriptGameObject::painter_throw_state()
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_throw_state!", object().cNameSect().c_str()).c_str());
+		return ::luabind::object();
+	}
+	lua_State* const L = ai().script_engine().lua();
+	::luabind::object result = ::luabind::newtable(L);
+	if (!stalker->painter_throw_active())
+	{
+		result["clear"] = false;
+		result["reason"] = "no_target"; // no painter_throw_target / painter_throw_through set (or the native AI aims again)
+		return result;
+	}
+	bool const clear = stalker->throw_enabled();
+	result["clear"] = clear;
+	result["reason"] = stalker->painter_throw_reason();
+	result["release"] = stalker->painter_throw_release();
+	result["target"] = stalker->painter_throw_aim();
+	result["speed"] = stalker->painter_throw_speed();
+	if (!clear && !xr_strcmp(stalker->painter_throw_reason(), "blocked") && stalker->painter_throw_blocked_at().x < flt_max)
+		result["blocked_at"] = stalker->painter_throw_blocked_at();
+	return result;
+}
+
+// The detail path the stalker is walking: its points, the next one, and the next corner, where the path has turned more
+// than 30 degrees from his heading along it (cumulative, so a smooth arc counts), with the distance along the path to it
+// and its side (+1 right, -1 left), so the AI can slow down before a corner and look round it.
+::luabind::object CScriptGameObject::painter_path_points()
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_path_points!", object().cNameSect().c_str()).c_str());
+		return ::luabind::object();
+	}
+	xr_vector<DetailPathManager::STravelPathPoint> const& path = stalker->movement().detail().path();
+	if (path.empty())
+		return ::luabind::object();
+	u32 const next = _min(stalker->movement().detail().curr_travel_point_index() + 1, u32(path.size()) - 1);
+	lua_State* const L = ai().script_engine().lua();
+	::luabind::object result = ::luabind::newtable(L);
+	::luabind::object points = ::luabind::newtable(L);
+	for (u32 i = 0; i < path.size(); ++i)
+		points[i + 1] = path[i].position;
+	result["points"] = points;
+	result["index"] = next + 1;
+	Fvector const here = stalker->Position();
+	Fvector heading = Fvector().sub(path[next].position, here);
+	heading.y = 0.f;
+	if (heading.square_magnitude() < EPS_S && next + 1 < path.size())
+		heading.set(path[next + 1].position.x - path[next].position.x, 0.f, path[next + 1].position.z - path[next].position.z);
+	float travelled = here.distance_to_xz(path[next].position);
+	float remaining = travelled;
+	bool corner = heading.square_magnitude() < EPS_S;
+	if (!corner)
+		heading.normalize();
+	for (u32 i = next; i + 1 < path.size(); ++i)
+	{
+		Fvector d = Fvector().set(path[i + 1].position.x - path[i].position.x, 0.f, path[i + 1].position.z - path[i].position.z);
+		float const length = d.magnitude();
+		remaining += length;
+		if (corner)
+			continue;
+		if (length > EPS_L)
+		{
+			d.div(length);
+			float const turn = acosf(clampr(heading.dotproduct(d), -1.f, 1.f));
+			if (turn > deg2rad(30.f))
+			{
+				corner = true;
+				result["corner"] = i + 1;
+				result["corner_position"] = path[i].position;
+				result["corner_distance"] = travelled;
+				result["corner_angle"] = rad2deg(turn);
+				result["corner_side"] = heading.z * d.x - heading.x * d.z > 0.f ? 1 : -1;
+				continue;
+			}
+		}
+		travelled += length;
+	}
+	result["remaining"] = remaining;
+	return result;
+}
+
+u32 CScriptGameObject::painter_forced_action() const
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_forced_action!", object().cNameSect().c_str()).c_str());
+		return 0;
+	}
+	return stalker->painter_forced_action();
+}
+
+void CScriptGameObject::set_painter_forced_action(u32 id)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_forced_action!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_forced_action(id);
+}
+
+int CScriptGameObject::painter_lean_level() const
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_lean_level!", object().cNameSect().c_str()).c_str());
+		return 0;
+	}
+	return stalker->painter_lean_level();
+}
+
+void CScriptGameObject::set_painter_lean_level(int level)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_lean_level!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_lean_level(level);
+}
+
+int CScriptGameObject::painter_native_fire_flags()
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+										make_string("CScriptGameObject [%s]: cannot access class member painter_native_fire_flags!", object().cNameSect().c_str()).c_str());
+		return 0;
+	}
+	return int(stalker->painter_native_fire_flags());
+}
+
+bool CScriptGameObject::painter_native_fire_verdict()
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+										make_string("CScriptGameObject [%s]: cannot access class member painter_native_fire_verdict!", object().cNameSect().c_str()).c_str());
+		return false;
+	}
+	return stalker->painter_native_fire_verdict();
+}
+
+
+int CScriptGameObject::painter_shoulder() const
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member painter_shoulder!", object().cNameSect().c_str()).c_str());
+		return 0;
+	}
+	return stalker->painter_shoulder_left() ? 1 : 0;
+}
+
+void CScriptGameObject::set_painter_shoulder(int mode)
+{
+	CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(&object());
+	if (!stalker)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                make_string("CScriptGameObject [%s]: cannot access class member set_painter_shoulder!", object().cNameSect().c_str()).c_str());
+		return;
+	}
+	stalker->set_painter_shoulder(mode);
+}
+
 void CScriptGameObject::info_add(LPCSTR text)
 {
 #ifdef DEBUG
@@ -2466,8 +2772,14 @@ bool CScriptGameObject::WeaponInGrenadeMode()
 	return wpn->m_bGrenadeMode;
 }
 
+// Zero clock reads unless explicitly enabled in the console. Logs the Lua
+// boundary's name lookup/visibility query and recursive hide separately.
+int painter_bone_visibility_timing = 0;
+
 void CScriptGameObject::SetBoneVisible(LPCSTR bone_name, bool bVisibility, bool bRecursive, bool bHud)
 {
+    const bool timing = painter_bone_visibility_timing != 0;
+    const auto started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	IKinematics* k = nullptr;
 
 	CHudItem* itm = smart_cast<CHudItem*>(&object());
@@ -2483,8 +2795,18 @@ void CScriptGameObject::SetBoneVisible(LPCSTR bone_name, bool bVisibility, bool 
 	if (bone_id == BI_NONE)
 		return;
 
-	if (bVisibility != k->LL_GetBoneVisible(bone_id))
+	const bool changed = bVisibility != (k->LL_GetBoneVisible(bone_id) != FALSE);
+    const auto resolved = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	if (changed)
 		k->LL_SetBoneVisible(bone_id, bVisibility, bRecursive);
+    if (timing) {
+        const auto finished = std::chrono::steady_clock::now();
+        const auto lookup_us = std::chrono::duration_cast<std::chrono::microseconds>(resolved-started).count();
+        const auto hide_us = std::chrono::duration_cast<std::chrono::microseconds>(finished-resolved).count();
+        Msg("[painter-bone-vis] bone=%s id=%u recursive=%d changed=%d lookup_us=%lld hide_us=%lld",
+            bone_name ? bone_name : "<null>", unsigned(bone_id), int(bRecursive), int(changed),
+            static_cast<long long>(lookup_us), static_cast<long long>(hide_us));
+    }
 
 	return;
 }

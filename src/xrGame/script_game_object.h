@@ -792,6 +792,25 @@ public:
 	bool inside(const Fvector& position) const;
 
 	Fvector head_orientation() const;
+	float painter_speed_scale() const;            // stalker movement speed scale (1 = vanilla), see CAI_Stalker
+	void set_painter_speed_scale(float scale);    // clamped to [0.3, 1.5]; legs/torso cycles follow
+	float painter_lean() const;                   // current procedural lean, -1 left .. +1 right
+	void set_painter_lean(float lean);            // target lean, clamped to [-1, 1]; smoothed in ~0.5 s
+	int painter_lean_level() const;               // nearest discrete level of the lean target, -3..3 (sign = side)
+	void set_painter_lean_level(int level);       // 0 upright, 1 slight, 2 half, 3 full; negative = left, positive = right
+	void set_painter_gait(int gait);              // native17: 0 aimed, 1 lowered jog (rifle down), 2 sprint (rifle down); see CAI_Stalker
+	int painter_gait() const;                     // the gait after the engine guard (what the legs play now)
+	void painter_throw_target(const Fvector& position); // aim the next grenade throw at this point (exact: no miss, no spread)
+	void painter_throw_through(const Fvector& door, const Fvector& target); // door = centre of the opening (~1.1 m up); lands on target
+	bool painter_throw_clear();                   // that arc is in range, in line and misses geometry (exact once the grenade is in hand)
+	::luabind::object painter_path_points();     // the path the stalker is walking: points, next point, next corner and the distance to it
+	::luabind::object painter_throw_state();     // the aimed throw: clear, reason, release point, aimed target, where it is blocked, speed
+	int painter_shoulder() const;                 // effective shoulder request: 0 right, 1 left (see CAI_Stalker)
+	void set_painter_shoulder(int mode);          // 0 always right, 1 left on any left lean, 2 auto (default: left from half lean left)
+	u32 painter_forced_action() const;            // AI ownership: forced root action id (0 = the stalker's own GOAP choice)
+	void set_painter_forced_action(u32 id);       // while set, the root planner runs this action every update
+	int painter_native_fire_flags();              // bit 1 fire_make_sense, 2 can_kill_enemy, 4 can_kill_member, 8 armed
+	bool painter_native_fire_verdict();           // fire_make_sense && can_kill_enemy && !can_kill_member
 	u32 vertex_in_direction(u32 level_vertex_id, Fvector direction, float max_distance) const;
 
 	void info_add(LPCSTR text);

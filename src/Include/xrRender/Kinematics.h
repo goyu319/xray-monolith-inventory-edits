@@ -3,7 +3,11 @@
 #pragma once
 
 #include "RenderVisual.h"
+#include "BloodThermalStamp.h"
 #include "../../xrCore/intrusive_ptr.h"
+#include <memory>
+#include "OriginalSkinProxySource.h"
+namespace painter_detail {struct TissueField;}
 
 typedef void (* UpdateCallback)(IKinematics* P);
 
@@ -14,6 +18,10 @@ class IRenderVisual;
 class ISpatial;
 class CBoneInstance;
 struct SEnumVerticesCallback;
+struct RuntimeSkinUpdate;
+class IWallMarkArray;
+class IRuntimeGeometryStage;
+namespace gfy_packed { struct Mesh; }
 
 using ISpatialShared = intrusive_ptr<ISpatial>;
 
@@ -113,6 +121,50 @@ public:
 	virtual IRenderVisual* GetVisualByBone(LPCSTR bone_name) = 0;
 	//--DSR-- SilencerOverheat_end
 
+	// Low-level reviewed-asset geometry transaction. Caller must own a dead
+	// instance and execute outside renderer/physics worker activity. This does
+	// not hide bones, remove physics, admit an asset, or replace the skeleton.
+	// A successful install consumes staged; caller owns it on failure.
+	virtual bool LL_InstallGeometryVariant(IRenderVisual*& staged) { return false; }
+	virtual void LL_ClearGeometryVariant() {}
+	virtual u64 LL_RenderGeometryGeneration() const { return 0; }
+	virtual bool LL_InstallRuntimeGeometry(const RuntimeSkinUpdate&, u64 current_owner_cookie) { return false; }
+	virtual bool LL_PrepareRuntimeGeometry(const RuntimeSkinUpdate&, u64 current_owner_cookie) { return false; }
+	// Snapshot another live skeleton's marks during this owner-barrier call only.
+	// The donor is never retained by the prepared geometry or copied marks.
+	virtual bool LL_PrepareRuntimeGeometryWithDonor(const RuntimeSkinUpdate&, u64 current_owner_cookie,
+		IRenderVisual* donor_visual, const Fmatrix* recipient_xform) { return false; }
+	virtual bool LL_CommitPreparedRuntimeGeometry(u64 current_owner_cookie) { return false; }
+	virtual bool LL_CanCommitPreparedRuntimeGeometry(u64 current_owner_cookie) const { return false; }
+	virtual void LL_DiscardPreparedRuntimeGeometry() {}
+	virtual void LL_ClearRuntimeGeometry() {}
+	// Off-thread publication (RuntimeGeometryStage.h). Stage at a publish barrier
+	// (outcome: RuntimeStageOutcome), install at a LATER publish barrier once the
+	// stage is Ready(). header carries owner/revision/rig and no children; the
+	// stage keeps packed alive. Install admits again and commits atomically.
+	virtual IRuntimeGeometryStage* LL_StageRuntimeGeometry(const RuntimeSkinUpdate& header,
+		const std::shared_ptr<const gfy_packed::Mesh>& packed, LPCSTR cavity_shader, LPCSTR cavity_texture,
+		const xr_vector<shared_str>* tissue_textures, u64 current_owner_cookie, int& outcome) { outcome = 3; return nullptr; }
+	virtual bool LL_InstallStagedRuntimeGeometry(IRuntimeGeometryStage* stage, const RuntimeSkinUpdate& header,
+		u64 current_owner_cookie) { return false; }
+	// Adopt a completed stage WITHOUT changing visible geometry. Donor marks
+	// are captured only at this barrier; the donor is not retained by a worker.
+	// Null donor/xform means this owner. The caller commits all parts together.
+	virtual bool LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage* stage, const RuntimeSkinUpdate& header,
+		u64 current_owner_cookie, IRenderVisual* donor_visual, const Fmatrix* recipient_xform) { return false; }
+    // Explicit known-surface projection: a new wound may have removed its ray
+    // center already. The footprint still clips against surviving geometry.
+    virtual bool LL_AddBloodSurfaceWallmark(const Fmatrix* xf,IWallMarkArray* array,const Fvector& p,const Fvector& n,
+        float size,float ttl,const BloodThermalStamp& stamp){return LL_AddSurfaceWallmark(xf,array,p,n,size,ttl);}
+    // The same with this decal's own depth limit (m; <= 0 or not finite = the 2-4 cm rule; clamped to 1-25 cm) and roll
+    // about its normal (degrees; not finite = the random +-20 degrees).
+    virtual bool LL_AddBloodSurfaceWallmarkPlaced(const Fmatrix* xf,IWallMarkArray* array,const Fvector& p,const Fvector& n,
+        float size,float ttl,const BloodThermalStamp& stamp,float depth,float roll){return LL_AddBloodSurfaceWallmark(xf,array,p,n,size,ttl,stamp);}
+    virtual bool LL_AddBloodSoakingWallmark(const Fmatrix* xf,IWallMarkArray* array,const Fvector& p,const Fvector& n,
+        float size,float ttl,float opacity,float seconds,const BloodThermalStamp& stamp){return LL_AddSoakingWallmark(xf,array,p,n,size,ttl,opacity,seconds);}
+    virtual bool LL_AddSurfaceWallmark(const Fmatrix*, IWallMarkArray*, const Fvector&, const Fvector&, float, float) { return false; }
+    virtual bool LL_AddSoakingWallmark(const Fmatrix*, IWallMarkArray*, const Fvector&, const Fvector&, float, float, float, float) { return false; }
+
 	// Main functionality
 	virtual void CalculateBones(BOOL bForceExact = FALSE) = 0; // Recalculate skeleton
 	virtual void CalculateBones_Invalidate() = 0;
@@ -137,6 +189,22 @@ public:
 	virtual void						DebugRender			(Fmatrix& XFORM) = 0;
 #endif
 	virtual shared_str getDebugName() = 0;
+	// Bind-time shader warm-up for runtime (wound) children (renderer-wide
+	// RuntimeShaderCache): records the handles this model's originals hold and
+	// queues the cavity pairs (cavity_shader with cavity_texture and every
+	// non-empty tissue texture) for compilation off the hit path; compiles up
+	// to `budget` queued pairs now (the renderer drains the rest, one per
+	// frame). Returns the pairs still queued. Main thread; null arguments only
+	// drain. Kept last so earlier vtable slots do not move.
+	virtual unsigned LL_WarmRuntimeShaders(LPCSTR cavity_shader, LPCSTR cavity_texture,
+		const xr_vector<shared_str>* tissue_textures, unsigned budget,
+        const std::shared_ptr<const painter_detail::TissueField>& tissue_field={}) { return 0; }
+    // Optional immutable original source, appended to preserve existing vtable slots.
+    virtual std::shared_ptr<const painter_skin_proxy::Source> LL_OriginalSkinProxySource() const { return {}; }
+    // triggerhitch: the nearest posed face over all bones in one pass (CKinematics: PainterPickNearest.h). -1 = not
+    // available (ask PickBone bone by bone as before), 0 = none (or the old loop's refusal), 1 = r as the old loop's last answer.
+    virtual int LL_PickNearest(const Fmatrix& parent_xform, pick_result& r, float range, const Fvector& start,
+                               const Fvector& dir, u16 count) { return -1; }
 };
 
 IC IKinematics* PKinematics(IRenderVisual* V) { return V ? V->dcast_PKinematics() : 0; }

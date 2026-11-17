@@ -67,8 +67,83 @@
 #include "cover_manager.h"
 #include "cover_point.h"
 #include "ActorCondition.h"
+#include "PainterDeformationSettings.h"
+#include "PainterExitSurface.h"
 
 using namespace luabind;
+// Synchronous exact-hit mesh exit; no positions, lookup identities or shot origins supplied by Lua are trusted.
+static ::luabind::object painter_native_exit_surface_hit(const ::luabind::object& request)
+{
+    auto* vm=request.lua_state();auto reply=::luabind::newtable(vm);reply["ok"]=false;
+    if(request.type()!=LUA_TTABLE)return reply;
+    auto integer=[&](LPCSTR name,u32& out){const ::luabind::object field=request[name];
+        if(field.type()!=LUA_TNUMBER)return false;const double n=::luabind::object_cast<double>(field);
+        if(!std::isfinite(n)||n<0.||n>4294967295.||n!=std::floor(n))return false;out=u32(n);return true;};
+    painter_exit_surface::Request value{};
+    if(!integer("owner_id",value.owner)||!integer("hit_bone",value.bone)||!integer("bullet_id",value.bullet)||
+        !integer("initiator",value.initiator)||!integer("weapon_id",value.weapon))return reply;
+    const ::luabind::object incoming=request["incoming"];
+    if(incoming.type()==LUA_TTABLE){
+        auto coordinate=[&](LPCSTR key,float& out){const ::luabind::object field=incoming[key];
+            if(field.type()!=LUA_TNUMBER)return false;const double n=::luabind::object_cast<double>(field);
+            if(!std::isfinite(n)||std::abs(n)>1e6)return false;out=float(n);return true;};
+        if(!coordinate("x",value.incoming.x)||!coordinate("y",value.incoming.y)||!coordinate("z",value.incoming.z))return reply;
+    }else{const auto vector=::luabind::object_cast_nothrow<Fvector>(incoming);if(!vector)return reply;value.incoming=*vector;}
+    const ::luabind::object capture=request["capture_only"],token=request["capture_token"];
+    if(capture.type()!=LUA_TNIL){if(capture.type()!=LUA_TBOOLEAN)return reply;value.capture_only=::luabind::object_cast<bool>(capture);}
+    if(token.type()!=LUA_TNIL){if(token.type()!=LUA_TNUMBER)return reply;const double n=::luabind::object_cast<double>(token);
+        if(!std::isfinite(n)||n<1.||n>9007199254740991.||n!=std::floor(n))return reply;value.capture_token=u64(n);}
+    const ::luabind::object ammo=request["ammo_section"];
+    if(ammo.type()!=LUA_TNIL){if(ammo.type()!=LUA_TSTRING)return reply;value.ammo=::luabind::object_cast<LPCSTR>(ammo);}
+    painter_exit_surface::Reply surface;if(!painter_exit_surface::query(value,surface))return reply;
+    reply["owner_id"]=value.owner;reply["hit_bone"]=value.bone;reply["bullet_id"]=value.bullet;
+    if(surface.capture_token){reply["capture_token"]=double(surface.capture_token);reply["ok"]=true;return reply;}
+    auto point=::luabind::newtable(vm),normal=::luabind::newtable(vm);
+    point["x"]=surface.point.x;point["y"]=surface.point.y;point["z"]=surface.point.z;
+    normal["x"]=surface.normal.x;normal["y"]=surface.normal.y;normal["z"]=surface.normal.z;
+    reply["triangle_id"]=double(surface.triangle);reply["point"]=point;reply["normal"]=normal;reply["ok"]=true;return reply;
+}
+
+// Entry face of the same authenticated hit (R18): the impact particles aim along the struck triangle's normal.
+static ::luabind::object painter_native_surface_hit(const ::luabind::object& request)
+{
+    auto* vm=request.lua_state();auto reply=::luabind::newtable(vm);reply["ok"]=false;
+    if(request.type()!=LUA_TTABLE)return reply;
+    auto integer=[&](LPCSTR name,u32& out){const ::luabind::object field=request[name];
+        if(field.type()!=LUA_TNUMBER)return false;const double n=::luabind::object_cast<double>(field);
+        if(!std::isfinite(n)||n<0.||n>4294967295.||n!=std::floor(n))return false;out=u32(n);return true;};
+    painter_exit_surface::Request value{};
+    if(!integer("owner_id",value.owner)||!integer("hit_bone",value.bone)||!integer("bullet_id",value.bullet)||
+        !integer("initiator",value.initiator)||!integer("weapon_id",value.weapon))return reply;
+    const ::luabind::object incoming=request["incoming"];
+    if(incoming.type()==LUA_TTABLE){
+        auto coordinate=[&](LPCSTR key,float& out){const ::luabind::object field=incoming[key];
+            if(field.type()!=LUA_TNUMBER)return false;const double n=::luabind::object_cast<double>(field);
+            if(!std::isfinite(n)||std::abs(n)>1e6)return false;out=float(n);return true;};
+        if(!coordinate("x",value.incoming.x)||!coordinate("y",value.incoming.y)||!coordinate("z",value.incoming.z))return reply;
+    }else{const auto vector=::luabind::object_cast_nothrow<Fvector>(incoming);if(!vector)return reply;value.incoming=*vector;}
+    const ::luabind::object ammo=request["ammo_section"];
+    if(ammo.type()!=LUA_TNIL){if(ammo.type()!=LUA_TSTRING)return reply;value.ammo=::luabind::object_cast<LPCSTR>(ammo);}
+    painter_exit_surface::Reply surface;
+    if(!painter_exit_surface::query_entry(value,surface)){reply["unavailable"]=!painter_exit_surface::current;return reply;}
+    reply["owner_id"]=value.owner;reply["hit_bone"]=value.bone;reply["bullet_id"]=value.bullet;
+    auto point=::luabind::newtable(vm),normal=::luabind::newtable(vm);
+    point["x"]=surface.point.x;point["y"]=surface.point.y;point["z"]=surface.point.z;
+    normal["x"]=surface.normal.x;normal["y"]=surface.normal.y;normal["z"]=surface.normal.z;
+    reply["triangle_id"]=double(surface.triangle);reply["point"]=point;reply["normal"]=normal;reply["ok"]=true;return reply;
+}
+
+// Version 1 includes the opt-in request and local projectile-submission hooks.
+static u32 tactical_grenade_bridge_version()
+{
+    return 1;
+}
+
+extern bool painter_voxel_live_bind(u16 id);
+extern bool painter_voxel_live_bind_target(u16 id);
+extern bool painter_voxel_live_unbind(u16 id);
+extern int painter_voxel_live_state(u16 id);
+extern bool painter_fragment_ignore_source(u16 fragment_id, u16 source_id); // bodyjitter: PainterVoxelLive_impl.h
 
 extern ENGINE_API float ps_r2_sun_shafts_min;
 extern ENGINE_API float ps_r2_sun_shafts_value;
@@ -350,6 +425,186 @@ u32 vertex_link(u32 level_vertex_id, int index)
 	}
 	return ai().level_graph().vertex(level_vertex_id)->link(index);
 }
+
+#include "painter_building_scan_impl.h" // level.painter_building_scan(pos, radius): rooms, doorways, windows
+#include "painter_path_query_impl.h" // level.painter_path_corners / painter_nav_ray: AI-map paths and straight walks
+#include "painter_doors_query_impl.h" // level.painter_doors_near: physical doors near a point, their state
+#include "painter_batch_query_impl.h" // level.painter_rays / painter_cover_query: batched AI queries, rays on worker threads
+#include "painter_ai/EngineServices.h"
+#include "painter_ai/EngineCapture.h"
+// native combat AI: level.painter_combat_enabled() - its master switch as read at level start; level.painter_combat_set_flag(npc, name, value) - a script-only state the engine cannot see (names: EngineCapture.h)
+inline bool painter_combat_enabled() { return painter::combat::engine::combat_enabled(); }
+inline bool painter_combat_set_flag(CScriptGameObject* npc, LPCSTR name, bool value)
+{
+	return npc && name && painter::combat::engine::set_flag(npc->ID(), name, value);
+}
+// native combat AI compatibility push model (contract v2.21, painter_ai/EngineCompat.h), nil-safe: a missing / wrong
+// argument returns 0 / false, never a Lua error.
+//   token = level.painter_combat_compat_begin(npc)                      a new registration (0 = refused)
+//   level.painter_combat_compat_evaluator(npc, token, evaluator_id)      one required compatibility evaluator
+//   level.painter_combat_compat_fact(npc, token, domain, value)          domain: CombatIds compat::domain_names, value: bool
+//   level.painter_combat_compat_seal(npc, token)                         commit (every id resolves, every domain known)
+//   level.painter_combat_compat_invalidate(npc, token, domain)           domain nil = everything
+//   token = level.painter_combat_compat_token(npc)                       his current token (0 = none)
+#include "painter_ai/EngineCompat.h"
+inline CAI_Stalker* painter_combat_stalker(CScriptGameObject* npc)
+{
+	return npc ? smart_cast<CAI_Stalker*>(&npc->object()) : nullptr;
+}
+inline bool painter_combat_u32(const ::luabind::object& value, u32& out)
+{
+	if (value.type() != LUA_TNUMBER) return false;
+	const double number = ::luabind::object_cast<double>(value);
+	if (!(number >= 1. && number <= 4294967295.) || number != double(u32(number))) return false;
+	out = u32(number);
+	return true;
+}
+inline double painter_combat_compat_begin(CScriptGameObject* npc)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	return stalker ? double(painter::combat::engine::compat_begin(*stalker)) : 0.;
+}
+inline bool painter_combat_compat_evaluator(CScriptGameObject* npc, const ::luabind::object& token,
+                                            const ::luabind::object& evaluator_id)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	u32 t = 0, id = 0;
+	if (evaluator_id.type() == LUA_TNUMBER && ::luabind::object_cast<double>(evaluator_id) == 0.) id = 0;
+	else if (!painter_combat_u32(evaluator_id, id)) return false;
+	return stalker && painter_combat_u32(token, t) && painter::combat::engine::compat_evaluator(*stalker, t, id);
+}
+inline bool painter_combat_compat_fact(CScriptGameObject* npc, const ::luabind::object& token, const ::luabind::object& domain,
+                                       const ::luabind::object& value)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	u32 t = 0;
+	if (!stalker || !painter_combat_u32(token, t) || domain.type() != LUA_TSTRING || value.type() != LUA_TBOOLEAN)
+		return false;
+	return painter::combat::engine::compat_fact(*stalker, t, ::luabind::object_cast<LPCSTR>(domain),
+	                                            ::luabind::object_cast<bool>(value));
+}
+inline bool painter_combat_compat_seal(CScriptGameObject* npc, const ::luabind::object& token)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	u32 t = 0;
+	return stalker && painter_combat_u32(token, t) && painter::combat::engine::compat_seal(*stalker, t);
+}
+inline bool painter_combat_compat_invalidate(CScriptGameObject* npc, const ::luabind::object& token,
+                                             const ::luabind::object& domain)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	u32 t = 0;
+	if (!stalker || !painter_combat_u32(token, t)) return false;
+	const int kind = domain.type();
+	if (kind != LUA_TNIL && kind != LUA_TNONE && kind != LUA_TSTRING) return false;
+	return painter::combat::engine::compat_invalidate(*stalker, t,
+		kind == LUA_TSTRING ? ::luabind::object_cast<LPCSTR>(domain) : nullptr);
+}
+inline bool painter_combat_compat_invalidate_all(CScriptGameObject* npc, const ::luabind::object& token)
+{
+	return painter_combat_compat_invalidate(npc, token, ::luabind::object());   // domain omitted = everything
+}
+inline double painter_combat_compat_token(CScriptGameObject* npc)
+{
+	CAI_Stalker* const stalker = painter_combat_stalker(npc);
+	return stalker ? double(painter::combat::engine::compat_token(*stalker)) : 0.;
+}
+// level.painter_combat_set_aid(npc, allowed, claimed, claimant_id) - his side's state as the wounded one (contract v2.18):
+// may he be helped (xr_wounded not_for_help) and the stock helper's claim on him (claimant_id 65535 = none)
+inline bool painter_combat_set_aid(CScriptGameObject* npc, bool allowed, bool claimed, double claimant_id)
+{
+	if (!npc) return false;
+	const u16 claimant = claimant_id >= 0. && claimant_id < 65535. ? u16(claimant_id) : u16(65535);
+	painter::combat::engine::set_aid(npc->ID(), allowed, claimed, claimant);
+	return true;
+}
+inline double painter_combat_side_of(CScriptGameObject* npc)
+{
+	CEntityAlive* const entity = npc ? smart_cast<CEntityAlive*>(&npc->object()) : nullptr;
+	return entity ? double(painter::combat::engine::side_key(*entity)) : -1.0;
+}
+inline bool painter_combat_set_mission(double side, LPCSTR kind, double building, const ::luabind::object& entry_portal,
+                                       const ::luabind::object& rooms)
+{
+	using namespace painter::combat;
+	static const struct { LPCSTR name; MissionKind kind; } kinds[] = {{"none", MissionKind::none},
+		{"clear_building", MissionKind::clear_building}, {"defend", MissionKind::defend}, {"attack", MissionKind::attack},
+		{"hold", MissionKind::hold}};
+	Mission mission;
+	bool known = false;
+	for (const auto& row : kinds)
+		if (kind && !xr_strcmp(kind, row.name)) { mission.kind = row.kind; known = true; }
+	if (!known || !(side >= 0.0) || !(building >= 0.0)) return false;
+	mission.building = building >= 1.0 ? std::uint32_t(building) : invalid_room;
+	if (entry_portal.type() == LUA_TNUMBER)
+		mission.entry_portal = ::luabind::object_cast<std::uint32_t>(entry_portal);
+	else if (entry_portal.type() == LUA_TSTRING)
+	{
+		mission.entry_portal = engine::portal_named(mission.building, ::luabind::object_cast<LPCSTR>(entry_portal));
+		if (!mission.entry_portal) return false;
+	}
+	else if (entry_portal.type() != LUA_TNIL) return false;
+	if (rooms.type() == LUA_TTABLE)
+		for (int i = 1;; ++i)                       // by index: the order is the script's
+		{
+			const ::luabind::object room = rooms[i];
+			if (room.type() == LUA_TNIL) break;
+			std::uint32_t id = invalid_room;
+			if (room.type() == LUA_TNUMBER) id = ::luabind::object_cast<std::uint32_t>(room);
+			else if (room.type() == LUA_TSTRING) id = engine::room_named(::luabind::object_cast<LPCSTR>(room));
+			if (id == invalid_room || mission.rooms.count >= mission.rooms.items.size()) return false;
+			mission.rooms.items[mission.rooms.count++] = id;
+		}
+	else if (rooms.type() != LUA_TNIL) return false;
+	const std::uint64_t key = std::uint64_t(side);
+	engine::set_mission(key, mission);
+	Mission stored;
+	engine::mission_of(key, stored);
+	Msg("[painter_combat] phase=mission side=%llu revision=%u kind=%s building=%u entry_portal=%u rooms=%u", key,
+	    stored.revision, kind, mission.building, mission.entry_portal, unsigned(mission.rooms.count));
+	return true;
+}
+inline void painter_combat_clear_mission(double side)
+{
+	if (side >= 0.0) painter::combat::engine::clear_mission(std::uint64_t(side));
+}
+
+// Bulk node query for the AI layer (E1): position, the 4 links and the high/low cover toward the quadrant yaws +x, +z, -x,
+// -z in one call. Position and links equal vertex_position / vertex_link; the cover values use the heading normalized to
+// [0, 2pi) as the engine's own callers do, so they stay in [0, 1] (the per-direction exports extrapolate outside that
+// range for directions with a negative heading). {valid=false} for an invalid vertex id.
+::luabind::object vertex_info(u32 level_vertex_id)
+{
+	::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
+	if (!ai().level_graph().valid_vertex_id(level_vertex_id))
+	{
+		table["valid"] = false;
+		return table;
+	}
+	table["valid"] = true;
+	Fvector const position = ai().level_graph().vertex_position(level_vertex_id);
+	table["x"] = position.x;
+	table["y"] = position.y;
+	table["z"] = position.z;
+	CLevelGraph::CVertex const* const vertex = ai().level_graph().vertex(level_vertex_id);
+	LPCSTR const link_keys[4] = {"link0", "link1", "link2", "link3"};
+	LPCSTR const high_keys[4] = {"high0", "high1", "high2", "high3"};
+	LPCSTR const low_keys[4] = {"low0", "low1", "low2", "low3"};
+	Fvector const directions[4] = {Fvector().set(1.f, 0.f, 0.f), Fvector().set(0.f, 0.f, 1.f), Fvector().set(-1.f, 0.f, 0.f),
+								   Fvector().set(0.f, 0.f, -1.f)};
+	for (u8 i = 0; i < 4; ++i)
+	{
+		table[link_keys[i]] = vertex->link(i);
+		float y, p;
+		directions[i].getHP(y, p);
+		// the cover interpolation expects [0, 2pi); getHP gives (-pi, pi] (the per-direction exports pass it unnormalized)
+		y = angle_normalize(y);
+		table[high_keys[i]] = ai().level_graph().high_cover_in_direction(y, level_vertex_id);
+		table[low_keys[i]] = ai().level_graph().low_cover_in_direction(y, level_vertex_id);
+	}
+	return table;
+}
+
 
 float high_cover_in_direction(u32 level_vertex_id, const Fvector& direction)
 {
@@ -2859,7 +3114,17 @@ void CLevel::script_register(lua_State* L)
 		];
 
 	module(L, "level")
-		[
+	[
+        def("painter_native_exit_surface_hit", &painter_native_exit_surface_hit),
+        def("painter_native_surface_hit", &painter_native_surface_hit),
+        def("painter_deformation_api_version", &painter_deformation::api_version),
+        def("painter_deformation_settings", &painter_deformation::settings),
+        def("tactical_grenade_bridge_version", &tactical_grenade_bridge_version),
+        def("painter_voxel_live_bind", &painter_voxel_live_bind),
+        def("painter_voxel_live_bind_target", &painter_voxel_live_bind_target),
+        def("painter_voxel_live_unbind", &painter_voxel_live_unbind),
+        def("painter_voxel_live_state", &painter_voxel_live_state),
+        def("painter_fragment_ignore_source", &painter_fragment_ignore_source), // bodyjitter
 			//Alundaio: Extend level namespace exports
 #ifdef NAMESPACE_LEVEL_EXPORTS
 			def("send", &g_send), //allow the ability to send netpacket to level
@@ -2940,6 +3205,27 @@ void CLevel::script_register(lua_State* L)
 			def("vertex_link", vertex_link),
 			def("high_cover_in_direction", high_cover_in_direction),
 			def("low_cover_in_direction", low_cover_in_direction),
+			def("vertex_info", vertex_info),
+			def("painter_building_scan", painter_building_scan),
+			def("painter_map_hash", painter_map_hash),
+			def("painter_path_corners", painter_path_corners),
+			def("painter_nav_ray", painter_nav_ray),
+			def("painter_doors_near", painter_doors_near),
+			def("painter_rays", painter_rays),
+			def("painter_cover_query", painter_cover_query),
+			def("painter_combat_enabled", painter_combat_enabled),
+			def("painter_combat_set_flag", painter_combat_set_flag),
+			def("painter_combat_set_aid", painter_combat_set_aid),
+			def("painter_combat_compat_begin", painter_combat_compat_begin),
+			def("painter_combat_compat_evaluator", painter_combat_compat_evaluator),
+			def("painter_combat_compat_fact", painter_combat_compat_fact),
+			def("painter_combat_compat_seal", painter_combat_compat_seal),
+			def("painter_combat_compat_invalidate", painter_combat_compat_invalidate),
+			def("painter_combat_compat_invalidate", painter_combat_compat_invalidate_all),
+			def("painter_combat_compat_token", painter_combat_compat_token),
+			def("painter_combat_side_of", painter_combat_side_of),
+			def("painter_combat_set_mission", painter_combat_set_mission),
+			def("painter_combat_clear_mission", painter_combat_clear_mission),
 			def("vertex_in_direction", vertex_in_direction),
 			def("rain_factor", rain_factor),
 			def("rain_wetness", rain_wetness),

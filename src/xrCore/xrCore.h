@@ -37,11 +37,21 @@
 #define XRAY_EXCEPTIONS 1 // XRAY
 #else
 // "release"
-#if defined(_CPPUNWIND) && !defined __BORLANDC__ && !defined(XRAY_REFERENCE_CPP_BOUNDARY) && !defined(XRAY_ALLOW_RELEASE_CPP_EXCEPTIONS)
+// Selected native feature units (BloodEngine / Painter) catch C++ allocation failures locally.
+// Their compiler may unwind while all XRAY/Luabind release policy below stays unchanged.
+#if defined(PAINTER_LOCAL_CPP_UNWIND) && !defined(_CPPUNWIND)
+#error Local native feature unwinding requires /EHsc.
+#endif
+#if defined(_CPPUNWIND) && !defined __BORLANDC__ && !defined(XRAY_REFERENCE_CPP_BOUNDARY) && !defined(XRAY_ALLOW_RELEASE_CPP_EXCEPTIONS) && !defined(PAINTER_LOCAL_CPP_UNWIND)
 #error Please disable exceptions...
 #endif
 #define _HAS_EXCEPTIONS 1 // STL
 #define XRAY_EXCEPTIONS 0 // XRAY
+
+#if defined(PAINTER_LOCAL_CPP_UNWIND)
+// Keep shared container overflow behavior identical to other release units.
+#define ROBIN_HOOD_USE_EXCEPTIONS 0
+#endif
 #define LUABIND_NO_EXCEPTIONS
 #pragma warning(disable:4530)
 #endif

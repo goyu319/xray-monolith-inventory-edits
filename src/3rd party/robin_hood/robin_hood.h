@@ -126,7 +126,13 @@ static Counts& counts() {
 #endif
 
 // exceptions
-#if !defined(__cpp_exceptions) && !defined(__EXCEPTIONS) && !defined(_CPPUNWIND)
+// Optional policy override keeps shared inline behavior consistent across units.
+#if defined(ROBIN_HOOD_USE_EXCEPTIONS)
+#    if ROBIN_HOOD_USE_EXCEPTIONS != 0 && ROBIN_HOOD_USE_EXCEPTIONS != 1
+#        error ROBIN_HOOD_USE_EXCEPTIONS must be 0 or 1
+#    endif
+#    define ROBIN_HOOD_PRIVATE_DEFINITION_HAS_EXCEPTIONS() ROBIN_HOOD_USE_EXCEPTIONS
+#elif !defined(__cpp_exceptions) && !defined(__EXCEPTIONS) && !defined(_CPPUNWIND)
 #    define ROBIN_HOOD_PRIVATE_DEFINITION_HAS_EXCEPTIONS() 0
 #else
 #    define ROBIN_HOOD_PRIVATE_DEFINITION_HAS_EXCEPTIONS() 1

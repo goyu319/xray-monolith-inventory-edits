@@ -13,6 +13,9 @@ public:
 	virtual void UpdateParent(const Fmatrix& m, const Fvector& velocity, BOOL bXFORM) =0;
 	virtual void OnFrame(u32 dt) =0;
 
+	virtual bool SetSizeScale(float) { return false; }
+    virtual bool SetColorScale(float,float,float) { return false; }
+    virtual bool SetBloodThermalSource(bool,bool,u32) { return false; }
 	virtual void Play() =0;
 	virtual void Stop(BOOL bDefferedStop = TRUE) =0;
 	virtual BOOL IsPlaying() =0;

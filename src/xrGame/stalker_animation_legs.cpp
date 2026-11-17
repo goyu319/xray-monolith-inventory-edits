@@ -167,6 +167,21 @@ MotionID CStalkerAnimationManager::legs_move_animation()
 		);
 	}
 
+	// native17 (v2.24 Order::gait): the rifle-down jog and sprint run the free-state / escape forward cycles at their own
+	// speeds while the man faces his path (the guard in painter_gait_effective keeps aimed otherwise)
+	if (u32 const gait = object().painter_gait_effective())
+	{
+		if (eMovementTypeRun == movement.movement_type() && eBodyStateStand == body_state())
+		{
+			m_target_speed = movement.speed(eMovementDirectionForward);
+			m_last_non_zero_speed = m_target_speed;
+			m_previous_speed_direction = eMovementDirectionForward;
+			if (gait == 2)
+				return (m_data_storage->m_part_animations.A[eBodyStateStand].m_movement.A[2].A[4].A[0]);
+			return (m_data_storage->m_part_animations.A[eBodyStateStand].m_movement.A[movement.movement_type()].A[eMovementDirectionForward].A[1]);
+		}
+	}
+
 	float yaw, pitch;
 	object().sight().GetDirectionAngles(yaw, pitch);
 

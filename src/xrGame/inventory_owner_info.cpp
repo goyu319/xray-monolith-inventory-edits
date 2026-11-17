@@ -17,6 +17,7 @@
 #include "alife_registry_wrappers.h"
 #include "script_callback_ex.h"
 #include "game_object_space.h"
+#include "painter_ai/EngineCompat.h"
 
 void CInventoryOwner::OnEvent(NET_Packet& P, u16 type)
 {
@@ -52,6 +53,9 @@ bool CInventoryOwner::OnReceiveInfo(shared_str info_id) const
 		known_info.push_back(/*INFO_DATA(*/info_id/*, Level().GetGameTime())*/);
 	else
 		return false;
+	// native combat AI compatibility (contract v2.21): the engine's own writer for the companion domain
+	if (const CObject* self = smart_cast<const CObject*>(this))
+		painter::combat::engine::compat_info_changed(self->ID(), info_id.c_str(), true);
 
 #ifdef DEBUG
 	if(psAI_Flags.test(aiInfoPortion))
@@ -91,6 +95,8 @@ void CInventoryOwner::OnDisableInfo(shared_str info_id) const
 	KNOWN_INFO_VECTOR_IT it = std::find_if(known_info.begin(), known_info.end(), CFindByIDPred(info_id));
 	if (known_info.end() == it) return;
 	known_info.erase(it);
+	if (const CObject* self = smart_cast<const CObject*>(this))
+		painter::combat::engine::compat_info_changed(self->ID(), info_id.c_str(), false);
 }
 
 void CInventoryOwner::TransferInfo(shared_str info_id, bool add_info) const

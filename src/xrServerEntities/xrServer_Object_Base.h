@@ -63,8 +63,10 @@ public:
 
 private:
 	LPSTR s_name_replace;
+    u64 m_painter_birth_cookie=0; // process-only native lifetime, never serialized
 
 public:
+    u64 PainterBirthCookie() const noexcept {return m_painter_birth_cookie;}
 	BOOL net_Ready;
 	BOOL net_Processed; // Internal flag for connectivity-graph
 

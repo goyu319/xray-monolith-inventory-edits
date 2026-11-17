@@ -595,6 +595,9 @@
     <ClInclude Include="..\xrRender\Utils\dxHashHelper.h" />
     <ClInclude Include="..\xrRender\VertexCache.h" />
     <ClInclude Include="..\xrRender\WallmarksEngine.h" />
+    <ClInclude Include="..\xrRender\BloodGpuSkinning.h" />
+    <ClInclude Include="..\xrRender\BloodGpuProjection.h" />
+    <ClInclude Include="..\xrRender\BloodGpuParticles.h" />
     <ClInclude Include="..\xrRender\xrD3DDefs.h" />
     <ClInclude Include="..\xrRender\xrRender_console.h" />
     <ClInclude Include="..\xrRender\svp_constants.h" />
@@ -859,6 +862,9 @@
     <ClCompile Include="..\xrRender\Utils\dxHashHelper.cpp" />
     <ClCompile Include="..\xrRender\VertexCache.cpp" />
     <ClCompile Include="..\xrRender\WallmarksEngine.cpp" />
+    <ClCompile Include="..\xrRender\BloodGpuSkinning.cpp" />
+    <ClCompile Include="..\xrRender\BloodGpuProjection.cpp" />
+    <ClCompile Include="..\xrRender\BloodGpuParticles.cpp" />
     <ClCompile Include="..\xrRender\xrRender_console.cpp" />
     <ClCompile Include="..\xrRender\svp_console.cpp" />
     <ClCompile Include="svp_lens_lighting.cpp" />

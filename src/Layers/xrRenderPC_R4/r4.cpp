@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../xrRender/PainterBloodOwner.h"
 #include "r4.h"
 #include "../xrRender/fbasicvisual.h"
 #include "../../xrEngine/xr_object.h"
@@ -6,6 +7,7 @@
 #include "../../xrEngine/igame_persistent.h"
 #include "../../xrEngine/environment.h"
 #include "../xrRender/SkeletonCustom.h"
+#include "../xrRender/RuntimeShaderCache.h"
 #include "../xrRender/LightTrack.h"
 #include "../xrRender/dxRenderDeviceRender.h"
 #include "../xrRender/dxWallMarkArray.h"
@@ -584,7 +586,9 @@ void CRender::destroy()
 
 	HWOCC.occq_destroy();
 	svp_stats::release(); // pip drop the stats query pool + font with the device
+	RuntimeShaderCache::Clear(false); // BloodEngine: before the resource manager goes (ref_shader)
 	xr_delete(Models);
+	RuntimeShaderCache::Clear(false); // stages and model refs are gone; release field textures now.
 	xr_delete(TargetMain); // pip delete by owner, Target may still point at the SVP after an aborted pass
 	Target = nullptr;
 	xr_delete(TargetSVP); // pip: only non-null if an SVP pass ran
@@ -595,6 +599,8 @@ void CRender::destroy()
 
 void CRender::reset_begin()
 {
+	RuntimeShaderCache::Clear(true); // handles are re-created after the reset, one pair per frame
+	if (Wallmarks) Wallmarks->ResetGpuWallmarks(true); // R26: the device survives a vid_restart; the GPU decal state stays
 	//AVO: let's reload details while changed details options on vid_restart
 	if (b_loaded && ((dm_current_size != dm_size) || (ps_r__Detail_density != ps_current_detail_density) || (
 		ps_r__Detail_height != ps_current_detail_height)))
@@ -647,6 +653,11 @@ void CRender::OnFrame()
 
 	if (Details)
 		g_pGamePersistent->GrassBendersUpdateAnimations();
+
+	// Runtime (wound) child shaders queued at bind: one pair per frame on the
+	// main thread, before the first hit needs them.
+	RuntimeShaderCache::Warm(1);
+    PainterBloodFramePump(); // one global 0.5 ms upload budget, all bodies combined
 }
 
 // Particles
@@ -850,6 +861,18 @@ void CRender::add_StaticWallmark(const wm_shader& S, const Fvector& P, float s, 
 	add_StaticWallmark(pShader->hShader, P, s, T, V, 0.0f, false, true);
 }
 
+void CRender::add_BloodWallmark(IWallMarkArray* array,const Fvector& P,float size,CDB::TRI* tri,Fvector* verts,
+    float ttl,bool ignore_opt,float rotation,const BloodThermalStamp& stamp)
+{
+    dxWallMarkArray* marks=static_cast<dxWallMarkArray*>(array);
+    ref_shader* shader=marks->dxGenerateWallmark();
+    if(shader) {
+        if(tri->suppress_wm)return;
+        VERIFY2(_valid(P) && _valid(size) && tri && verts && (size > EPS_L), "Invalid static wallmark params");
+        Wallmarks->AddStaticBloodWallmark(tri,verts,P,*shader,size,ttl,ignore_opt,rotation,stamp);
+    }
+}
+
 void CRender::clear_static_wallmarks()
 {
 	Wallmarks->clear();
@@ -872,6 +895,14 @@ void CRender::add_SkeletonWallmark(const Fmatrix* xf, IKinematics* obj, IWallMar
 	dxWallMarkArray* pWMA = (dxWallMarkArray *)pArray;
 	ref_shader* pShader = pWMA->dxGenerateWallmark();
 	if (pShader) add_SkeletonWallmark(xf, (CKinematics*)obj, *pShader, start, dir, size, ttl, ignore_opt);
+}
+
+void CRender::add_BloodSkeletonWallmark(const Fmatrix* xf,IKinematics* obj,IWallMarkArray* array,
+    const Fvector& start,const Fvector& dir,float size,float ttl,bool ignore_opt,const BloodThermalStamp& stamp)
+{
+    dxWallMarkArray* marks=static_cast<dxWallMarkArray*>(array);
+    ref_shader* shader=marks->dxGenerateWallmark();
+    if(shader)Wallmarks->AddSkeletonBloodWallmark(xf,static_cast<CKinematics*>(obj),*shader,start,dir,size,ttl,ignore_opt,stamp);
 }
 
 void CRender::remove_SkeletonWallmarksFromObject(IKinematics* obj)

@@ -34,6 +34,7 @@
 #include "artefact.h"
 #include "sight_manager_space.h"
 #include "script_attachment_manager.h"
+#include "painter_arm_pose.h"
 #include "WeaponBinoculars.h"
 
 using namespace luabind;
@@ -446,6 +447,11 @@ class_<CScriptGameObject> script_register_game_object2(class_<CScriptGameObject>
 #endif
 		.def("get_hanging_lamp", &CScriptGameObject::get_hanging_lamp)
 		.def("get_physics_shell", &CScriptGameObject::get_physics_shell)
+        .def("painter_arm_pose_sample", &painter_arm_pose_sample)
+        .def("painter_arm_pose_seal", &painter_arm_pose_seal)
+        .def("painter_arm_pose_bind", &painter_arm_pose_bind)
+        .def("painter_arm_pose_cancel", &painter_arm_pose_cancel)
+        .def("painter_arm_pose_status", &painter_arm_pose_status)
 		.def("get_holder_class", &CScriptGameObject::get_custom_holder)
 		.def("get_current_holder", &CScriptGameObject::get_current_holder)
 		//usable object

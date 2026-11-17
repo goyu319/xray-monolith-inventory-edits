@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xrMessages.h"
+#include "painter_stream/Stamp.h"
 
 extern BOOL g_bCheckTime;
 extern int g_dwEventDelay;
@@ -13,6 +14,8 @@ public:
 	u16 type;
 	u16 destination;
 	xr_vector<u8> data;
+	painter_stream::Stamp painter_stamp; // nonserialized native lifetime witness
+    bool painter_prefetched=false,painter_had_alife_object=false;
 public:
 	void import(NET_Packet& P)
 	{
@@ -82,6 +85,8 @@ class NET_Queue_Event
 public:
 	//	xr_multiset<NET_Event>	queue;	
 	xr_vector<NET_Event> queue;
+	void* painter_capture_context = nullptr;
+	void (*painter_capture)(void*,const NET_Packet&,NET_Event&) = nullptr;
 public:
 	IC void insert(NET_Packet& P)
 	{
@@ -91,6 +96,7 @@ public:
 		queue.emplace_back();
 		NET_Event& E = queue.back();
 		E.import(P);
+		if(painter_capture)painter_capture(painter_capture_context,P,E);
 		//		queue.insert	(E);
 		/*
 		//-------------------------------------------

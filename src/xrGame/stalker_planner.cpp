@@ -21,6 +21,8 @@
 #include "stalker_combat_planner.h"
 #include "ai_space.h"
 #include "../xrServerEntities/script_engine.h"
+#include "painter_ai/EngineCombatAdapter.h"
+#include "painter_ai/EngineCompat.h"
 //#include "stalker_combat_planner_new.h"
 
 //#define GOAP_DEBUG
@@ -106,12 +108,64 @@ void CStalkerPlanner::setup(CAI_Stalker* object)
 	clear();
 	add_evaluators();
 	add_actions();
+	painter::combat::engine::register_actor(*this, *object);
 
 	CWorldState target;
 	target.add_condition(CWorldProperty(eWorldPropertyPuzzleSolved, true));
 	set_target_state(target);
 
 	m_affect_cover = false;
+}
+
+// AI ownership (Painter AI): while the stalker's forced action id is set, he is alive and the action is registered in
+// this planner, that action runs every update (finalize/initialize on a switch, execute each update) instead of the
+// GOAP solution. Perception, memory, damage, death and the wounded scheme are untouched: the AI clears the id to hand
+// the stalker back to his own planner.
+bool CStalkerPlanner::painter_forced_update()
+{
+	u32 const forced = object().painter_forced_action();
+	if (!forced || !object().g_Alive())
+	{
+		object().set_painter_gait(0);   // native17: a man the native action does not run walks and runs aimed, as stock
+		return false;
+	}
+	auto const& ops = operators();
+	auto const I = std::lower_bound(ops.begin(), ops.end(), forced);
+	if (I == ops.end() || (*I).m_operator_id != forced)
+		return false;
+	// Every evaluator still runs (scripted evaluators keep bookkeeping, e.g. the wound manager updates inside the
+	// wounded evaluator); the stalker goes back to his own planner in this update when the forced action's own
+	// eligibility evaluator (same id) says no. The same single pass records his registered compatibility evaluators
+	// (contract v2.21, no second evaluate()); only after the whole loop - the full-pass fence, a compatibility evaluator
+	// may sort after the eligibility one - may the aggregate let the action run: a veto hands him back through the
+	// adapter's relinquish (cleanup -> on_release) before anything executes.
+	bool eligible = true;
+	auto compat = painter::combat::engine::compat_pass_begin(object());
+	for (auto const& e : evaluators())
+	{
+		bool const value = e.second->evaluate();
+		if (e.first == forced)
+			eligible = value;
+		painter::combat::engine::compat_pass_record(compat, e.first, e.second, value);
+	}
+	if (painter::combat::engine::compat_pass_end(compat, object()))
+		return false;
+	if (!eligible)
+		return false;
+	if (!initialized())
+	{
+		m_initialized = true;
+		m_current_action_id = forced;
+		current_action().initialize();
+	}
+	else if (current_action_id() != forced)
+	{
+		current_action().finalize();
+		m_current_action_id = forced;
+		current_action().initialize();
+	}
+	current_action().execute();
+	return true;
 }
 
 void CStalkerPlanner::update(u32 time_delta)
@@ -123,7 +177,8 @@ void CStalkerPlanner::update(u32 time_delta)
 
 	const bool record_brain = ai().script_engine().lua_recording() && CPU::qpc_freq;
 	CStalkerBrainProfileScope profile_scope(this, record_brain);
-	inherited::update();
+	if (!painter_forced_update())
+		inherited::update();
 
 #ifdef GOAP_DEBUG
 	if (m_failed) {

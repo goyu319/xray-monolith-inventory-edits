@@ -69,6 +69,24 @@ float n_zoom_step_count = 3.0f;
 
 string_path g_last_saved_game;
 
+// One-shot, passive capture of the next dead stalker's built physics shell.
+int painter_ragdoll_capture_next = 0;
+// Painter native active ragdoll (CActiveRagdollController): 0 = off, the Lua controller owns the joint motors as in an exe
+// without this class (R35, 2026-10-17: the test profile must struggle like the co-op profile); 1 = the native controller
+// takes the first 2.4 s of a stalker death and the Lua probe painter_native_active_ragdoll reports it. Read per death.
+int painter_native_ragdoll = 0;
+extern int painter_sever_hold;    // R63 (PainterVoxelLive_impl.h): 1 = a killing hit Painter severs freezes its death shell until the sever
+extern int painter_sever_hold_ms; // longest wait (real ms) before the frozen shell starts anyway
+extern int painter_bone_visibility_timing;
+extern int g_painter_look_log;
+extern int g_painter_pose_log;
+extern int g_painter_lean_test;
+extern int g_painter_shoulder_test;
+extern int g_painter_fire_log;
+extern int g_painter_spine_comp;
+extern int g_painter_lh_ik;
+extern int g_painter_lh_ik_test;
+
 #ifdef DEBUG
 extern float air_resistance_epsilon;
 #endif // #ifdef DEBUG
@@ -492,6 +510,118 @@ static void shared_string_dump() {
 	g_pStringContainer->dump_console();
 }
 
+
+
+extern int painter_runtime_result,painter_runtime_result_owner,painter_runtime_result_state,painter_runtime_result_reason;
+class CCC_PainterRuntimeStatus : public CCC_Integer
+{
+public:
+    CCC_PainterRuntimeStatus(LPCSTR name,int* value):CCC_Integer(name,value,-2147483647,2147483647){bEmptyArgsHandled=TRUE;}
+    void Execute(LPCSTR) override {TStatus text;Status(text);Msg("%s = %s (read only)",cName,text);}
+    void Save(IWriter*) override {}
+};
+extern int painter_balance_test_enabled,painter_balance_test_active,painter_balance_test_inferences;
+extern bool painter_balance_test_configure(bool);
+class CCC_PainterBalanceTest : public IConsole_Command {
+public:CCC_PainterBalanceTest(LPCSTR name):IConsole_Command(name){bEmptyArgsHandled=TRUE;}
+void Execute(LPCSTR args)override{
+    if(!args||!*args){Msg("painter_balance_test = %d (experimental)",painter_balance_test_enabled);return;}
+    if(!xr_strcmp(args,"0"))painter_balance_test_configure(false);
+    else if(!xr_strcmp(args,"1")){if(!painter_balance_test_configure(true))Msg("[painter_balance_test] configuration rejected");}
+    else Msg("usage: painter_balance_test 0 or 1");
+}
+void Save(IWriter*)override{}
+};
+extern bool painter_voxel_live_warm();
+extern bool painter_voxel_live_bind(u16 id);
+extern int painter_voxel_live_result,painter_voxel_live_owner,painter_voxel_live_revision;
+class CCC_PainterVoxelLiveWarm : public IConsole_Command {
+public:CCC_PainterVoxelLiveWarm(LPCSTR name):IConsole_Command(name){bEmptyArgsHandled=TRUE;}
+void Execute(LPCSTR args)override{if(args&&*args)Msg("usage: painter_voxel_live_warm");else painter_voxel_live_warm();}
+void Save(IWriter*)override{}
+};
+class CCC_PainterVoxelLiveBind : public IConsole_Command {
+public:CCC_PainterVoxelLiveBind(LPCSTR name):IConsole_Command(name){bEmptyArgsHandled=FALSE;}
+void Execute(LPCSTR args)override{unsigned id;char extra;if(sscanf(args,"%u %c",&id,&extra)!=1||id>=65535||!painter_voxel_live_bind(u16(id)))Msg("[painter_voxel_live] bind=rejected; warm then bind a fresh owned dead original GFY source");}
+void Save(IWriter*)override{}
+};
+extern bool painter_warm_runtime_geometry_fixture();
+extern bool painter_queue_runtime_geometry_probe(u16 object_id,u32 state);
+class CCC_PainterRuntimeWarm : public IConsole_Command
+{
+public:
+    CCC_PainterRuntimeWarm(LPCSTR name):IConsole_Command(name){bEmptyArgsHandled=TRUE;}
+    void Execute(LPCSTR args) override {if(args && *args)Msg("usage: painter_butcher_runtime_warm");else painter_warm_runtime_geometry_fixture();}
+    void Save(IWriter*) override {}
+};
+class CCC_PainterRuntimeProbe : public IConsole_Command
+{
+public:
+    CCC_PainterRuntimeProbe(LPCSTR name):IConsole_Command(name){bEmptyArgsHandled=FALSE;}
+    void Execute(LPCSTR args) override {
+        unsigned id=0,state=0;char extra=0;
+        if(sscanf(args,"%u %u %c",&id,&state,&extra)!=2 || id>=65535 || state>4 || !painter_queue_runtime_geometry_probe(u16(id),state))
+            Msg("[butcher_runtime_native] rejected; warm first, then painter_butcher_runtime_test <dead_GFY_id> <0 clear|1..4 cumulative state>");
+    }
+    void Save(IWriter*) override {}
+};
+extern bool painter_queue_geometry_probe(u16 object_id, u32 mode);
+class CCC_PainterGeometryProbe : public IConsole_Command
+{
+public:
+    CCC_PainterGeometryProbe(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = FALSE; }
+    void Execute(LPCSTR args) override
+    {
+        unsigned object_id = 0, mode = 0;
+        char extra = 0;
+        if (sscanf(args, "%u %u %c", &object_id, &mode, &extra) != 2 || object_id >= 65535 || mode > 4 ||
+            !painter_queue_geometry_probe(static_cast<u16>(object_id), mode))
+            Msg("[butcher_geometry_native] request rejected; usage: painter_butcher_geometry_test <dead_GFY_test_id> <0 restore|1 hand|2 calf|3 neutral both arms|4 coat both arms>");
+    }
+    void Save(IWriter*) override {} // one-shot diagnostic, never persisted to user.ltx
+};
+
+extern bool painter_queue_ragdoll_capture(u16 object_id);
+extern void painter_cancel_pending_ragdoll_capture();
+class CCC_PainterRagdollCapture : public IConsole_Command
+{
+public:
+    CCC_PainterRagdollCapture(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = FALSE; }
+    void Execute(LPCSTR args) override
+    {
+        int object_id = -2;
+        char extra = 0;
+        if (sscanf(args, "%d %c", &object_id, &extra) != 1 || object_id < -1 || object_id >= 65535) {
+            Msg("! painter ragdoll capture: usage painter_ragdoll_capture <dead stalker/piece ID|-1 cancel pending>");
+            return;
+        }
+        if (object_id == -1) { painter_cancel_pending_ragdoll_capture(); return; }
+        if (!painter_queue_ragdoll_capture(static_cast<u16>(object_id)))
+            Msg("! painter ragdoll capture: target %d request rejected",object_id);
+    }
+    void Save(IWriter*) override {} // transient request, never user.ltx
+};
+
+extern bool painter_queue_alive_reference(u16 object_id);
+extern void painter_cancel_alive_reference();
+class CCC_PainterAliveReference : public IConsole_Command
+{
+public:
+    CCC_PainterAliveReference(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = FALSE; }
+    void Execute(LPCSTR args) override
+    {
+        int object_id = -2;
+        char extra = 0;
+        if (sscanf(args, "%d %c", &object_id, &extra) != 1 || object_id < -1 || object_id >= 65535) {
+            Msg("! painter alive reference: usage painter_alive_reference_id <living stalker ID|-1 cancel>");
+            return;
+        }
+        if (object_id == -1) { painter_cancel_alive_reference(); return; }
+        if (!painter_queue_alive_reference(static_cast<u16>(object_id)))
+            Msg("! painter alive reference: target %d rejected",object_id);
+    }
+    void Save(IWriter*) override {} // transient request, never user.ltx
+};
 
 class CCC_SharedStringDump : public IConsole_Command
 {
@@ -2640,6 +2770,118 @@ public:
     }
 };
 
+namespace gfy_live { void set_mask_only(bool on) noexcept; void set_mask_only_mode(int mode) noexcept; }
+namespace gfy_live { void set_seam_rule(int on) noexcept; void set_sever_method(int m) noexcept; }
+namespace gfy_live { void set_holding_cut(int on) noexcept; }
+namespace gfy_live { void set_island_fill(int on) noexcept; }
+namespace gfy_live { void set_sep_threads(int threads) noexcept; } // gearpar
+namespace gfy_live { void set_hole_reach(int on) noexcept; } // nothinghits
+namespace gfy_live { void set_gear_body(int on) noexcept; } // gearbody
+namespace gfy_live { void set_kill_sever_ragged(int on) noexcept; }
+int painter_seam_rule=1;
+class CCC_PainterSeamRule : public CCC_Integer
+{
+public:
+    CCC_PainterSeamRule(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_seam_rule(*value); }
+};
+int painter_sever_method=1;
+class CCC_PainterSeverMethod : public CCC_Integer
+{
+public:
+    CCC_PainterSeverMethod(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_sever_method(*value); }
+};
+int painter_holding_cut=0;
+class CCC_PainterHoldingCut : public CCC_Integer
+{
+public:
+    CCC_PainterHoldingCut(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_holding_cut(*value); }
+};
+int painter_island_fill=1; // bonefill: on by default
+class CCC_PainterIslandFill : public CCC_Integer
+{
+public:
+    CCC_PainterIslandFill(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_island_fill(*value); }
+};
+int painter_sep_threads=0;
+class CCC_PainterSepThreads : public CCC_Integer
+{
+public:
+    CCC_PainterSepThreads(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 16) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_sep_threads(*value); }
+    virtual void Save(IWriter* F) { ; }
+};
+int painter_hole_reach=1;
+int painter_gear_body=1;
+class CCC_PainterGearBody : public CCC_Integer
+{
+public:
+    CCC_PainterGearBody(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_gear_body(*value); }
+};
+int painter_piece_pass=1;
+int painter_body_pass=1;
+class CCC_PainterHoleReach : public CCC_Integer
+{
+public:
+    CCC_PainterHoleReach(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_hole_reach(*value); }
+};
+int painter_kill_sever_ragged=1;
+namespace gfy_live { void set_kill_sever_blowout(int on) noexcept; }
+int painter_kill_sever_blowout=0;
+class CCC_PainterKillSeverBlowout : public CCC_Integer
+{
+public:
+    CCC_PainterKillSeverBlowout(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_kill_sever_blowout(*value); }
+};
+class CCC_PainterKillSeverRagged : public CCC_Integer
+{
+public:
+    CCC_PainterKillSeverRagged(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_kill_sever_ragged(*value); }
+};
+namespace gfy_live { void set_body_burst_chance(float chance) noexcept; }
+namespace gfy_live { void set_damage_mode(int mode) noexcept; }
+namespace gfy_live { void set_body_blowout_frequency(float f) noexcept; }
+// bulletburst: the body blowout frequency (the worker reads its own copy: set at every change, also from user.ltx at start)
+class CCC_PainterBodyBlowoutFrequency : public CCC_Float
+{
+public:
+    CCC_PainterBodyBlowoutFrequency(LPCSTR N, float* V) : CCC_Float(N, V, 0.f, 2.f) {} // 0: never, 1: the head's chances, 2: doubled
+    virtual void Execute(LPCSTR args) { CCC_Float::Execute(args); gfy_live::set_body_blowout_frequency(*value); }
+};
+namespace gfy_live { void set_body_blowout_chunks(int v) noexcept; }
+class CCC_PainterBodyBlowoutChunks : public CCC_Integer
+{
+public:
+    CCC_PainterBodyBlowoutChunks(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_body_blowout_chunks(*value); }
+};
+class CCC_PainterDamageMode : public CCC_Integer
+{
+public:
+    CCC_PainterDamageMode(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 2) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_damage_mode(*value); }
+};
+// headfix: the body-burst chance (the worker reads its own copy: set at every change, also from user.ltx at start)
+class CCC_PainterBodyBurstChance : public CCC_Float
+{
+public:
+    CCC_PainterBodyBurstChance(LPCSTR N, float* V) : CCC_Float(N, V, 0.f, 1.f) {} // 0: legacy torso cuts only, 1: always a body burst
+    virtual void Execute(LPCSTR args) { CCC_Float::Execute(args); gfy_live::set_body_burst_chance(*value); }
+};
+// Mask-only wounds: the worker reads its own copy of the value (set at every change, also from user.ltx at start).
+class CCC_PainterMaskOnly : public CCC_Integer
+{
+public:
+    CCC_PainterMaskOnly(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 3) {} // 2: slice 2 (severs and detached pieces), 3: slice 3 (decide-once tear)
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_mask_only_mode(*value); }
+};
 void CCC_RegisterCommands()
 {
 	//Not needed for a singleplayer-only mod
@@ -3420,6 +3662,62 @@ void CCC_RegisterCommands()
 
 	// Print warnings when using bone_position and bone_direction functions and encounter invalid bones
 	CMD4(CCC_Integer, "print_bone_warnings", &print_bone_warnings, 0, 1);
+	CMD4(CCC_Integer, "painter_ragdoll_capture_next", &painter_ragdoll_capture_next, 0, 1);
+	CMD1(CCC_PainterRagdollCapture, "painter_ragdoll_capture");
+	CMD4(CCC_Integer, "painter_native_ragdoll", &painter_native_ragdoll, 0, 1);
+	CMD4(CCC_Integer, "painter_sever_hold", &painter_sever_hold, 0, 1);
+	CMD4(CCC_Integer, "painter_sever_hold_ms", &painter_sever_hold_ms, 0, 2000);
+	CMD1(CCC_PainterAliveReference, "painter_alive_reference_id");
+	CMD4(CCC_Integer, "painter_bone_visibility_timing", &painter_bone_visibility_timing, 0, 1);
+	CMD4(CCC_Integer, "painter_look_log", &g_painter_look_log, 0, 1); // [painter_look] per NPC per second: sight target + head pitch
+	CMD4(CCC_Integer, "painter_pose_log", &g_painter_pose_log, 0, 1); // [painter_pose] per NPC per second: rendered-skeleton sanity
+	CMD4(CCC_Integer, "painter_lean_test", &g_painter_lean_test, -100, 100); // force every stalker's lean target to N/100 (diagnostics)
+	CMD4(CCC_Integer, "painter_spine_comp", &g_painter_spine_comp, 0, 1); // rotate the upper body onto its torso clip's authored spine (1)
+	CMD4(CCC_Integer, "painter_fire_log", &g_painter_fire_log, 0, 1); // [painter_fire] native fire checks per stalker with an enemy, 1 Hz
+	CMD4(CCC_Integer, "painter_shoulder_test", &g_painter_shoulder_test, -1, 2); // force every stalker's shoulder mode: 0 right, 1 left, 2 auto; -1 off
+	CMD4(CCC_Integer, "painter_lh_ik", &g_painter_lh_ik, 0, 1); // NPC left hand onto [npc_left_hand_grips] of the gun in hand (1)
+	CMD4(CCC_Integer, "painter_lh_ik_test", &g_painter_lh_ik_test, -300, 300); // guns without a grip entry: slide the clip's grip N mm along the barrel (diagnostics)
+	CMD1(CCC_PainterGeometryProbe, "painter_butcher_geometry_test");
+	CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result",&painter_runtime_result);
+    CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result_owner",&painter_runtime_result_owner);
+    CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result_state",&painter_runtime_result_state);
+    CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result_reason",&painter_runtime_result_reason);
+    extern int painter_voxel_mask_only; // mask-only wounds (slice 1): 0 (default) today, 1 on
+    CMD2(CCC_PainterMaskOnly,"painter_voxel_mask_only",&painter_voxel_mask_only);
+    extern int painter_voxel_quality;
+    CMD4(CCC_Integer,"painter_voxel_quality",&painter_voxel_quality,0,2);
+    extern int painter_voxel_cell_mm; // wound cell size in mm: 2 (default) or 1
+    CMD4(CCC_Integer,"painter_voxel_cell_mm",&painter_voxel_cell_mm,1,2);
+    CMD2(CCC_PainterSeamRule,"painter_seam_rule",&painter_seam_rule); // damagecut: the seam rule, 1 on (default) / 0 off
+    CMD2(CCC_PainterSeverMethod,"painter_sever_method",&painter_sever_method); // damagecut: 0 the old severs, 1 the new (default)
+    CMD2(CCC_PainterHoldingCut,"painter_holding_cut",&painter_holding_cut); // damagecut3: the holding-cells search, 0 off (default) / 1 on
+    CMD2(CCC_PainterIslandFill,"painter_island_fill",&painter_island_fill); // headmask2: the island fill, 0 off (default) / 1 on
+    CMD2(CCC_PainterSepThreads,"painter_sep_threads",&painter_sep_threads); // gearpar: a separation's threads, 0 automatic (default) / 1..16
+    CMD2(CCC_PainterGearBody,"painter_gear_body",&painter_gear_body); // gearbody: gear surfaces join the body at outfit preparation, 1 (default) / 0 off
+    CMD2(CCC_PainterHoleReach,"painter_hole_reach",&painter_hole_reach); // nothinghits: a bullet into a crater wounds the flesh behind it, 1 (default) / 0 off
+    CMD2(CCC_PainterKillSeverRagged,"painter_kill_sever_ragged",&painter_kill_sever_ragged); // raggedsever: killing-shot limb tears through the damage, 1 (default) / 0 the old cut
+    CMD2(CCC_PainterKillSeverBlowout,"painter_kill_sever_blowout",&painter_kill_sever_blowout); // killblow: a killing shot's limb sever blows a crater out first, 0 (default) off / 1
+    CMD4(CCC_Integer,"painter_piece_pass",&painter_piece_pass,0,1); // piecehit: a bullet passes a piece where it has no flesh, 1 (default) / 0 off
+    CMD4(CCC_Integer,"painter_body_pass",&painter_body_pass,0,1); // bodypass: a bullet passes a dead body's lost parts, 1 (default) / 0 off
+    extern float painter_body_burst_chance; // headfix: value-3 blasts: the chance of a body burst (else the legacy torso cuts)
+    CMD2(CCC_PainterBodyBurstChance,"painter_body_burst_chance",&painter_body_burst_chance);
+    extern int painter_damage_mode; // modes: 0 Normal, 1 Bullet holes only, 2 Extreme
+    CMD2(CCC_PainterDamageMode,"painter_damage_mode",&painter_damage_mode);
+    extern float painter_body_blowout_frequency; // bulletburst: bullet bursts / surface blowouts on the body (x the head's chances)
+    CMD2(CCC_PainterBodyBlowoutFrequency,"painter_body_blowout_frequency",&painter_body_blowout_frequency);
+    extern int painter_body_blowout_chunks; // nochunks: a bullet's body burst comes off in pieces, 1 (default) / 0 blown out
+    CMD2(CCC_PainterBodyBlowoutChunks,"painter_body_blowout_chunks",&painter_body_blowout_chunks);
+    CMD1(CCC_PainterBalanceTest,"painter_balance_test");
+    CMD2(CCC_PainterRuntimeStatus,"painter_balance_test_enabled",&painter_balance_test_enabled);
+    CMD2(CCC_PainterRuntimeStatus,"painter_balance_test_active",&painter_balance_test_active);
+    CMD2(CCC_PainterRuntimeStatus,"painter_balance_test_inferences",&painter_balance_test_inferences);
+    CMD1(CCC_PainterVoxelLiveWarm,"painter_voxel_live_warm");
+    CMD1(CCC_PainterVoxelLiveBind,"painter_voxel_live_bind");
+    CMD2(CCC_PainterRuntimeStatus,"painter_voxel_live_result",&painter_voxel_live_result);
+    CMD2(CCC_PainterRuntimeStatus,"painter_voxel_live_owner",&painter_voxel_live_owner);
+    CMD2(CCC_PainterRuntimeStatus,"painter_voxel_live_revision",&painter_voxel_live_revision);
+	CMD1(CCC_PainterRuntimeWarm, "painter_butcher_runtime_warm");
+	CMD1(CCC_PainterRuntimeProbe, "painter_butcher_runtime_test");
 
 	// Print DLTX warnings when "override section which doesn't exist", also prints cache hit for each file
 	CMD4(CCC_Integer, "print_dltx_warnings", &print_dltx_warnings, 0, 1);

@@ -1,6 +1,7 @@
 #ifndef PH_GEOMETRY_OWNER_H
 #define PH_GEOMETRY_OWNER_H
 #include "Geometry.h"
+#include <vector>
 #include "../xrEngine/gamemtllib.h"
 
 DEFINE_VECTOR(CODEGeom*, GEOM_STORAGE, GEOM_I)
@@ -26,6 +27,8 @@ protected:
 public:
 	///
 	void add_Sphere(const Fsphere& V); //aux
+    bool try_append_Spheres_prebuild(const std::vector<Fsphere>&,u16 bone,const Flags16&);
+    bool try_append_Boxes_prebuild(const std::vector<Fobb>&,u16 bone,const Flags16&);
 	void add_Box(const Fobb& V); //aux
 	void add_Cylinder(const Fcylinder& V); //aux
 	void add_Shape(const SBoneShape& shape); //aux

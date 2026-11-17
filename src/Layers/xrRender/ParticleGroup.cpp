@@ -244,7 +244,13 @@ void CParticleGroup::SItem::StartRelatedChild(CParticleEffect* emitter, LPCSTR e
 {
 	CParticleEffect* C = static_cast<CParticleEffect*>(RImplementation.model_CreatePE(eff_name));
 
-	C->SetHudMode(emitter->GetHudMode());
+	C->m_SpriteColor=emitter->m_SpriteColor;
+	C->m_SpriteSize=emitter->m_SpriteSize;
+    C->m_BloodThermalSource=emitter->m_BloodThermalSource;
+    // Carry donor-particle elapsed time through birth/play/death child transitions.
+    // This never changes the child definition's independent blood eligibility.
+    C->m_BloodThermalAgeOffset=emitter->m_BloodThermalAgeOffset + (std::isfinite(m.age) ? (std::max)(0.f,m.age) : 0.f);
+    C->SetHudMode(emitter->GetHudMode());
 
 	Fmatrix M;
 	M.identity();
@@ -277,7 +283,13 @@ void CParticleGroup::SItem::StopRelatedChild(u32 idx)
 void CParticleGroup::SItem::StartFreeChild(CParticleEffect* emitter, LPCSTR nm, PAPI::Particle& m)
 {
 	CParticleEffect* C = static_cast<CParticleEffect*>(RImplementation.model_CreatePE(nm));
-	C->SetHudMode(emitter->GetHudMode());
+	C->m_SpriteColor=emitter->m_SpriteColor;
+	C->m_SpriteSize=emitter->m_SpriteSize;
+    C->m_BloodThermalSource=emitter->m_BloodThermalSource;
+    // Carry donor-particle elapsed time through birth/play/death child transitions.
+    // This never changes the child definition's independent blood eligibility.
+    C->m_BloodThermalAgeOffset=emitter->m_BloodThermalAgeOffset + (std::isfinite(m.age) ? (std::max)(0.f,m.age) : 0.f);
+    C->SetHudMode(emitter->GetHudMode());
 	if (!C->IsLooped())
 	{
 		Fmatrix M;
@@ -637,6 +649,7 @@ void CParticleGroup::UpdateParent(const Fmatrix& m, const Fvector& velocity, BOO
 BOOL CParticleGroup::Compile(CPGDef* def)
 {
 	xrCriticalSectionGuard guard(&onframe_lock);
+    m_BloodThermalSource={};
 	m_Def = def;
 	// destroy existing
 	for (SItem& item : items)
@@ -649,11 +662,96 @@ BOOL CParticleGroup::Compile(CPGDef* def)
 		for (CPGDef::EffectVec::const_iterator e_it = m_Def->m_Effects.begin(); e_it != m_Def->m_Effects.end(); e_it++)
 		{
 			CParticleEffect* eff = (CParticleEffect*)RImplementation.model_CreatePE(*(*e_it)->m_EffectName);
-			eff->SetBirthDeadCB(OnGroupParticleBirth, OnGroupParticleDead, this, u32(e_it - m_Def->m_Effects.begin()));
+			eff->m_SpriteColor=m_SpriteColor;
+			eff->m_SpriteSize=m_SpriteSize;
+            eff->m_BloodThermalSource=m_BloodThermalSource;
+
+            eff->SetBirthDeadCB(OnGroupParticleBirth, OnGroupParticleDead, this, u32(e_it - m_Def->m_Effects.begin()));
 			items[e_it - def->m_Effects.begin()].Set(eff);
 		}
 	}
 	return TRUE;
+}
+
+bool CParticleGroup::SetColorScale(float red,float green,float blue)
+{
+    BloodParticleColor next;
+    if(!next.Set(red,green,blue))return false;
+    xrCriticalSectionGuard guard(&onframe_lock);
+    if(IsPlaying())return false;
+    // Preflight the whole owned set before changing any effect. The worker
+    // owns this same group lock while playing, birthing and retiring children.
+    for(auto& item:items){
+        auto ready=[&](dxRender_Visual* v){
+            return !v || item._children_destroy.count(v) || !static_cast<CParticleEffect*>(v)->IsPlaying();
+        };
+        if(!ready(item._effect))return false;
+        for(auto* v:item._children_related)if(!ready(v))return false;
+        for(auto* v:item._children_free)if(!ready(v))return false;
+    }
+    for(auto& item:items){
+        auto apply=[&](dxRender_Visual* v){
+            if(v&&!item._children_destroy.count(v))static_cast<CParticleEffect*>(v)->m_SpriteColor=next;
+        };
+        apply(item._effect);
+        for(auto* v:item._children_related)apply(v);
+        for(auto* v:item._children_free)apply(v);
+    }
+    m_SpriteColor=next;
+    return true;
+}
+
+bool CParticleGroup::SetSizeScale(float value)
+{
+    BloodParticleSize next;
+    if(!next.Set(value))return false;
+    xrCriticalSectionGuard guard(&onframe_lock);
+    if(IsPlaying())return false;
+    for(auto& item:items){
+        auto ready=[&](dxRender_Visual* v){
+            return !v || item._children_destroy.count(v) || !static_cast<CParticleEffect*>(v)->IsPlaying();
+        };
+        if(!ready(item._effect))return false;
+        for(auto* v:item._children_related)if(!ready(v))return false;
+        for(auto* v:item._children_free)if(!ready(v))return false;
+    }
+    for(auto& item:items){
+        auto apply=[&](dxRender_Visual* v){
+            if(v&&!item._children_destroy.count(v))static_cast<CParticleEffect*>(v)->m_SpriteSize=next;
+        };
+        apply(item._effect);
+        for(auto* v:item._children_related)apply(v);
+        for(auto* v:item._children_free)apply(v);
+    }
+    m_SpriteSize=next;
+    return true;
+}
+
+bool CParticleGroup::SetBloodThermalSource(bool known,bool corpse,u32 death)
+{
+    xrCriticalSectionGuard guard(&onframe_lock);
+    if(IsPlaying())return false;
+    for(auto& item:items){
+        auto ready=[&](dxRender_Visual* v){
+            return !v || item._children_destroy.count(v) || !static_cast<CParticleEffect*>(v)->IsPlaying();
+        };
+        if(!ready(item._effect))return false;
+        for(auto* v:item._children_related)if(!ready(v))return false;
+        for(auto* v:item._children_free)if(!ready(v))return false;
+    }
+    const BloodParticleThermalSource next={known,corpse,death};
+    for(auto& item:items){
+        auto apply=[&](dxRender_Visual* v){
+            if(v&&!item._children_destroy.count(v)) {
+                auto* effect=static_cast<CParticleEffect*>(v);
+                effect->m_BloodThermalSource=next;
+            }
+        };
+        apply(item._effect);
+        for(auto* v:item._children_related)apply(v);
+        for(auto* v:item._children_free)apply(v);
+    }
+    m_BloodThermalSource=next;return true;
 }
 
 void CParticleGroup::Play()

@@ -1,5 +1,6 @@
 #include "pch_script.h"
 #include "Level.h"
+#include "painter_voxel/PainterExplosions.h"
 #include "Level_Bullet_Manager.h"
 #include "xrserver.h"
 #include "xrmessages.h"
@@ -151,6 +152,10 @@ void CLevel::net_Stop()
 	else if (IsDemoSave() && !IsDemoInfoSaved())
 		SaveDemoInfo();
 
+    // Native net_Stop is irreversible: join the producer, then disable admission
+    // before removal loops run without ordinary frame draining.
+    PainterStopSpawnPrefetch();
+    PainterRetireSpawnStream();
 	remove_objects();
 
 	//WARNING ! remove_objects() uses this flag, so position of this line must e here ..
@@ -165,6 +170,9 @@ void CLevel::net_Stop()
 		xr_delete(Server);
 	}
 
+    // Native producers/objects/server have retired; clear only this exact world.
+    PainterRetireSpawnStream();
+    painter_explosions::world_stopped(PainterWorldCookie());
     Msg("Device.LuaGC clear");
     Device.LuaGC.clear();
     Device.LuaGCDebug.clear();

@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "raypick.h"
 #include "level.h"
 
@@ -29,6 +30,7 @@ CRayPick::CRayPick(const Fvector& P, const Fvector& D, float R, collide::rq_targ
 
 bool CRayPick::query()
 {
+	BloodNativeProfile::Scope bloodQuery(BloodNativeProfile::Stage::ScriptRayQuery);
 	result.reset();
 	collide::rq_result R;
 	if (Level().ObjectSpace.RayPick(start_position, direction, range, flags, R, ignore))

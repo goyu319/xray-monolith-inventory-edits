@@ -532,8 +532,29 @@ void __cdecl xrDebug::fatal(const char* file, int line, const char* function, co
 typedef void (*full_memory_stats_callback_type)(bool);
 XRCORE_API full_memory_stats_callback_type g_full_memory_stats_callback = 0;
 
+static thread_local xr_oom_hook g_thread_oom_hook = nullptr;
+static xr_oom_release volatile g_oom_release = nullptr;
+
+XRCORE_API xr_oom_hook xr_set_thread_oom_hook(xr_oom_hook hook)
+{
+	const xr_oom_hook previous = g_thread_oom_hook;
+	g_thread_oom_hook = hook;
+	return previous;
+}
+
+XRCORE_API void xr_set_oom_release(xr_oom_release release) { g_oom_release = release; }
+
 int out_of_memory_handler(size_t size)
 {
+	// Opted-in thread: the hook throws std::bad_alloc (never returns 0 here).
+	// Nothing may run before it: logging allocates and could fail again.
+	if (const xr_oom_hook hook = g_thread_oom_hook)
+		return hook(size);
+	// Recomputable caches first; retry the allocation if memory was released.
+	if (const xr_oom_release release = g_oom_release)
+		if (release(size))
+			return 1;
+
 	Msg("* [x-ray]: OOM requesting %lld bytes", size);
 
 	if (g_full_memory_stats_callback)

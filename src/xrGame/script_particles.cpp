@@ -8,6 +8,9 @@
 
 #include "stdafx.h"
 #include "script_particles.h"
+#include "script_game_object.h"
+#include "PhysicsSkeletonObject.h"
+#include "Entity.h"
 #include "../xrEngine/objectanimator.h"
 #include "../xrEngine/IGame_Persistent.h"
 
@@ -105,10 +108,54 @@ CScriptParticles::~CScriptParticles()
 	}
 }
 
+bool CScriptParticles::SetBloodThermalSource(CScriptGameObject* source)
+{
+    if(!m_particles || m_particles->IsPlaying())return false;
+    // The dedicated call copies donor clock only; CPEDef owns blood eligibility.
+    // Clock validity is independent and remains unknown; never fabricate death.
+    bool known=false,corpse=false;u32 death=0;
+    if(source && source->is_valid()) {
+        if(auto* entity=smart_cast<CEntity*>(&source->object())) {
+            known=true;corpse=entity->IsThermalCorpse();
+            if(corpse)death=entity->GetLevelDeathTime();
+        }else if(auto* piece=smart_cast<CPhysicsSkeletonObject*>(&source->object())) {
+            if(piece->IsThermalCorpse()) {
+                known=true;corpse=true;death=piece->PainterThermalDeathTime();
+            }
+        }
+    }
+    auto* visual=m_particles->renderable.visual;
+    auto* effect=visual?visual->dcast_ParticleCustom():nullptr;
+    return effect && effect->SetBloodThermalSource(known,corpse,death);
+}
+
+bool CScriptParticles::SetColorScale(float red,float green,float blue)
+{
+    if(!m_particles || m_particles->IsPlaying())return false;
+    auto* visual=m_particles->renderable.visual;
+    auto* effect=visual?visual->dcast_ParticleCustom():nullptr;
+    return effect && effect->SetColorScale(red,green,blue);
+}
+
+bool CScriptParticles::SetSizeScale(float scale)
+{
+    if (!m_particles || m_particles->IsPlaying()) return false;
+    auto* visual=m_particles->renderable.visual;
+    auto* effect=visual?visual->dcast_ParticleCustom():nullptr;
+    // Effects and groups (CParticleGroup::SetSizeScale, 2026-10-17) take the scale before play; other visuals refuse.
+    return effect && effect->SetSizeScale(scale);
+}
+
 void CScriptParticles::Play(bool bHudMode)
 {
 	VERIFY(m_particles);
 	m_particles->Play(bHudMode);
+}
+
+bool CScriptParticles::PlayPacket(bool bHudMode)
+{
+	VERIFY(m_particles);
+	return m_particles->PlayPacket(bHudMode);
 }
 
 void CScriptParticles::PlayAtPos(const Fvector& position, bool bHudMode)

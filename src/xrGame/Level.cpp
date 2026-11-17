@@ -1,4 +1,5 @@
 #include "pch_script.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "xrEngine/FDemoRecord.h"
 #include "xrEngine/FDemoPlay.h"
 #include "xrEngine/Environment.h"
@@ -70,6 +71,15 @@
 #include "PHDebug.h"
 #include "debug_text_tree.h"
 #endif
+#include "painter_ai/EngineServices.h"
+#include "painter_ai/EngineCombatRuntime.h"
+#include "painter_ai/EngineRecorder.h"
+#include "painter_stream/NativeStream.h"
+#include "painter_stream/PrefetchWait.h"
+#include "../xrEngine/PainterLifetimeCookie.h"
+#include <atomic>
+#include <process.h>
+extern BOOL mt_Scheduler;
 extern ENGINE_API bool g_dedicated_server;
 extern ENGINE_API BOOL	g_bootComplete;
 extern CUISequencer* g_tutorial;
@@ -113,7 +123,7 @@ struct spawn_and_prefetch_events
     spawn_events_data_map* spawn_events_data = nullptr;
     prefetch_event_queue* prefetch_events = nullptr;
     models_set* prefetched_models = nullptr;
-    bool* closeSignal = nullptr;
+    std::atomic<bool>* closeSignal = nullptr;
     xrSRWLock* prefetch_lock = nullptr;
 };
 
@@ -240,8 +250,16 @@ CLevel::CLevel() :
 #endif
 {
     PROF_EVENT("CLevel::CLevel");
+    static std::atomic<std::uint64_t> next_world{0};
+    m_painter_world_cookie=painter_lifetime::allocate(next_world);
+    R_ASSERT2(m_painter_world_cookie,"Native world cookie exhausted");
+    m_painter_spawn_stream=xr_new<painter_stream::NativeStream>(*this);
+    painter::combat::engine::level_created(); // native combat AI: a new level epoch before the level's scripts run
+    painter::combat::engine::initialize_combat_runtime(); // native combat AI: registers its frame tick (stays for the next map)
     g_bDebugEvents = Core.ParamsData.test(ECoreParams::debug_ge);
     game_events = xr_new<NET_Queue_Event>();
+    game_events->painter_capture_context=m_painter_spawn_stream;
+    game_events->painter_capture=&painter_stream::NativeStream::Capture;
 
     eChangeRP = Engine.Event.Handler_Attach("LEVEL:ChangeRP", this);
     eDemoPlay = Engine.Event.Handler_Attach("LEVEL:PlayDEMO", this);
@@ -281,7 +299,15 @@ CLevel::CLevel() :
     prefetched_models = xr_new<models_set>();
     auto events = new spawn_and_prefetch_events({ spawn_events, spawn_events_data, prefetch_events, prefetched_models, &closeSignal, &prefetch_lock });
     createPrefetchThreadSignal();
-    thread_spawn(ProcessPrefetchEvents, "Pre-Spawn Prefetcher Thread", 0, events);
+    // Preserve native thread initialization, but retain a genuine join handle.
+    Debug._initialize(false);
+    auto entry=[](void* context)->unsigned {
+        thread_name("Pre-Spawn Prefetcher Thread");_initialize_cpu_thread();
+        PROF_THREAD("Pre-Spawn Prefetcher Thread");
+        ProcessPrefetchEvents(context);return 0;
+    };
+    m_painter_prefetch_thread=reinterpret_cast<void*>(_beginthreadex(nullptr,0,entry,events,0,nullptr));
+    R_ASSERT2(m_painter_prefetch_thread,"Cannot start native spawn prefetch worker");
     Msg("CLevel::CLevel() Spawn Antifreeze initialized");
 #endif
 
@@ -294,6 +320,25 @@ extern CAI_Space* g_ai_space;
 CLevel::~CLevel()
 {
     PROF_EVENT("CLevel::~CLevel");
+    PainterStopSpawnPrefetch();
+    PainterRetireSpawnStream();
+    xr_delete(m_painter_spawn_stream);
+    {   // native combat AI: its authority tick on this level, last / max per phase (capture includes the compatibility
+        // checks and dispatch includes publication: the phases nest, never add them); beside the job queue's jobs_summary
+        const painter::combat::engine::RuntimeStatus s = painter::combat::engine::combat_runtime_status();
+        Msg("[painter_combat] phase=runtime_summary level=%s frames=%llu failures=%llu ingest_rejected=%llu tick_ms=%.2f/%.2f "
+            "capture_ms=%.2f/%.2f dispatch_ms=%.2f/%.2f publish_ms=%.2f/%.2f first_applied=%llu first_deadline_missed=%llu "
+            "first_applied_ms_max=%llu accepted=%llu rejected=%llu %s record_ms=%.2f record_mb=%.1f", *name(), s.frames, s.failures, s.ingest_rejected, s.last_tick_ms,
+            s.maximum_tick_ms, s.capture_ms, s.maximum_capture_ms, s.dispatch_ms, s.maximum_dispatch_ms, s.publish_ms,
+            s.maximum_publish_ms, s.dispatch.first_applied, s.dispatch.first_deadline_missed, s.dispatch.maximum_first_applied_ms,
+            s.dispatch.native_accepted, s.dispatch.native_rejected,
+            painter::combat::engine::reject_summary().c_str(),   // native17: rejects by RejectReason + envelopes, the recorder's cost
+            painter::combat::engine::recorder_max_ms(), float(painter::combat::engine::recorder_bytes()) / 1048576.f);
+        painter::combat::engine::recorder_level_end();
+        painter::combat::engine::reset_reject_counters();
+    }
+    painter::combat::engine::level_ending_combat_runtime(); // native combat AI: hand its men back while the actors are valid
+    painter::combat::engine::level_destroyed(); // native combat AI: drain its jobs before anything they read is freed
     //crash_saving::save_impl = nullptr; // CLevel not available, disable crash save
     FirstPerson::Reset();
     xr_delete(g_player_hud);
@@ -342,8 +387,7 @@ CLevel::~CLevel()
     xr_delete(spawn_events_data);
     xr_delete(prefetch_events);
     xr_delete(prefetched_models);
-    closeSignal = true; // signal ProcessPrefetchEvents thread to exit
-    unpausePrefetchThreadSignal();
+    // Worker was joined before any queue, renderer or world data was freed.
 #endif
 
     xr_delete(m_pBulletManager);
@@ -519,13 +563,14 @@ bool CLevel::PostponedSpawn(u16 id)
 {
     PROF_EVENT("ProcessGameEvents PostponedSpawn");
 
+    const bool painter_pending=m_painter_spawn_stream&&m_painter_spawn_stream->Pending(id);
     xrSRWLockGuard g(prefetch_lock, true);
     auto queue = prefetch_events;
     auto it = std::find_if(queue->begin(), queue->end(), [id, this](prefetch_event& E) { return PostponedSpawnFind(id, E.p); });
 
     auto& queue2 = spawn_events->queue;
     auto it2 = std::find_if(queue2.begin(), queue2.end(), [id, this](const NET_Event& E) { return PostponedSpawnFind(id, E); });
-    return it != queue->end() || it2 != queue2.end();
+    return it != queue->end() || it2 != queue2.end() || painter_pending;
 }
 
 int CLevel::GetSpawnEventPriority(const NET_Event& e) const
@@ -575,9 +620,9 @@ void CLevel::ProcessPrefetchEvents(void* args)
 
     while (true)
     {
-        WaitForSingleObject(prefetch_thread_signal, INFINITE); // wait for prefetch queue event to be signaled
-
-        if (*closeSignal == true)
+        const auto state=painter_stream::WaitForPrefetch(*closeSignal,prefetch_thread_signal);
+        R_ASSERT2(state!=painter_stream::PrefetchWait::Failed,"Native prefetch wait failed");
+        if (state==painter_stream::PrefetchWait::Stopped)
         {
             if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] closeSignal received, destroying thread");
             closePrefetchThreadSignal();
@@ -633,6 +678,9 @@ void CLevel::ProcessPrefetchEvents(void* args)
             for (auto& E : saved_prefetch_events)
             {
                 spawn_events->insert(E.p); // reinsert the event to spawn_events queue for further processing
+                spawn_events->queue.back().painter_stamp=E.painter_stamp;
+                spawn_events->queue.back().painter_prefetched=true;
+                spawn_events->queue.back().painter_had_alife_object=E.hasAlifeObject;
                 spawn_events_data->emplace(E.id, E); // store the prefetch event data for later use in ProcessSpawnEvents
             }
 
@@ -642,26 +690,8 @@ void CLevel::ProcessPrefetchEvents(void* args)
 }
 
 // demonized: If called manually, be aware of ProcessPrefetchEvents thread, which may modify spawn_events queue at the same time, maybe fix later
-void CLevel::ProcessSpawnEvents()
+bool CLevel::PainterDispatchSpawn(const NET_Event& E)
 {
-    PROF_EVENT("ProcessSpawnEvents");
-
-    xr_vector<NET_Event> events_to_process;
-    spawn_events_data_map spawn_events_data_copy;
-	{
-		xrSRWLockGuard g(prefetch_lock);
-		if (!spawn_events->queue.empty())
-		{
-			events_to_process.swap(spawn_events->queue);
-		}
-        if (!spawn_events_data->empty())
-        {
-            spawn_events_data_copy.swap(*spawn_events_data);
-        }
-	}
-
-	for (const auto& E : events_to_process)
-	{
 		auto data = make_intrusive<ProcessNetPacket>();
 		u16 ID, dest, type;
 		NET_Packet& P = data->P;
@@ -679,13 +709,10 @@ void CLevel::ProcessSpawnEvents()
 		{
 			CObject* parent = Objects.net_Find(parent_id);
 			if (!parent || parent->getDestroy())
-				continue;
+				return false;
 		}
 
 		if (spawn_antifreeze_debug) Msg("[ProcessSpawnEvents] spawning section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
-
-        // If the object was in alife, but now its absent, skip it
-        auto spawn_data_it = spawn_events_data_copy.find(obj_id);
 
 		// demonized: If item is II_BOLT class - go through anyway
 		if (pSettings->line_exist(section.c_str(), "class") && strstr(pSettings->r_string(section.c_str(), "class"), "II_BOLT") != nullptr)
@@ -694,27 +721,25 @@ void CLevel::ProcessSpawnEvents()
 			goto spawn;
 		}
 
-        if (spawn_data_it != spawn_events_data_copy.end())
-        {
-            if (spawn_data_it->second.hasAlifeObject)
-            {
-                auto obj = ai().alife().objects().object(obj_id);
-                if (!obj || !obj->m_bOnline)
-                {
-                    if (spawn_antifreeze_debug) Msg("![ProcessSpawnEvents] object absent or offline, do not spawn, section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
-                    continue;
-                }
-            }
-        }        
+        // Preserve the original prefetch-time ALife membership and online
+        // filter independently of whether an additional lifetime witness exists.
+        if(E.painter_prefetched&&E.painter_had_alife_object){
+            auto* object=ai().alife().objects().object(obj_id);
+            if(!object||!object->m_bOnline)return false;
+        }
+        if(E.painter_stamp.authenticated){
+            auto* current=Server?Server->ID_to_entity(obj_id):nullptr;
+            if(!current||current->PainterBirthCookie()!=E.painter_stamp.owner.server_birth)return false;
+        }
 
 		// If there is a parent of this object, check if its still in alife
-		if (parent_id != 0xffff)
+		if (E.painter_prefetched&&parent_id != 0xffff)
 		{
 			auto parent_obj = ai().alife().objects().object(parent_id);
 			if (!parent_obj || !parent_obj->m_bOnline)
 			{
 				if (spawn_antifreeze_debug) Msg("![ProcessSpawnEvents] parent object is not in alife, do not spawn, section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
-				continue;
+				return false;
 			}
 		}
 
@@ -722,8 +747,28 @@ void CLevel::ProcessSpawnEvents()
 		u16 dummy16;
 		P.r_begin(dummy16);
 		cl_Process_Spawn(P);
-	}
+        return true;
 }
+
+void CLevel::ProcessSpawnEvents()
+{
+    PROF_EVENT("ProcessSpawnEvents");
+    xr_vector<NET_Event> events;
+    {
+        xrSRWLockGuard guard(prefetch_lock);
+        events.swap(spawn_events->queue);
+        spawn_events_data->clear();
+    }
+    for(auto& event:events){
+        const auto result=m_painter_spawn_stream?m_painter_spawn_stream->Admit(event,true):painter_stream::Admission::Forward;
+        if(result==painter_stream::Admission::Held)continue;
+        if(result==painter_stream::Admission::Retry){
+            xrSRWLockGuard guard(prefetch_lock);spawn_events->queue.push_back(std::move(event));continue;
+        }
+        if(PainterDispatchSpawn(event)&&m_painter_spawn_stream)m_painter_spawn_stream->SpawnApplied(event);
+    }
+}
+
 #endif
 
 void CLevel::ProcessGameEvents()
@@ -745,6 +790,7 @@ void CLevel::ProcessGameEvents()
 		for (auto it = events_to_process.begin(); it != events_to_process.end(); )
 		{
 			PROF_EVENT("ProcessGameEvents game_events queue");
+			NET_Event& painter_event=*it;
 			u16 ID = it->ID;
 			u16 dest = it->destination;
 			u16 type = it->type;
@@ -753,9 +799,16 @@ void CLevel::ProcessGameEvents()
 			auto& P = data->P;
 			it->implication(P);
 
+            if(m_painter_spawn_stream&&(ID==M_EVENT||(ID==M_SPAWN&&!m_painter_spawn_stream->Ordinary(painter_event)))){
+                const auto admission=m_painter_spawn_stream->Admit(painter_event,false);
+                if(admission!=painter_stream::Admission::Forward){
+                    if(admission==painter_stream::Admission::Retry){xrSRWLockGuard guard(prefetch_lock);game_events->queue.push_back(std::move(painter_event));}
+                    ++it;continue;
+                }
+            }
 //AVO: spawn antifreeze implementation, originally by alpet, reritten by demonized
 #ifdef SPAWN_ANTIFREEZE
-			if (spawn_antifreeze && g_bootComplete)
+			if (spawn_antifreeze && g_bootComplete&&(!m_painter_spawn_stream||m_painter_spawn_stream->Ordinary(painter_event)))
 			{
 				// Postpone M_EVENT for postponed spawns
 				//if (M_EVENT == ID && PostponedSpawn(dest))
@@ -779,6 +832,16 @@ void CLevel::ProcessGameEvents()
 						if (pSettings->line_exist("spawn_antifreeze_ignore", section))
 						{
 							return false;
+						}
+						// Severed body parts spawned by the engine (name_replace painter_damaged_*): their visual is the
+						// NPC's own, already resident; a prefetch would only park them one more frame. The name follows
+						// the section in the spawn packet (CSE_Abstract::Spawn_Read); the read position is restored.
+						{
+							const u32 saved_pos = P.r_pos; u16 header; P.r_begin(header);
+							shared_str spawn_section; P.r_stringZ(spawn_section); string256 spawn_name; P.r_stringZ(spawn_name);
+							P.r_pos = saved_pos;
+							if (!strncmp(spawn_name, "painter_damaged_", 16))
+								return false;
 						}
 
 						bool valid = true;
@@ -848,6 +911,7 @@ void CLevel::ProcessGameEvents()
 							E.models = models;
                             E.id = obj_id;
                             E.hasAlifeObject = obj != nullptr;
+                            E.painter_stamp=painter_event.painter_stamp;
 
 							events_to_prefetch.push_back(E);
 
@@ -864,6 +928,7 @@ void CLevel::ProcessGameEvents()
 						E.p = P;
 						E.id = obj_id;
 						E.hasAlifeObject = ai().alife().objects().object(obj_id, true) != nullptr;
+						E.painter_stamp=painter_event.painter_stamp;
 
 						events_to_prefetch.push_back(E);
 						it++; // Move to next event
@@ -890,9 +955,15 @@ void CLevel::ProcessGameEvents()
 					}
 #endif
 
+                    if(m_painter_spawn_stream){
+                        const auto admission=m_painter_spawn_stream->Admit(painter_event,true);
+                        if(admission==painter_stream::Admission::Held)break;
+                        if(admission==painter_stream::Admission::Retry){xrSRWLockGuard guard(prefetch_lock);game_events->queue.push_back(std::move(painter_event));break;}
+                    }
 					u16 dummy16;
 					P.r_begin(dummy16);
 					cl_Process_Spawn(P);
+                    if(m_painter_spawn_stream)m_painter_spawn_stream->SpawnApplied(painter_event);
 					break;
 				}
 			case M_EVENT:
@@ -1006,9 +1077,12 @@ void CLevel::MakeReconnect()
 
 BOOL mt_ph_commander = FALSE;
 BOOL mt_TaskManager = FALSE;
+void PainterSpawnFrameFlush(u32 current_frame); // Level_network_spawn.cpp (R11 spawn attribution)
+
 void CLevel::OnFrame()
 {
 	PROF_EVENT("CLevel::OnFrame()");
+	PainterSpawnFrameFlush(Device.dwFrame);
 
     // demonized: update wallmarks before rendering
     ::Render->update_Wallmarks();
@@ -1065,6 +1139,7 @@ void CLevel::OnFrame()
 	}
 #endif
 
+	if(m_painter_spawn_stream)m_painter_spawn_stream->Advance();
 	if (m_bNeed_CrPr)
 		make_NetCorrectionPrediction();
 	if (!g_dedicated_server)
@@ -1076,6 +1151,14 @@ void CLevel::OnFrame()
 			Device.seqParallel.push_back(xr_make_delegate(m_map_manager, &CMapManager::Update));
 		else
 			MapManager().Update();
+
+		// Native combat AI (painter_ai/CombatContract.h, THREAD MODEL): capture and publish on the AI thread right after
+		// the scheduler, serialized with every Think and agent manager pass; directly here when the scheduler runs on
+		// this thread. Nothing runs until a tick is registered.
+		if (mt_Scheduler)
+			Device.seqParallel.push_back(xr_make_delegate(&painter::combat::engine::frame_task(), &painter::combat::engine::FrameTask::run));
+		else
+			painter::combat::engine::frame_task().run();
 
         if (!mt_TaskManager && Device.dwPrecacheFrame == 0)
             GameTaskManager().UpdateTasks();
@@ -1173,7 +1256,10 @@ void CLevel::OnFrame()
 	if (!mt_ph_commander)
 	{
 		PROF_EVENT("m_ph_commander");
-		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
+        {
+            BloodNativeProfile::Scope profileScript(BloodNativeProfile::Stage::ScriptLevelUpdate);
+		    ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
+        }
 
 		m_ph_commander->update();
 		m_ph_commander_scripts->update();
@@ -1221,7 +1307,10 @@ void CLevel::script_gc()
 	if (mt_ph_commander)
 	{
 		PROF_EVENT("m_ph_commander");
-		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
+        {
+            BloodNativeProfile::Scope profileScript(BloodNativeProfile::Stage::ScriptLevelUpdate);
+		    ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
+        }
 
 		m_ph_commander->update();
 		m_ph_commander_scripts->update();
@@ -1843,3 +1932,33 @@ CZoneList::~CZoneList()
 	clear();
 	destroy();
 }
+
+void CLevel::PainterStopSpawnPrefetch()
+{
+#ifdef SPAWN_ANTIFREEZE
+    if(!m_painter_prefetch_thread)return;
+    closeSignal.store(true,std::memory_order_release);unpausePrefetchThreadSignal();
+    R_ASSERT2(WaitForSingleObject(m_painter_prefetch_thread,INFINITE)==WAIT_OBJECT_0,"Spawn prefetch join failed");
+    CloseHandle(m_painter_prefetch_thread);m_painter_prefetch_thread=nullptr;
+#endif
+}
+void CLevel::PainterRetireSpawnStream(){if(m_painter_spawn_stream)m_painter_spawn_stream->WorldStopped();}
+bool CLevel::PainterNativeBacklogBefore(const NET_Event& event)
+{
+    const auto& candidate=event.painter_stamp;if(!candidate.authenticated||!candidate.arrival)return false;
+    auto same=[](const painter_stream::Birth& a,const painter_stream::Birth& b){return a.world==b.world&&a.activation==b.activation&&a.server_birth==b.server_birth&&a.id==b.id;};
+    auto blocks=[&](const NET_Event& older){
+        const auto& at=older.painter_stamp;
+        if(!at.authenticated||!at.arrival||at.arrival>=candidate.arrival)return false;
+        if(same(at.owner,candidate.owner))return true;
+        for(unsigned d=0;d<candidate.dependency_count;++d)if(same(at.owner,candidate.dependencies[d]))return true;
+        return false;
+    };
+    xrSRWLockGuard guard(prefetch_lock,true);
+    for(const auto& older:game_events->queue)if(blocks(older))return true;
+#ifdef SPAWN_ANTIFREEZE
+    for(const auto& older:spawn_events->queue)if(blocks(older))return true;
+#endif
+    return false;
+}
+#include "painter_stream/NativeStream_impl.h"

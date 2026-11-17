@@ -15,6 +15,92 @@
 // least this many ms, 0 = off.
 int spawn_time_log = 5;
 extern ENGINE_API BOOL g_bootComplete;
+#include "../xrEngine/painter_spawn_timing.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
+
+namespace
+{
+// Spawn attribution (R11), reported only while the opt-in performance capture runs. A slow object prints one line;
+// a frame whose spawns add up past the frame threshold prints a summary at the start of the next level frame, so a
+// squad arriving one NPC per frame reads differently from a squad created inside a single frame.
+constexpr double painter_slow_spawn_ms = 2.0;
+constexpr double painter_slow_spawn_frame_ms = 4.0;
+struct PainterSpawnFrame
+{
+	u32 frame = u32(-1);
+	u32 objects = 0;
+	double total_ms = 0.0;
+	double worst_ms = 0.0;
+	shared_str worst;
+};
+PainterSpawnFrame painter_spawn_frame;
+unsigned painter_spawn_depth = 0;
+
+struct PainterSpawnReport
+{
+	CSE_Abstract* entity;
+	const bool timing;
+	const double start;
+	const painter_spawn_timing::Counters saved;
+	double created = -1.0;
+	double spawned = -1.0;
+
+	explicit PainterSpawnReport(CSE_Abstract* E)
+		: entity(E), timing(painter_spawn_depth == 0 && BloodNativeProfile::Instance().Capturing()),
+		  start(painter_spawn_timing::NowMs()), saved(painter_spawn_timing::Current())
+	{
+		painter_spawn_timing::Current() = painter_spawn_timing::Counters{};
+		++painter_spawn_depth;
+	}
+	~PainterSpawnReport()
+	{
+		auto& counters = painter_spawn_timing::Current();
+		const painter_spawn_timing::Counters own = counters;
+		counters.visual_ms = saved.visual_ms + own.visual_ms; // an enclosing spawn still accounts nested work
+		counters.script_ms = saved.script_ms + own.script_ms;
+		--painter_spawn_depth;
+		if (!timing) return;
+		const double end = painter_spawn_timing::NowMs();
+		const double total = end - start;
+		const double create = created >= 0.0 ? created - start : total;
+		const double net_spawn = created >= 0.0 && spawned >= 0.0 ? spawned - created : 0.0;
+		const double after = spawned >= 0.0 ? end - spawned : 0.0;
+		auto& frame = painter_spawn_frame;
+		if (frame.frame != Device.dwFrame)
+		{
+			if (frame.frame != u32(-1) && frame.total_ms >= painter_slow_spawn_frame_ms)
+				Msg("[spawn_frame] frame=%u objects=%u total_ms=%.2f worst=%s worst_ms=%.2f", frame.frame, frame.objects,
+				    frame.total_ms, frame.worst.size() ? frame.worst.c_str() : "", frame.worst_ms);
+			frame = PainterSpawnFrame{};
+			frame.frame = Device.dwFrame;
+		}
+		++frame.objects;
+		frame.total_ms += total;
+		if (total > frame.worst_ms)
+		{
+			frame.worst_ms = total;
+			frame.worst = entity->s_name;
+		}
+		if (total >= painter_slow_spawn_ms)
+			Msg("[spawn_time] frame=%u section=%s name=%s id=%u parent=%u total_ms=%.2f create_ms=%.2f net_spawn_ms=%.2f "
+			    "visual_ms=%.2f script_ms=%.2f after_ms=%.2f", Device.dwFrame, entity->s_name.c_str(), entity->name_replace(),
+			    unsigned(entity->ID), unsigned(entity->ID_Parent), total, create, net_spawn, own.visual_ms, own.script_ms, after);
+	}
+	PainterSpawnReport(const PainterSpawnReport&) = delete;
+	PainterSpawnReport& operator=(const PainterSpawnReport&) = delete;
+};
+}
+
+// Called at the start of every level frame: prints the previous frame's spawn summary during a capture.
+void PainterSpawnFrameFlush(u32 current_frame)
+{
+	auto& frame = painter_spawn_frame;
+	if (frame.frame == u32(-1) || frame.frame == current_frame) return;
+	if (frame.total_ms >= painter_slow_spawn_frame_ms)
+		Msg("[spawn_frame] frame=%u objects=%u total_ms=%.2f worst=%s worst_ms=%.2f", frame.frame, frame.objects, frame.total_ms,
+		    frame.worst.size() ? frame.worst.c_str() : "", frame.worst_ms);
+	frame = PainterSpawnFrame{};
+}
 
 void CLevel::cl_Process_Spawn(NET_Packet& P)
 {
@@ -129,6 +215,9 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
 	if (GameID() == eGameIDSingle) psNET_Flags.set(NETFLAG_MINIMIZEUPDATES,TRUE);
 	else psNET_Flags.set(NETFLAG_MINIMIZEUPDATES,FALSE);
 
+	BloodNativeProfile::Scope painter_spawn_scope(BloodNativeProfile::Stage::SpawnObject, Device.dwFrame);
+	PainterSpawnReport painter_spawn_report(E);
+
 	// Client spawn
 	//	T.Start		();
 	CObject* O = nullptr;
@@ -136,6 +225,7 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
 
 		O = Objects.Create(*E->s_name);
 	}
+	painter_spawn_report.created = painter_spawn_timing::NowMs();
 	// Msg				("--spawn--CREATE: %f ms",1000.f*T.GetAsync());
 
 	//	T.Start		();
@@ -149,7 +239,9 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
         return;
     }
 
-	if (!O->net_Spawn(E))
+	const BOOL painter_net_spawned = O->net_Spawn(E);
+	painter_spawn_report.spawned = painter_spawn_timing::NowMs();
+	if (!painter_net_spawned)
 	{
         Msg("! Failed to spawn entity '%s', net_Spawn failed", *E->s_name);
 		O->net_Destroy();

@@ -1,4 +1,8 @@
 #include "stdafx.h"
+#include "BloodNativeProfile.h"
+#ifdef USE_DX11
+#include "BloodGpuParticles.h"
+#endif
 #include "dxRenderDeviceRender.h"
 
 #include "ResourceManager.h"
@@ -105,6 +109,9 @@ void dxRenderDeviceRender::updateGamma()
 
 void dxRenderDeviceRender::OnDeviceDestroy(BOOL bKeepTextures)
 {
+#ifdef USE_DX11
+	BloodGpuParticles::Reset();
+#endif
 	m_WireShader.destroy();
 	m_SelectionShader.destroy();
 
@@ -128,6 +135,9 @@ void dxRenderDeviceRender::DestroyHW()
 
 void dxRenderDeviceRender::Reset(HWND hWnd, u32& dwWidth, u32& dwHeight, float& fWidth_2, float& fHeight_2)
 {
+#ifdef USE_DX11
+	BloodGpuParticles::Reset();
+#endif
 #ifdef DEBUG
     _SHOW_REF("*ref -CRenderDevice::ResetTotal: DeviceREF:",HW.pDevice);
 #endif // DEBUG
@@ -513,6 +523,7 @@ void dxRenderDeviceRender::End()
 
 	// true PiP presents every frame, legacy suppresses on the hidden SVP frame
 	if (Device.true_pip_on || (!Device.m_SecondViewport.IsSVPFrame() && !Device.m_SecondViewport.isCamReady)) {
+		BloodNativeProfile::Scope bloodPresent(BloodNativeProfile::Stage::PresentWait, Device.dwFrame);
 		extern float svp_stats_present_ms;
 		CTimer present_timer;
 		present_timer.Start();

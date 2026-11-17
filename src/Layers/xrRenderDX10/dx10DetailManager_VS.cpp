@@ -12,6 +12,16 @@
 #include "../xrRenderPC_R4/blender_light_occq.h"
 #endif
 
+#ifdef USE_DX11
+#include "../xrRender/ResourceManager.h"
+#include "../xrRender/dxRenderDeviceRender.h"
+#include "../xrRender/PainterSoftShader.h"
+// The structured buffer slot the "<vs>_inst" grass shaders declare: StructuredBuffer<float4> grass_rows : register(t15).
+// Engine textures use vertex slots 0-3 only, so nothing else binds or clears it.
+static const u32 grass_rows_slot = 15;
+static const u32 grass_rows_per_blade = 5;
+#endif
+
 // Vars to store wind prev frame data ( Motion vectors )
 static u32 prev_frame = -1;
 static float prev_time = 0;
@@ -1735,7 +1745,206 @@ void CDetailManager::hw_Load_Shaders()
 	hwc_s_consts = T1.get("consts");
 	hwc_s_xform = T1.get("xform");
 	hwc_s_array = T1.get("array");
+
+#ifdef USE_DX11
+	// Grass instancing: one instanced twin per grass type and lod, built once per level load. Appending blade rows
+	// across a frame's draws needs no-overwrite maps on a buffer that shaders read (D3D11.1 drivers).
+	hw_InstTypes.clear();
+	hw_InstTypes.resize(objects.size());
+	D3D11_FEATURE_DATA_D3D11_OPTIONS options = {};
+	hw_InstSupported = HW.FeatureLevel >= D3D_FEATURE_LEVEL_11_0 &&
+		SUCCEEDED(HW.pDevice->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) &&
+		options.MapNoOverwriteOnDynamicBufferSRV;
+	u32 ready = 0;
+	if (hw_InstSupported)
+	{
+		for (u32 o = 0; o < objects.size(); ++o)
+		{
+			for (u32 lod = 0; lod < 2; ++lod)
+				hw_InstTypes[o].lod[lod] = hw_Instanced(objects[o]->shader->E[lod]);
+			if (hw_InstTypes[o].lod[0] && hw_InstTypes[o].lod[1])
+				++ready;
+		}
+	}
+	Msg("* [DETAILS] Grass instancing %s: %u of %u grass types have instanced shaders",
+		hw_InstSupported ? "available" : "unavailable on this device", ready, u32(objects.size()));
+#endif
 }
+
+#ifdef USE_DX11
+// The same element with every pass's vertex shader replaced by "<vs>_inst" (same state, pixel shader, textures and
+// samplers). Null when any pass has no such shader or it does not compile; that grass type stays batched.
+ref_selement CDetailManager::hw_Instanced(const ref_selement& source)
+{
+	if (!source || source->passes.empty())
+		return nullptr;
+	ShaderElement element;
+	element.flags = source->flags;
+	for (const ref_pass& pass : source->passes)
+	{
+		if (!pass || !pass->vs || !pass->ps)
+			return nullptr;
+		string_path name, relative, file;
+		strconcat(sizeof(name), name, pass->vs->cName.c_str(), "_inst");
+		strconcat(sizeof(relative), relative, ::Render->getShaderPath(), name, ".vs");
+		// A missing file would load the stub shader, not fail: check first.
+		if (!FS.exist(file, "$game_shaders$", relative))
+			return nullptr;
+		SVS* vs;
+		{
+			PainterSoftShaderGuard soft;
+			vs = DEV->_CreateVS(name);
+		}
+		if (!vs)
+		{
+			Msg("! [DETAILS] Grass instancing: %s did not compile; this grass type stays batched", name);
+			return nullptr;
+		}
+		SPass proto;
+		proto.state = pass->state;
+		proto.ps = pass->ps;
+		proto.vs = vs;
+		proto.gs = pass->gs;
+		proto.hs = pass->hs;
+		proto.ds = pass->ds;
+		proto.cs = pass->cs;
+		// Constant table merged as CBlender_Compile::PassEnd does, over this pass's shaders.
+		R_constant_table table;
+		table.merge(&proto.ps->constants);
+		table.merge(&proto.vs->constants);
+		if (proto.gs) table.merge(&proto.gs->constants);
+		if (proto.hs) table.merge(&proto.hs->constants);
+		if (proto.ds) table.merge(&proto.ds->constants);
+		if (proto.cs) table.merge(&proto.cs->constants);
+		proto.constants = DEV->_CreateConstantTable(table);
+		proto.T = pass->T;
+		proto.C = pass->C;
+		element.passes.push_back(DEV->_CreatePass(proto));
+	}
+	return DEV->_CreateElement(element);
+}
+
+// Room for `rows` float4 rows at hw_InstCursor. Draws within a frame append without overwriting; the frame's first
+// map, an overflow and a regrow discard, and the GPU keeps what earlier draws read.
+Fvector4* CDetailManager::hw_InstMap(u32 rows)
+{
+	if (hw_InstFrame != Device.dwFrame)
+	{
+		hw_InstFrame = Device.dwFrame;
+		hw_InstCursor = 0;
+	}
+	D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+	if (!hw_InstBuffer || rows > hw_InstCapacity)
+	{
+		const u32 capacity = _max(rows, _max(hw_InstCapacity * 2, u32(16384 * grass_rows_per_blade)));
+		hw_InstRelease();
+		D3D11_BUFFER_DESC desc = {};
+		desc.ByteWidth = capacity * sizeof(Fvector4);
+		desc.Usage = D3D11_USAGE_DYNAMIC;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		desc.StructureByteStride = sizeof(Fvector4);
+		D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+		view.Format = DXGI_FORMAT_UNKNOWN;
+		view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		view.Buffer.FirstElement = 0;
+		view.Buffer.NumElements = capacity;
+		if (FAILED(HW.pDevice->CreateBuffer(&desc, nullptr, &hw_InstBuffer)) ||
+			FAILED(HW.pDevice->CreateShaderResourceView(hw_InstBuffer, &view, &hw_InstSRV)))
+		{
+			hw_InstRelease();
+			return nullptr;
+		}
+		hw_InstCapacity = capacity;
+		mode = D3D11_MAP_WRITE_DISCARD;
+	}
+	else if (hw_InstCursor == 0 || hw_InstCursor + rows > hw_InstCapacity)
+		mode = D3D11_MAP_WRITE_DISCARD;
+	if (mode == D3D11_MAP_WRITE_DISCARD)
+		hw_InstCursor = 0;
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	if (FAILED(HW.pContext->Map(hw_InstBuffer, 0, mode, 0, &mapped)))
+		return nullptr;
+	return static_cast<Fvector4*>(mapped.pData) + hw_InstCursor;
+}
+
+void CDetailManager::hw_InstRelease()
+{
+	_RELEASE(hw_InstSRV);
+	_RELEASE(hw_InstBuffer);
+	hw_InstCapacity = 0;
+	hw_InstCursor = 0;
+}
+
+// One instanced draw of every visible blade of this grass type, with the batched path's culling, fade and alpha.
+void CDetailManager::hw_Render_instanced(CDetail& Object, xr_vector<SlotItemVec*>& vis, u32 vOffset, u32 iOffset, light* L)
+{
+	u32 bound = 0;
+	for (SlotItemVec* items : vis)
+		bound += u32(items->size());
+	if (!bound)
+		return;
+	Fvector4* rows = hw_InstMap(bound * grass_rows_per_blade);
+	if (!rows)
+		return;
+	u32 count = 0;
+	for (SlotItemVec* items : vis)
+	{
+		for (SlotItem* item : *items)
+		{
+			SlotItem& Instance = *item;
+
+			if (!RImplementation.GMBase.is_sector_visible(RImplementation.pOutdoorSector))
+				continue;
+
+			if (RImplementation.phase == CRender::PHASE_SMAP && L)
+			{
+				if (!L->GMLight.is_sector_visible(RImplementation.pOutdoorSector))
+					continue;
+
+				if (L->position.distance_to_sqr(Instance.position) >= _sqr(L->range))
+					continue;
+			}
+
+			Instance.alpha += GoToValue(Instance.alpha, Instance.alpha_target);
+
+			float scale = 1.f;
+			if (fade_distance <= -1)
+				scale *= 1.0f - Instance.position.distance_to_xz_sqr(light_position) * 0.005f;
+			else if (Instance.distance > fade_distance)
+				scale *= 1.0f - abs(Instance.distance - fade_distance) * 0.005f;
+
+			if (scale <= 0 || Instance.alpha <= 0)
+				break;
+
+			// Same five rows as the batched array/exdata constants: 3x4 transform, colour, terrain normal + alpha.
+			Fmatrix& M = Instance.mRotY_calculated;
+			Fvector4* row = rows + count * grass_rows_per_blade;
+			row[0].set(M._11 * scale, M._21 * scale, M._31 * scale, M._41);
+			row[1].set(M._12 * scale, M._22 * scale, M._32 * scale, M._42);
+			row[2].set(M._13 * scale, M._23 * scale, M._33 * scale, M._43);
+			row[3].set(Instance.c_sun, Instance.c_sun, Instance.c_sun, Instance.c_hemi);
+			row[4].set(Instance.normal.x, Instance.normal.y, Instance.normal.z, Instance.alpha);
+			++count;
+		}
+	}
+	HW.pContext->Unmap(hw_InstBuffer, 0);
+	if (!count)
+		return;
+
+	static shared_str strGrassBase("grass_base");
+	Fvector4 first;
+	first.set(float(hw_InstCursor / grass_rows_per_blade), 0.f, 0.f, 0.f);
+	RCache.set_c(strGrassBase, first);
+	hw_InstCursor += count * grass_rows_per_blade;
+	HW.pContext->VSSetShaderResources(grass_rows_slot, 1, &hw_InstSRV);
+
+	Device.Statistic->RenderDUMP_DT_Count += count;
+	RCache.RenderInstanced(D3DPT_TRIANGLELIST, vOffset, Object.number_vertices, iOffset, Object.number_indices / 3, count);
+	RCache.stat.r.s_details.add(count * Object.number_vertices);
+}
+#endif
 
 // pip adds one pass worth of cull counts to the stats overlay counters
 static void cull_Publish(const CDetailManager::CullStats& c, u32& tested, u32& kept, u32& runs, u32& dropped,
@@ -1997,6 +2206,9 @@ void CDetailManager::hw_Render_dump(const Fvector4& consts, const Fvector4& wave
 	// Matrices and offsets
 	u32 vOffset = 0;
 	u32 iOffset = 0;
+#ifdef USE_DX11
+	bool used_instancing = false;
+#endif
 
 	vis_list& list = m_visibles[var_id];
 
@@ -2389,4 +2601,11 @@ void CDetailManager::hw_Render_dump(const Fvector4& consts, const Fvector4& wave
 		vOffset += hw_BatchSize * Object.number_vertices;
 		iOffset += hw_BatchSize * Object.number_indices;
 	}
+#ifdef USE_DX11
+	if (used_instancing)
+	{
+		ID3D11ShaderResourceView* none = nullptr;
+		HW.pContext->VSSetShaderResources(grass_rows_slot, 1, &none);
+	}
+#endif
 }

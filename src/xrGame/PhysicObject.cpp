@@ -509,6 +509,14 @@ void CPhysicObject::CreateBody(CSE_ALifeObjectPhysic* po)
 
 	m_pPhysicsShell->mXFORM.set(XFORM());
 	m_pPhysicsShell->SetAirResistance(0.001f, 0.02f);
+	// `air_resistance = linear, angular` (gore fragments: 0, 0 - a small fragment's inertia cannot take the default
+	// angular term, applied explicitly after each step; a dropped bolt gets 0, 0 as well).
+	if (pSettings->line_exist(cNameSect(), "air_resistance"))
+	{
+		const Fvector2 air = pSettings->r_fvector2(cNameSect(), "air_resistance");
+		m_pPhysicsShell->SetAirResistance(_max(0.f, air.x), _max(0.f, air.y));
+		m_pPhysicsShell->set_DynamicScales(1.f, 1.f);
+	}
 	if (pKinematics)
 	{
 		SAllDDOParams disable_params;

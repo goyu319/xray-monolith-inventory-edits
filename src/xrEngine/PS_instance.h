@@ -5,6 +5,8 @@
 #include "isheduled.h"
 #include "irenderable.h"
 
+class IParticleCustom;
+
 class ENGINE_API CPS_Instance	:
 	public IRenderable,
 	public intrusive_base
@@ -39,6 +41,8 @@ public:
 	IC void PSI_SetLifeTime(float life_time) { m_iLifeTime = iFloor(life_time * 1000); }
 
 	virtual void Play(bool bHudMode) = 0;
+	// Opt-in consumer boundary. Ordinary objects retain the existing update.
+	virtual bool AdvancePacketPlayback(IParticleCustom*, u32) { return false; }
 	virtual BOOL Locked() { return FALSE; }
 	virtual void Update(u32 dt) {};
 

@@ -4,6 +4,7 @@
 #include "ETextureParams.h"
 #include "profiler.h"
 #include "../../xrCore/xr_ini.h"
+#include "../../Include/xrRender/PainterFilePrefetch.h"
 
 // eye-params
 float r__dtex_range = 50;
@@ -62,6 +63,12 @@ void CTextureDescrMngr::LoadTHM(LPCSTR initial, map_TD& s_texture_details, map_C
 
 	FS_FileSet flist;
 	FS.file_list(flist, initial, FS_ListFiles, "*.thm");
+	{ // R62: read the descriptors ahead on 16 threads (see PainterFilePrefetch.h)
+		std::vector<std::string> paths; paths.reserve(flist.size());
+		for (const FS_File& f : flist) { string_path full; FS.update_path(full, initial, f.name.c_str()); paths.emplace_back(full); }
+		CTimer prefetch; prefetch.Start(); painter_prefetch::files(paths);
+		Msg("* texture descriptors read ahead: %u files in %.0f ms (%s)", unsigned(paths.size()), prefetch.GetElapsed_sec() * 1000.f, initial);
+	}
 
 	STextureParams tp;
 	string_path fn;
@@ -136,6 +143,11 @@ void CTextureDescrMngr::LoadLTX(LPCSTR initial, map_TD& s_texture_details)
 
 	FS_FileSet flist;
 	FS.file_list(flist, initial, FS_ListFiles, "*.ltx");
+	{ // R62: read ahead (see PainterFilePrefetch.h)
+		std::vector<std::string> paths; paths.reserve(flist.size());
+		for (const FS_File& f : flist) { string_path full; FS.update_path(full, initial, f.name.c_str()); paths.emplace_back(full); }
+		painter_prefetch::files(paths);
+	}
 	for (const FS_File& file : flist)
 	{
 		string_path name;

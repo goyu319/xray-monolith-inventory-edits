@@ -12,6 +12,7 @@
 #include "string_table.h"
 #include "script_engine.h"
 #include "ai_space.h"
+#include "../build_config_defines.h"
 
 using namespace luabind;
 
@@ -147,6 +148,27 @@ xr_string get_modded_exes_version_string() {
 	return xr_string(s.c_str());
 }
 
+// Lets the Lua fallback yield joint motor ownership when the matching native
+// Painter controller is compiled into the executable.  Shell forces and
+// contact probes can still run in Lua; only duplicate joint motor writes are
+// suppressed.
+#if defined(PAINTER_ACTIVE_RAGDOLL_NATIVE) && defined(XRGAME_EXPORTS)
+extern int painter_native_ragdoll; // console_commands.cpp (R35): 0 = the Lua controller owns the joint motors (default)
+#endif
+#if defined(XRGAME_EXPORTS)
+bool painter_sever_hold_active(u16 id); // R63 sever hold (xrGame PainterVoxelLive_impl.h)
+#else
+static bool painter_sever_hold_active(u16) { return false; }
+#endif
+bool painter_native_active_ragdoll()
+{
+#if defined(PAINTER_ACTIVE_RAGDOLL_NATIVE) && defined(XRGAME_EXPORTS)
+	return painter_native_ragdoll != 0;
+#else
+	return false;
+#endif
+}
+
 ::luabind::object get_string_table() {
 	auto pData = CStringTable::getPData();
 	::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
@@ -235,6 +257,8 @@ void CScriptIniFile::script_register(lua_State* L)
 		// demonized: get modded exes version
 		def("get_modded_exes_version", &get_modded_exes_version),
 		def("get_modded_exes_name", &get_modded_exes_name),
+		def("painter_native_active_ragdoll", &painter_native_active_ragdoll),
+		def("painter_sever_hold_active", &painter_sever_hold_active),
 
 		// demonized: get translation strings table
 		def("get_string_table", &get_string_table)

@@ -26,7 +26,8 @@ void CKinematics::CalculateBones(BOOL bForceExact)
 	// early out.
 	// check if the info is still relevant
 	// skip all the computations - assume nothing changes in a small period of time :)
-	if (RDEVICE.dwTimeGlobal == UCalc_Time) return; // early out for "fast" update
+	// Bone presentation uses active-app real time; animation tracks retain their scaled clock.
+	if (UCalc_Time && RDEVICE.dwTimeContinual == UCalc_Time) return; // early out for "fast" update
 
 	// demonized: reduce calculate bones updates when the object is far away and not in frustum
 	// Available only if can get parent xform
@@ -76,14 +77,14 @@ void CKinematics::CalculateBones(BOOL bForceExact)
 
 	xrCriticalSectionGuard g(UCalc_Mutex);
 	OnCalculateBones();
-	if (!bForceExact && (RDEVICE.dwTimeGlobal < (UCalc_Time + UCalc_Interval * update_rate_k))) return; // early out for "slow" update
+	if (!bForceExact && UCalc_Time && (u32(RDEVICE.dwTimeContinual - UCalc_Time) < UCalc_Interval * update_rate_k)) return; // early out for "slow" update
 	if (Update_Visibility) Visibility_Update();
 
 	_DBG_SINGLE_USE_MARKER;
 	// here we have either:
 	//	1:	timeout elapsed
 	//	2:	exact computation required
-	UCalc_Time = RDEVICE.dwTimeGlobal;
+	UCalc_Time = RDEVICE.dwTimeContinual;
 
 	// exact computation
 	// Calculate bones

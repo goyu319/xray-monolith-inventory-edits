@@ -17,6 +17,7 @@
 #include "../xrEngine/IGame_Persistent.h"
 #include "../xrServerEntities/ai_sounds.h"
 #include "player_hud.h"
+#include "painter_ai/EngineCapture.h"
 #ifdef DEBUG
 #	include "phdebug.h"
 #endif
@@ -627,6 +628,10 @@ void CMissile::OnEvent(NET_Packet& P, u16 type)
 			missile->H_SetParent(0, !P.r_eof() && P.r_u8());
 			if (IsFakeMissile && OnClient())
 				missile->set_destroy_time(m_dwDestroyTimeMax);
+			// native combat AI throw receipt: the live projectile has left the thrower's hand (the release the throw's
+			// motion mark sent); capture reports the throw as thrown only from this
+			if (IsFakeMissile && H_Parent())
+				painter::combat::engine::note_release(H_Parent()->ID(), id, ID());
 			break;
 		}
 	}

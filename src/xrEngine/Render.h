@@ -8,6 +8,7 @@
 
 #include "../Include/xrAPI/xrAPI.h"
 #include "../Include/xrRender/FactoryPtr.h"
+#include "../Include/xrRender/BloodThermalStamp.h"
 class IUIShader;
 typedef FactoryPtr<IUIShader> wm_shader;
 //#include "../Include/xrRender/WallMarkArray.h"
@@ -368,6 +369,11 @@ public:
 
 	// demonized: add user defined rotation to wallmark
 	virtual void add_StaticWallmark(IWallMarkArray* pArray, const Fvector& P, float s, CDB::TRI* T, Fvector* V, float ttl, bool ignore_opt, float rotation) = 0;
+    // Optional thermal value transport; legacy renderers preserve their normal draw.
+    virtual void add_BloodWallmark(IWallMarkArray* array,const Fvector& P,float size,CDB::TRI* tri,Fvector* verts,
+        float ttl,bool ignore_opt,float rotation,const BloodThermalStamp& stamp) {
+        add_StaticWallmark(array,P,size,tri,verts,ttl,ignore_opt,rotation);
+    }
 	virtual void clear_static_wallmarks() = 0;
 	//virtual void add_SkeletonWallmark (intrusive_ptr<CSkeletonWallmark> wm) = 0;
 	//virtual void add_SkeletonWallmark (const Fmatrix* xf, CKinematics* obj, ref_shader& sh, const Fvector& start, const Fvector& dir, float size)=0;
@@ -375,6 +381,10 @@ public:
 	virtual void add_SkeletonWallmark(const Fmatrix* xf, IKinematics* obj, IWallMarkArray* pArray, const Fvector& start,
 	                                  const Fvector& dir, float size, float ttl = 0.f, bool ignore_opt = false) = 0;
 
+    virtual void add_BloodSkeletonWallmark(const Fmatrix* xf,IKinematics* obj,IWallMarkArray* array,const Fvector& start,
+        const Fvector& dir,float size,float ttl,bool ignore_opt,const BloodThermalStamp& stamp){
+        add_SkeletonWallmark(xf,obj,array,start,dir,size,ttl,ignore_opt);
+    }
     virtual void remove_SkeletonWallmarksFromObject(IKinematics* obj) = 0;
     virtual void update_Wallmarks() = 0;
 

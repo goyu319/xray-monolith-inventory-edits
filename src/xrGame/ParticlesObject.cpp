@@ -2,6 +2,7 @@
 // file: PSObject.cpp
 //----------------------------------------------------
 #include "stdafx.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "ParticlesObject.h"
 #include "../xrParticles/ParticlesAsyncManager.h"
 #include "../xrEngine/defines.h"
@@ -24,6 +25,7 @@ CParticlesObject::CParticlesObject(LPCSTR p_name, BOOL bAutoRemove, bool destroy
 
 void CParticlesObject::Init(LPCSTR p_name, IRender_Sector* S, BOOL bAutoRemove)
 {
+    BloodNativeProfile::Scope profileCreate(BloodNativeProfile::Stage::ParticleCreate);
 	m_bLooped = false;
 	m_bStopping = false;
 	m_bAutoRemove = bAutoRemove;
@@ -128,6 +130,13 @@ intrusive_ptr<CParticlesObject> Particles::Details::Create(LPCSTR p_name, BOOL b
 void CParticlesObject::Play(bool bHudMode)
 {
 	if (g_dedicated_server) return;
+	m_HasPlayed = true;
+	if (m_PacketPlayback.IsManaged())
+	{
+		m_PacketPlayback.RequestPlay(Device.dwTimeGlobal, bHudMode);
+		m_bStopping = false;
+		return;
+	}
 
 	IParticleCustom* V = renderable.visual ? renderable.visual->dcast_ParticleCustom() : NULL;
 	VERIFY(V);
@@ -150,12 +159,19 @@ void CParticlesObject::Play(bool bHudMode)
 void CParticlesObject::play_at_pos(const Fvector& pos, BOOL xform)
 {
 	if (g_dedicated_server) return;
+	m_HasPlayed = true;
 
 	IParticleCustom* V = renderable.visual ? renderable.visual->dcast_ParticleCustom() : NULL;
 	VERIFY(V);
 	Fmatrix m;
 	m.translate(pos);
 	V->UpdateParent(m, zero_vel, xform);
+	if (m_PacketPlayback.IsManaged())
+	{
+		m_PacketPlayback.RequestPlay(Device.dwTimeGlobal, false);
+		m_bStopping = false;
+		return;
+	}
 	V->Play();
 	dwLastTime = Device.dwTimeGlobal - 33ul;
 
@@ -169,9 +185,38 @@ void CParticlesObject::play_at_pos(const Fvector& pos, BOOL xform)
 	}
 }
 
+bool CParticlesObject::PlayPacket(bool bHudMode)
+{
+    if (g_dedicated_server || m_bDead) return false;
+    IParticleCustom* visual = renderable.visual ? renderable.visual->dcast_ParticleCustom() : nullptr;
+    // Live-update effects ignore OnFrame(dt), so 33ms + elapsed is not its contract.
+    if (!visual || visual->GetLiveUpdate()) return false;
+    // A normal effect that has already played cannot change ownership in flight.
+    if (m_HasPlayed && !m_PacketPlayback.IsManaged()) return false;
+    m_HasPlayed = true;
+    m_bStopping = true; // this operation already includes deferred emission stop
+    NeedUpdate = false; // no eager/conditional ForceUpdate for this opt-in operation
+    m_PacketPlayback.RequestPacket(Device.dwTimeGlobal, bHudMode);
+    PerformAllTheWork();
+    return true;
+}
+
+bool CParticlesObject::AdvancePacketPlayback(IParticleCustom* visual, u32 now)
+{
+    if (!m_PacketPlayback.IsManaged()) return false;
+    m_PacketPlayback.Advance(*visual, now, dwLastTime, [this]() { return !m_bDead; });
+    return true;
+}
+
 void CParticlesObject::Stop(BOOL bDefferedStop)
 {
 	if (g_dedicated_server) return;
+	if (m_PacketPlayback.IsManaged())
+	{
+		m_PacketPlayback.RequestStop(!!bDefferedStop);
+		m_bStopping = true;
+		return;
+	}
 
 	IParticleCustom* V = renderable.visual ? renderable.visual->dcast_ParticleCustom() : NULL;
 	VERIFY(V);
@@ -302,6 +347,8 @@ BOOL CParticlesObject::GetLiveUpdate()
 bool CParticlesObject::IsPlaying()
 {
 	if (g_dedicated_server) return false;
+	const int packetHint = m_PacketPlayback.PlayingHint();
+	if (packetHint >= 0) return packetHint != 0;
 
 	IParticleCustom* V = renderable.visual ? renderable.visual->dcast_ParticleCustom() : NULL;
 	VERIFY(V);

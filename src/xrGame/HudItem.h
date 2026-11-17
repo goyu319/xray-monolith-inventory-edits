@@ -234,6 +234,8 @@ public:
 	void PrepareHudResources(bool imminent = false);
 	const HudMaterialState* DeferredHudMaterials();
 	bool DeferHudMaterialChange(int id, LPCSTR shader, LPCSTR texture, bool reset);
+	// Material inspection must not allocate/load a HUD model during inventory callbacks.
+	attachable_hud_item* HudItemDataIfPresent() const noexcept { return m_attachable; }
 	bool IsAttachedToHUD();
 	virtual bool ParentIsActor();
 	virtual float GetNearWallRange();

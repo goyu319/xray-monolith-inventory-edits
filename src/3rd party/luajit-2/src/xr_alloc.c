@@ -514,3 +514,19 @@ void XR_GET_POOL_STATS(xr_luajit_pool_stats* stats)
     stats->allocation_failures = g_allocation_failures;
     ReleaseSRWLockShared(&g_heap_lock);
 }
+
+/* BloodEngine (Painter) compatibility, see xr_alloc.h. */
+xr_alloc_oom_hook_fn volatile xr_alloc_oom_hook = NULL;
+
+void XR_POOL_STATS(xr_pool_stats* out)
+{
+    xr_luajit_pool_stats stats;
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    XR_GET_POOL_STATS(&stats);
+    out->reserved_bytes = stats.reserved_bytes;
+    out->committed_bytes = stats.committed_bytes;
+    out->used_bytes = stats.committed_bytes;
+    out->commit_failures = (unsigned)stats.allocation_failures;
+}

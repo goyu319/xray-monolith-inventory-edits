@@ -12,6 +12,8 @@ __declspec(dllexport) extern const UINT D3D12SDKVersion = 619;
 __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 #endif
+#include "stdafx.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "../xrCDB/frustum.h"
 #include "xr_ioconsole.h"
 #include "xr_input.h"
@@ -130,6 +132,7 @@ void CRenderDevice::Clear()
 
 void CRenderDevice::End(void)
 {
+	BloodNativeProfile::Scope bloodEnd(BloodNativeProfile::Stage::RenderEnd, dwFrame);
 	PROF_EVENT("Render: End");
 
 #ifndef DEDICATED_SERVER
@@ -214,6 +217,19 @@ void CRenderDevice::PreCache(u32 amount, bool b_draw_loadscreen, bool b_wait_use
 int g_svDedicateServerUpdateReate = 100;
 
 ENGINE_API xr_list<LOADING_EVENT> g_loading_events;
+
+ENGINE_API int painter_thread_priority = 1;
+ENGINE_API int painter_publish_drains = 3;
+
+void painter_apply_thread_priority()
+{
+	static thread_local int applied = -1;
+	const int want = painter_thread_priority ? 1 : 0;
+	if (applied == want)
+		return;
+	applied = want;
+	SetThreadPriority(GetCurrentThread(), want ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_NORMAL);
+}
 
 extern bool IsMainMenuActive(); //ECO_RENDER add
 
@@ -345,6 +361,44 @@ void mt_FreezeThread(void *ptr) {
 	}
 }
 
+void CRenderDevice::ProcessParallelBeforeRender(u32 profile_frame)
+{
+	BloodNativeProfile::Scope bloodDeferred(BloodNativeProfile::Stage::FrameDeferredCallbacks, profile_frame);
+	PROF_EVENT("seqParallelBeforRender");
+	xrCriticalSectionGuard guard(&seqParallelBeforRenderCS);
+
+	// A callback invoked here can destroy an object that owns a particle
+	// group, and PS::CParticleGroup::SItem::~SItem cancels its own pending
+	// entry in this very vector. That cancellation clears the entry in
+	// place instead of erasing it, so the vector never changes size while
+	// we walk it. Skip the cleared entries; the clear() below drops them.
+	// Index by position and copy each delegate before invoking it, so an
+	// entry appended by a callback is still handled safely.
+	// A worker thread that pushes meanwhile blocks on the section until
+	// after the clear() below, so its entry is never lost to that clear().
+	struct GeometryPublishScope { CRenderDevice& device;
+		explicit GeometryPublishScope(CRenderDevice& d) : device(d) { device.m_geometry_publish_thread = GetCurrentThreadId(); device.m_geometry_publish_barrier = true; }
+		~GeometryPublishScope() { device.m_geometry_publish_barrier = false; }
+	} geometry_publish_scope(*this);
+	{	// Worker wakes that arrived since the last drain (their section is not held while callbacks run).
+		xrCriticalSectionGuard pending(&seqParallelBeforRenderPendingCS);
+		for (auto& d : seqParallelBeforRenderPending)
+			if (d && std::find(seqParallelBeforRender.begin(), seqParallelBeforRender.end(), d) == seqParallelBeforRender.end())
+				seqParallelBeforRender.push_back(d);
+		seqParallelBeforRenderPending.clear();
+	}
+	for (size_t it = 0; it < seqParallelBeforRender.size(); ++it)
+	{
+		auto Callback = seqParallelBeforRender[it];
+		if (Callback)
+			Callback();
+	}
+
+	seqParallelBeforRender.clear();
+	// Callbacks re-queued for the next drain by callbacks of this one.
+	seqParallelBeforRender.swap(seqParallelBeforRenderNext);
+}
+
 void CRenderDevice::on_idle()
 {
 
@@ -388,6 +442,8 @@ void CRenderDevice::on_idle()
 	// current core. Cheap when nothing is due.
 	cpu_placement::note_main_frame();
 
+	// FrameMove advances dwFrame after deferred callbacks; use the upcoming frame.
+	BloodNativeProfile::Scope bloodFrame(BloodNativeProfile::Stage::FrameTotal, dwFrame + 1);
 	if (!Device.dwPrecacheFrame && !g_SASH.IsBenchmarkRunning() && g_bLoaded)
 	{
 		PROF_EVENT("Start xrSASH Benchmark");
@@ -402,31 +458,21 @@ void CRenderDevice::on_idle()
 		Device.ModelDefferClear();
 	}
 
-	{
-		PROF_EVENT("seqParallelBeforRender");
-		xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
-
-		// A callback invoked here can destroy an object that owns a particle
-		// group, and PS::CParticleGroup::SItem::~SItem cancels its own pending
-		// entry in this very vector. That cancellation clears the entry in
-		// place instead of erasing it, so the vector never changes size while
-		// we walk it. Skip the cleared entries; the clear() below drops them.
-		// Index by position and copy each delegate before invoking it, so an
-		// entry appended by a callback is still handled safely.
-		for (size_t it = 0; it < Device.seqParallelBeforRender.size(); ++it)
-		{
-			auto Callback = Device.seqParallelBeforRender[it];
-			if (Callback)
-				Callback();
-		}
-
-		Device.seqParallelBeforRender.clear();
-	}
+	// Frame start: everything queued during the previous frame's render and by
+	// the worker threads since the previous end-of-frame drain.
+	ProcessParallelBeforeRender(dwFrame + 1);
 
 	FrameMove();
 
+	// After the game update and before any frame task is forked: a wound result
+	// or a destroy request queued during FrameMove is handled in this frame.
+	// (The mt_Scheduler=FALSE path processes the destroy queue at this point.)
+	if (painter_publish_drains >= 3 && g_loading_events.empty())
+		ProcessParallelBeforeRender(dwFrame);
+
     if (g_pGamePersistent != nullptr)
     {
+        BloodNativeProfile::Scope bloodParticles(BloodNativeProfile::Stage::FrameParticles, dwFrame);
         PROF_EVENT("Update Particles");
         g_pGamePersistent->UpdateParticles();
     }
@@ -468,9 +514,12 @@ void CRenderDevice::on_idle()
 	mProjectCam_prev = mProjectCam;
 	mFullTransformCam_prev = mFullTransformCam;
 
-	// Previous frame data -- 
-	mView_prev = mView_saved;
-	mProject_prev = mProject_saved;
+	// Previous frame data -- per viewport: a 3D-scope frame interleaves with main frames, so each kind
+	// reprojects against its own last camera (otherwise the main frame after a scope frame gets bogus
+	// camera motion vectors, which a temporal upscaler shows as smearing).
+	const bool svp_frame = m_SecondViewport.IsSVPFrame();
+	mView_prev = svp_frame ? mView_saved_svp : mView_saved;
+	mProject_prev = svp_frame ? mProject_saved_svp : mProject_saved;
 	mFullTransform_prev = mFullTransform_saved; // Unused?
 
 	m_pRender->SetCacheXform_prev(mView_prev, mProject_prev);
@@ -517,8 +566,16 @@ void CRenderDevice::on_idle()
 
 	vCameraPosition_saved = vCameraPosition;
 	mFullTransform_saved = mFullTransform;
-	mView_saved = mView;
-	mProject_saved = mProject;
+	if (svp_frame)
+	{
+		mView_saved_svp = mView;
+		mProject_saved_svp = mProject;
+	}
+	else
+	{
+		mView_saved = mView;
+		mProject_saved = mProject;
+	}
 
 	vCameraPosition_bones = vCameraPosition;
 	mFullTransform_bones = mFullTransform;
@@ -576,20 +633,31 @@ void CRenderDevice::on_idle()
 #endif // ECO_RENDER END
 
 #ifndef DEDICATED_SERVER
+	BloodNativeProfile::Scope bloodRender(BloodNativeProfile::Stage::FrameRender, dwFrame);
 	Statistic->RenderTOTAL_Real.FrameStart();
 	Statistic->RenderTOTAL_Real.Begin();
 
 #ifdef XR_DX12_BRIDGE
     fg::EndSimulation();
 #endif
-	if (b_is_Active && Begin())
+	BOOL bloodRenderReady = FALSE;
+	if (b_is_Active)
 	{
-		START_PROFILE("Process seqRender");
-		seqRender.Process(rp_Render);
-		STOP_PROFILE;
+		BloodNativeProfile::Scope bloodBegin(BloodNativeProfile::Stage::DeviceBegin, dwFrame);
+		bloodRenderReady = Begin();
+	}
+	if (bloodRenderReady)
+	{
+		{
+			BloodNativeProfile::Scope bloodCallbacks(BloodNativeProfile::Stage::RenderCallbacks, dwFrame);
+			START_PROFILE("Process seqRender");
+			seqRender.Process(rp_Render);
+			STOP_PROFILE;
+		}
 
 		if (psDeviceFlags.test(rsCameraPos) || psDeviceFlags.test(rsStatistic) || Statistic->errors.size())
 		{
+			BloodNativeProfile::Scope bloodStatistics(BloodNativeProfile::Stage::RenderStatistics, dwFrame);
 			PROF_EVENT("Draw statistics");
 			Statistic->Show();
 		}
@@ -599,6 +667,7 @@ void CRenderDevice::on_idle()
 	Statistic->RenderTOTAL_Real.End();
 	Statistic->RenderTOTAL_Real.FrameEnd();
 	Statistic->RenderTOTAL.accum = Statistic->RenderTOTAL_Real.accum;
+	bloodRender.Stop();
 #endif 
 	Device.isRendering = false;
 
@@ -609,9 +678,17 @@ void CRenderDevice::on_idle()
 		const bool timed = ps_r__svp_stats != 0;
 		CTimer join_timer;
 		if (timed) join_timer.Start();
+		BloodNativeProfile::Scope bloodWait(BloodNativeProfile::Stage::SecondaryWait, dwFrame);
 		secondary_tasks.wait();
 		if (timed) svp_stats_join_ms = join_timer.GetElapsed_ms_f();
 	}
+
+	// End of frame: every frame task has finished and rendering is done, the
+	// same conditions as the frame-start drain. A worker result that landed
+	// during the render is staged or installed now instead of at the next
+	// frame start, after the message pump and the next game update.
+	if (painter_publish_drains >= 2 && g_loading_events.empty())
+		ProcessParallelBeforeRender(dwFrame);
 
 	if (psLua_ParallelGC_debug && psLua_ParallelGC && Device.LuaGCDebug)
 	{
@@ -702,6 +779,7 @@ void CRenderDevice::Run()
 	g_bLoaded = FALSE;
 	Log("Starting engine...");
 	thread_name("X-RAY Primary thread");
+	m_main_thread_id = GetCurrentThreadId();
 	// Startup timers and calculate timer delta
 	dwTimeGlobal = 0;
 	Timer_MM_Delta = 0;
@@ -735,6 +813,7 @@ u32 app_inactive_time_start = 0;
 
 void CRenderDevice::FrameMove()
 {
+	BloodNativeProfile::Scope bloodUpdate(BloodNativeProfile::Stage::FrameUpdate, dwFrame + 1);
 	PROF_EVENT("Render: Frame Move");
 
 	if (InterlockedExchange(&g_monitor_list_dirty, 0))

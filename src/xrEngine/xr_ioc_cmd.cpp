@@ -1423,6 +1423,10 @@ void CCC_Register()
 	// Render device states
 	CMD4(CCC_Integer, "r__supersample", &ps_r__Supersample, 1, 4);
 
+	// Painter (voxel wound) scheduling, see device.h
+	CMD4(CCC_Integer, "painter_thread_priority", &painter_thread_priority, 0, 1);
+	CMD4(CCC_Integer, "painter_publish_drains", &painter_publish_drains, 1, 3);
+
     CMD4(CCC_Integer, "r_wallmarks_static", &r_wallmarks_static, 0, 1);
     CMD4(CCC_Integer, "r_wallmarks_dynamic", &r_wallmarks_dynamic, 0, 1);
     CMD4(CCC_Float, "r_wallmarks_ssa_k", &r_wallmarks_ssa_k, 0.25f, 10.f);

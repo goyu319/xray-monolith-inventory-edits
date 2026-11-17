@@ -1,4 +1,7 @@
 #include "stdafx.h"
+#include <cmath>
+#include "../Layers/xrRender/BloodNativeProfile.h"
+#include "../Layers/xrRender/PainterHitMain.h" // triggerhitch
 #include "entitycondition.h"
 #include "inventoryowner.h"
 #include "customoutfit.h"
@@ -16,6 +19,7 @@
 // demonized: add lua callback before hit but after calculations
 #include "script_hit.h"
 #include "script_game_object.h"
+#include "PainterExitSurface.h"
 
 #define MAX_HEALTH 1.0f
 #define MIN_HEALTH -0.01f
@@ -427,12 +431,17 @@ CWound* CEntityCondition::AddWound(float hit_power, ALife::EHitType hit_type, u1
 // pHDS and hit_power will be changed after execution
 static inline void applyBeforeHitAfterCalcsCallback(CEntityAlive* target, const ::luabind::functor<void>& funct, SHit* pHDS, float& hit_power, const float hit_part = 1)
 {
+	BloodNativeProfile::Scope bloodCallback(BloodNativeProfile::Stage::ScriptHitCallback);
+	painter_hit_main::PartScope hit_main_script(painter_hit_main::Script);
 	CScriptHit tLuaHit(pHDS);
 	tLuaHit.m_fPower = hit_power;
 	if (hit_part > 0)
 		tLuaHit.m_fPower *= hit_part;
 
-	funct(&tLuaHit, target->lua_game_object(), pHDS->boneID);
+	{
+		painter_exit_surface::Scope native_hit(*target,*pHDS);
+		funct(&tLuaHit, target->lua_game_object(), pHDS->boneID);
+	}
 
 	if (hit_part > 0)
 		tLuaHit.m_fPower /= hit_part;
@@ -443,6 +452,8 @@ static inline void applyBeforeHitAfterCalcsCallback(CEntityAlive* target, const 
 
 CWound* CEntityCondition::ConditionHit(SHit* pHDS)
 {
+	pHDS->painter_effective_power=0.f;
+	pHDS->painter_effective_power_valid=false;
 	//кто нанес последний хит
 	m_pWho = pHDS->who;
 	m_iWhoID = (NULL != pHDS->who) ? pHDS->who->ID() : 0;
@@ -581,6 +592,9 @@ CWound* CEntityCondition::ConditionHit(SHit* pHDS)
 		}
 
 		m_fHealthLost = hit_power * m_fHealthHitPart * m_fHitBoneScale;
+		// Receiver-side protection and Lua changes; outgoing SHit::power is unchanged.
+		pHDS->painter_effective_power_valid=true;
+		pHDS->painter_effective_power=(CanBeHarmed() && std::isfinite(m_fHealthLost) && m_fHealthLost>0.f) ? m_fHealthLost : 0.f;
 		m_fDeltaHealth -= CanBeHarmed() ? m_fHealthLost : 0;
 		m_fDeltaPower -= hit_power * m_fPowerHitPart;
 		break;

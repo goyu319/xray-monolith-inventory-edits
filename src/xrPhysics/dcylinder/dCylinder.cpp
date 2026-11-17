@@ -208,6 +208,8 @@ extern "C" int dCylBox(const dVector3 p1, const dMatrix3 R1,
                        dVector3 normal, dReal* depth, int* code,
                        int maxc, dContactGeom* contact, int skip)
 {
+	if (maxc <= 0) return 0;
+
 	dVector3 p, pp, normalC;
 	const dReal* normalR = 0;
 	dReal B1, B2, B3, R11, R12, R13, R21, R22, R23, R31, R32, R33,
@@ -613,21 +615,27 @@ extern "C" int dCylBox(const dVector3 p1, const dMatrix3 R1,
 				centerDepth = *depth - radius * sQ2;
 				A1 = (-cos1 * M_COS_PI_3 - cos3 * M_SIN_PI_3) * radius;
 				A3 = (-cos3 * M_COS_PI_3 + cos1 * M_SIN_PI_3) * radius;
-				CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
-				CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
-				CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
-				CONTACT(contact, ret*skip)->depth = centerDepth + Q1 * A1 + Q3 * A3;
+				if (ret < maxc)
+				{
+					CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
+					CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
+					CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
+					CONTACT(contact, ret*skip)->depth = centerDepth + Q1 * A1 + Q3 * A3;
 
-				if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+					if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+				}
 
 				A1 = (-cos1 * M_COS_PI_3 + cos3 * M_SIN_PI_3) * radius;
 				A3 = (-cos3 * M_COS_PI_3 - cos1 * M_SIN_PI_3) * radius;
-				CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
-				CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
-				CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
-				CONTACT(contact, ret*skip)->depth = centerDepth + Q1 * A1 + Q3 * A3;
+				if (ret < maxc)
+				{
+					CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
+					CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
+					CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
+					CONTACT(contact, ret*skip)->depth = centerDepth + Q1 * A1 + Q3 * A3;
 
-				if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+					if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+				}
 			}
 
 			for (i = 0; i < 3; ++i) contact[0].pos[i] = vertex[i];
@@ -648,6 +656,8 @@ extern "C" int dCylCyl(const dVector3 p1, const dMatrix3 R1,
                        dVector3 normal, dReal* depth, int* code,
                        int maxc, dContactGeom* contact, int skip)
 {
+	if (maxc <= 0) return 0;
+
 	dVector3 p, pp1, pp2, normalC;
 	const dReal* normalR = 0;
 	dReal hlz1, hlz2, s, s2;
@@ -1014,21 +1024,27 @@ extern "C" int dCylCyl(const dVector3 p1, const dMatrix3 R1,
 
 		A1 = -(-cos1 * M_COS_PI_3 - cos3 * M_SIN_PI_3) * radius2;
 		A3 = -(-cos3 * M_COS_PI_3 + cos1 * M_SIN_PI_3) * radius2;
-		CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R2[0] + A3 * R2[2];
-		CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R2[4] + A3 * R2[6];
-		CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R2[8] + A3 * R2[10];
-		CONTACT(contact, ret*skip)->depth = centerDepth + (Q1 * A1) + (Q3 * A3);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R2[0] + A3 * R2[2];
+			CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R2[4] + A3 * R2[6];
+			CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R2[8] + A3 * R2[10];
+			CONTACT(contact, ret*skip)->depth = centerDepth + (Q1 * A1) + (Q3 * A3);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+		}
 
 		A1 = -(-cos1 * M_COS_PI_3 + cos3 * M_SIN_PI_3) * radius2;
 		A3 = -(-cos3 * M_COS_PI_3 - cos1 * M_SIN_PI_3) * radius2;
-		CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R2[0] + A3 * R2[2];
-		CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R2[4] + A3 * R2[6];
-		CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R2[8] + A3 * R2[10];
-		CONTACT(contact, ret*skip)->depth = centerDepth + (Q1 * A1) + (Q3 * A3);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R2[0] + A3 * R2[2];
+			CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R2[4] + A3 * R2[6];
+			CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R2[8] + A3 * R2[10];
+			CONTACT(contact, ret*skip)->depth = centerDepth + (Q1 * A1) + (Q3 * A3);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+		}
 	}
 	else
 	{
@@ -1062,21 +1078,27 @@ extern "C" int dCylCyl(const dVector3 p1, const dMatrix3 R1,
 
 		A1 = (-cos1 * M_COS_PI_3 - cos3 * M_SIN_PI_3) * radius1;
 		A3 = (-cos3 * M_COS_PI_3 + cos1 * M_SIN_PI_3) * radius1;
-		CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
-		CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
-		CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
-		CONTACT(contact, ret*skip)->depth = centerDepth + dFabs(Q1*A1) + dFabs(Q3*A3);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
+			CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
+			CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
+			CONTACT(contact, ret*skip)->depth = centerDepth + dFabs(Q1*A1) + dFabs(Q3*A3);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+		}
 
 		A1 = (-cos1 * M_COS_PI_3 + cos3 * M_SIN_PI_3) * radius1;
 		A3 = (-cos3 * M_COS_PI_3 - cos1 * M_SIN_PI_3) * radius1;
-		CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
-		CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
-		CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
-		CONTACT(contact, ret*skip)->depth = centerDepth + dFabs(Q1*A1) + dFabs(Q3*A3);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = center[0] + A1 * R1[0] + A3 * R1[2];
+			CONTACT(contact, ret*skip)->pos[1] = center[1] + A1 * R1[4] + A3 * R1[6];
+			CONTACT(contact, ret*skip)->pos[2] = center[2] + A1 * R1[8] + A3 * R1[10];
+			CONTACT(contact, ret*skip)->depth = centerDepth + dFabs(Q1*A1) + dFabs(Q3*A3);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f)++ret;
+		}
 	}
 	for (i = 0; i < 3; ++i) contact[0].pos[i] = vertex[i];
 	contact[0].depth = *depth;
@@ -1283,6 +1305,9 @@ int dCollideCylPlane
 	dxGeom* o1, dxGeom* o2, int flags,
 	dContactGeom* contact, int skip)
 {
+	const int maxc = flags & NUMC_MASK;
+	if (maxc == 0) return 0;
+
 	VERIFY(skip >= (int)sizeof(dContactGeom));
 	VERIFY(dGeomGetClass(o1) == dCylinderClassUser);
 	VERIFY(dGeomGetClass(o2) == dPlaneClass);
@@ -1353,30 +1378,39 @@ int dCollideCylPlane
 
 	if (dFabs(Q2) > M_SQRT1_2)
 	{
-		CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * A1 * R[0];
-		CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * A1 * R[4];
-		CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * A1 * R[8];
-		CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q1*2.f*A1);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * A1 * R[0];
+			CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * A1 * R[4];
+			CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * A1 * R[8];
+			CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q1*2.f*A1);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f)
-			++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f)
+				++ret;
+		}
 
 
-		CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * A3 * R[2];
-		CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * A3 * R[6];
-		CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * A3 * R[10];
-		CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q3*2.f*A3);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * A3 * R[2];
+			CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * A3 * R[6];
+			CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * A3 * R[10];
+			CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q3*2.f*A3);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f) ++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f) ++ret;
+		}
 	}
 	else
 	{
-		CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * (A2 > 0 ? hlz * R[1] : -hlz * R[1]);
-		CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * (A2 > 0 ? hlz * R[5] : -hlz * R[5]);
-		CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * (A2 > 0 ? hlz * R[9] : -hlz * R[9]);
-		CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q2*2.f*A2);
+		if (ret < maxc)
+		{
+			CONTACT(contact, ret*skip)->pos[0] = pos[0] + 2.f * (A2 > 0 ? hlz * R[1] : -hlz * R[1]);
+			CONTACT(contact, ret*skip)->pos[1] = pos[1] + 2.f * (A2 > 0 ? hlz * R[5] : -hlz * R[5]);
+			CONTACT(contact, ret*skip)->pos[2] = pos[2] + 2.f * (A2 > 0 ? hlz * R[9] : -hlz * R[9]);
+			CONTACT(contact, ret*skip)->depth = outDepth - dFabs(Q2*2.f*A2);
 
-		if (CONTACT(contact, ret*skip)->depth > 0.f) ++ret;
+			if (CONTACT(contact, ret*skip)->depth > 0.f) ++ret;
+		}
 	}
 
 

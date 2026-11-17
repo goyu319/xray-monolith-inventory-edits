@@ -2624,6 +2624,13 @@ extern "C" dReal dJointGetAMotorAngle (dxJointAMotor *joint, int anum)
   dUASSERT(joint->vtable == &__damotor_vtable,"joint is not an amotor");
   if (anum < 0) anum = 0;
   if (anum > 3) anum = 3;
+  // Euler angles are normally refreshed during the solver pass. Refresh on
+  // demand as well so a shell can capture its pose immediately after setup.
+  if (joint->mode == dAMotorEuler && joint->node[0].body) {
+    dVector3 ax[3];
+    amotorComputeGlobalAxes (joint, ax);
+    amotorComputeEulerAngles (joint, ax);
+  }
   return joint->angle[anum];
 }
 

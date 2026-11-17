@@ -29,6 +29,12 @@
 #include "relation_registry.h"
 #include "danger_object.h"
 #include "smart_cover_object.h"
+#include "ai/stalker/ai_stalker.h"
+#include "painter_ai/EngineCombatAdapter.h"
+#include "Actor.h"
+#include "Weapon.h"
+#include "PainterKillcamAim.h"
+#include "../xrEngine/CameraBase.h"
 #include "detail_path_manager_space.h"
 #include "patrol_path_manager_space.h"
 
@@ -40,6 +46,51 @@ extern CScriptActionPlanner* script_action_planner(CScriptGameObject* obj);
 static u16 script_object_id(const CScriptGameObject* obj)
 {
 	return obj ? obj->ID() : u16(-1);
+}
+
+// native combat AI: npc:painter_combat_owned() - its owning action holds this stalker (any object may ask: not a stalker
+// is never owned)
+static bool painter_combat_owned(CScriptGameObject* self)
+{
+	CAI_Stalker* stalker = self ? smart_cast<CAI_Stalker*>(&self->object()) : nullptr;
+	return stalker && painter::combat::engine::owns(*stalker);
+}
+
+// Read the underlying actor camera, before cinematic effectors or HUD picks.
+// Invalid/non-actor callers return an unmistakable non-angle sentinel; Lua
+// validates this before steering. No camera state or recoil is modified.
+static Fvector get_actor_camera_angles(CScriptGameObject* self)
+{
+	Fvector result;
+	result.set(flt_max, flt_max, flt_max);
+	CActor* actor = self ? smart_cast<CActor*>(&self->object()) : nullptr;
+	if (!actor)
+		return result;
+	CCameraBase* camera = actor->cam_Active();
+	if (camera)
+		result.set(camera->yaw, camera->pitch, camera->roll);
+	return result;
+}
+
+static Fvector get_actor_aim_origin(CScriptGameObject* self, CScriptGameObject* item)
+{
+    Fvector result; result.set(flt_max,flt_max,flt_max);
+    CActor* actor=self ? smart_cast<CActor*>(&self->object()) : nullptr;
+    CWeapon* weapon=item ? smart_cast<CWeapon*>(&item->object()) : nullptr;
+    Fvector point;
+    if (actor && weapon && painter_killcam_aim::origin(*actor,*weapon,point)) result=point;
+    return result;
+}
+static bool renew_actor_aim(CScriptGameObject* self, CScriptGameObject* item, CScriptGameObject* victim)
+{
+    CActor* actor=self ? smart_cast<CActor*>(&self->object()) : nullptr;
+    CWeapon* weapon=item ? smart_cast<CWeapon*>(&item->object()) : nullptr;
+    return actor && weapon && victim && painter_killcam_aim::renew(*actor,*weapon,victim->object());
+}
+static void clear_actor_aim(CScriptGameObject* self)
+{
+    CActor* actor=self ? smart_cast<CActor*>(&self->object()) : nullptr;
+    if (actor) painter_killcam_aim::clear(*actor);
 }
 
 class_<CScriptGameObject> script_register_game_object1(class_<CScriptGameObject> &&instance)
@@ -347,8 +398,32 @@ class_<CScriptGameObject> script_register_game_object1(class_<CScriptGameObject>
 		.def("set_range", SAFE_WRAP(&CScriptGameObject::set_range))
 
 		.def("head_orientation", SAFE_WRAP(&CScriptGameObject::head_orientation))
+		.def("painter_speed_scale", SAFE_WRAP(&CScriptGameObject::painter_speed_scale))
+		.def("set_painter_speed_scale", SAFE_WRAP(&CScriptGameObject::set_painter_speed_scale))
+		.def("painter_lean", SAFE_WRAP(&CScriptGameObject::painter_lean))
+		.def("set_painter_lean", SAFE_WRAP(&CScriptGameObject::set_painter_lean))
+		.def("painter_lean_level", SAFE_WRAP(&CScriptGameObject::painter_lean_level))
+		.def("set_painter_lean_level", SAFE_WRAP(&CScriptGameObject::set_painter_lean_level))
+		.def("set_painter_gait", SAFE_WRAP(&CScriptGameObject::set_painter_gait))
+		.def("painter_gait", SAFE_WRAP(&CScriptGameObject::painter_gait))
+		.def("painter_throw_target", SAFE_WRAP(&CScriptGameObject::painter_throw_target))
+		.def("painter_throw_through", SAFE_WRAP(&CScriptGameObject::painter_throw_through))
+		.def("painter_throw_clear", SAFE_WRAP(&CScriptGameObject::painter_throw_clear))
+		.def("painter_path_points", SAFE_WRAP(&CScriptGameObject::painter_path_points))
+		.def("painter_throw_state", SAFE_WRAP(&CScriptGameObject::painter_throw_state))
+		.def("painter_shoulder", SAFE_WRAP(&CScriptGameObject::painter_shoulder))
+		.def("set_painter_shoulder", SAFE_WRAP(&CScriptGameObject::set_painter_shoulder))
+		.def("painter_forced_action", SAFE_WRAP(&CScriptGameObject::painter_forced_action))
+		.def("set_painter_forced_action", SAFE_WRAP(&CScriptGameObject::set_painter_forced_action))
+		.def("painter_combat_owned", &painter_combat_owned)
+		.def("painter_native_fire_flags", SAFE_WRAP(&CScriptGameObject::painter_native_fire_flags))
+		.def("painter_native_fire_verdict", SAFE_WRAP(&CScriptGameObject::painter_native_fire_verdict))
 
 		.def("set_actor_position", &CScriptGameObject::SetActorPosition)
+		.def("get_actor_camera_angles", &get_actor_camera_angles)
+		.def("get_actor_aim_origin", &get_actor_aim_origin)
+		.def("renew_actor_aim", &renew_actor_aim)
+		.def("clear_actor_aim", &clear_actor_aim)
 		.def("set_actor_direction", (void (CScriptGameObject::*)(float)) &CScriptGameObject::SetActorDirection)
 		.def("set_actor_direction", (void (CScriptGameObject::*)(float, float))& CScriptGameObject::SetActorDirection)
 		.def("set_actor_direction", (void (CScriptGameObject::*)(float, float, float))& CScriptGameObject::SetActorDirection)

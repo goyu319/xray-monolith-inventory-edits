@@ -102,6 +102,7 @@ bool CPHSkeleton::Spawn(CSE_Abstract* D)
 			}
 		}
 		SpawnInitPhysics(D);
+		if(!obj->PPhysicsShell())return false;
 		RestoreNetState(po);
 		if (obj->PPhysicsShell() && obj->PPhysicsShell()->isFullActive())
 			obj->PPhysicsShell()->GetGlobalTransformDynamic(&obj->XFORM());

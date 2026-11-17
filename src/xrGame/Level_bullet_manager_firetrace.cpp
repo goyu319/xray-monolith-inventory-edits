@@ -8,6 +8,7 @@
 #include "entity.h"
 #include "../xrEngine/gamemtllib.h"
 #include "level.h"
+#include "painter_voxel/PainterExplosions.h"
 #include "gamepersistent.h"
 #include "game_cl_base.h"
 #include "xrmessages.h"
@@ -354,7 +355,15 @@ void CBulletManager::DynamicObjectHit(CBulletManager::_event& E)
 		Hit.whoID = E.bullet.parent_id;
 		Hit.weaponID = E.bullet.weapon_id;
 		Hit.BulletID = E.bullet.m_dwID;
+		// E owns the fired cartridge snapshot; never inspect the shooter's
+		// currently selected weapon/ammo after travel or a weapon switch.
+		Hit.ammo=E.bullet.ammo;
+		Hit.ammo.armor_piercing=E.bullet.armor_piercing;
+		Hit.ammo.impact_power=Hit.power;
+		if(!Hit.ammo.valid())Hit.ammo.clear();
 		Hit.GenHeader(u16((AddStatistic) ? GE_HIT_STATISTIC : GE_HIT) & 0xffff, E.R.O->ID());
+		if(!Hit.ammo.valid()&&E.bullet.painter_fragment.valid())
+			painter_explosions::deliver(Hit,*E.R.O,E.bullet.painter_fragment);
 		
 		NET_Packet np;
 		Hit.Write_Packet(np);

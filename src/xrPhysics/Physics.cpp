@@ -283,6 +283,50 @@ IC static int CollideIntoGroup(dGeomID o1, dGeomID o2, dJointGroupID jointGroup,
 	return collided_contacts;
 }
 
+// Painter limb-torso collision: contacts between two elements of one shell (a forearm or hand and the torso).
+// Same surface model as body contacts (the materials' spring, damping and friction), no bounce, and no object
+// callbacks - both geoms belong to the same object.
+int PainterShellSelfContacts(dGeomID limb, dGeomID torso, CPHIsland* island, int max_contacts)
+{
+	const int N = 8;
+	dContact contacts[N];
+	int n = dCollide(limb, torso, N, &contacts[0].geom, sizeof(dContact));
+	if (n > N)
+		n = N;
+	int made = 0;
+	for (int i = 0; i < n && made < max_contacts; ++i)
+	{
+		dContact& c = contacts[i];
+		dBodyID b1 = dGeomGetBody(c.geom.g1);
+		dBodyID b2 = dGeomGetBody(c.geom.g2);
+		if (!b1 || !b2 || b1 == b2)
+			continue;
+		dxGeomUserData* usr_data_1 = retrieveGeomUserData(c.geom.g1);
+		dxGeomUserData* usr_data_2 = retrieveGeomUserData(c.geom.g2);
+		SGameMtl* material_1 = GMLibrary().GetMaterialByIdx(usr_data_1 ? usr_data_1->material : 0);
+		SGameMtl* material_2 = GMLibrary().GetMaterialByIdx(usr_data_2 ? usr_data_2->material : 0);
+		const float spring = material_2->fPHSpring * material_1->fPHSpring * world_spring;
+		const float damping = material_2->fPHDamping * material_1->fPHDamping * world_damping;
+		c.surface.mode = dContactApprox1 | dContactSoftERP | dContactSoftCFM;
+		c.surface.soft_erp = ERP(spring, damping);
+		c.surface.soft_cfm = CFM(spring, damping);
+		c.surface.mu = material_2->fPHFriction * material_1->fPHFriction;
+		c.surface.bounce = 0.f;
+		c.surface.bounce_vel = 0.f;
+		dJointID contact_joint = dJointCreateContact(0, ContactGroup, &c);
+		island->ConnectJoint(contact_joint);
+		dJointAttach(contact_joint, b1, b2);
+		++made;
+	}
+	return made;
+}
+
+bool PainterGeomsTouch(dGeomID a, dGeomID b)
+{
+	dContactGeom c;
+	return dCollide(a, b, 1, &c, sizeof(dContactGeom)) > 0;
+}
+
 void NearCallback(CPHObject* obj1, CPHObject* obj2, dGeomID o1, dGeomID o2)
 {
 	PROF_EVENT("CollideDynamic");

@@ -86,7 +86,8 @@ class ENGINE_API CObject :
 public:
 	struct SavedPosition
 	{
-		u32 dwTime;
+		u32 dwTime; // Freshness: may advance while the sampled position is unchanged.
+		u32 dwPositionTime; // Time paired with vPosition, used only for sight velocity.
 		Fvector vPosition;
 	};
 
@@ -114,6 +115,7 @@ private:
 	BENCH_SEC_SCRAMBLEVTBL2
 	// Some property variables
 	ObjectProperties Props;
+	const u64 m_painter_birth_cookie; // Native lifetime identity, never serialized or derived from net ID.
 	shared_str NameObject;
 	shared_str NameSection;
 	shared_str NameVisual;
@@ -149,6 +151,7 @@ public:
 	ICF BOOL Local() const { return Props.net_Local; }
 	ICF BOOL Remote() const { return !Props.net_Local; }
 	ICF u16 ID() const { return Props.net_ID; }
+	u64 PainterBirthCookie() const noexcept { return m_painter_birth_cookie; }
 	ICF void setID(u16 _ID) { Props.net_ID = _ID; }
 	virtual BOOL Ready() { return Props.net_Ready; }
 	BOOL GetTmpPreDestroy() const { return Props.bPreDestroy; }

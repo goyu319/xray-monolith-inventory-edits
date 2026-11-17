@@ -2,7 +2,20 @@
 #pragma hdrstop
 
 #include "ParticleEffect.h"
+#ifndef _EDITOR // thermal3: the effect definition's action list (KillOld age limit = the particle lifetime), as ParticleEffectDef.cpp
+#ifndef AnsiString
+#define AnsiString std::string
+#endif
+#endif
+#include "ParticleEffectActions.h"
+#include "BloodGpuParticles.h"
+#include "xrRender_console.h"
+#include "../../Include/xrRender/BloodThermal.h"
+#include <new>
 #include "CHudInitializer.h"
+#include <array>
+#include <cstring>
+#include <cmath>
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
 
@@ -12,6 +25,162 @@
 
 using namespace PAPI;
 using namespace PS;
+
+namespace
+{
+#if defined(USE_DX11) && !defined(_EDITOR)
+SRWLOCK bloodRegistryLock = SRWLOCK_INIT;
+CParticleEffect* bloodFirst = nullptr;
+void RegisterBloodEffect(CParticleEffect* effect)
+{
+	AcquireSRWLockExclusive(&bloodRegistryLock);
+	VERIFY(!effect->m_BloodRegistered);
+	effect->m_BloodNext = bloodFirst;
+	effect->m_BloodPrevious = nullptr;
+	if (bloodFirst) bloodFirst->m_BloodPrevious = effect;
+	bloodFirst = effect;
+	effect->m_BloodRegistered = true;
+	ReleaseSRWLockExclusive(&bloodRegistryLock);
+}
+void UnregisterBloodEffect(CParticleEffect* effect)
+{
+	AcquireSRWLockExclusive(&bloodRegistryLock);
+	if (!effect->m_BloodRegistered) { ReleaseSRWLockExclusive(&bloodRegistryLock); return; }
+	if (effect->m_BloodPrevious) effect->m_BloodPrevious->m_BloodNext = effect->m_BloodNext;
+	else bloodFirst = effect->m_BloodNext;
+	if (effect->m_BloodNext) effect->m_BloodNext->m_BloodPrevious = effect->m_BloodPrevious;
+	effect->m_BloodPrevious = effect->m_BloodNext = nullptr;
+	effect->m_BloodRegistered = false; effect->m_BloodGeneration = 0;
+	ReleaseSRWLockExclusive(&bloodRegistryLock);
+}
+#endif
+// Shared by the original render stream and a prediction on a local copy.
+// Only a real graph draw commits interpolation; precomputation never advances
+// an invisible particle or changes the worker's authored simulation state.
+void InterpolateBloodParticle(PAPI::Particle& m, CParticleEffect* effect)
+{
+	if (effect->m_RT_Flags.is(CParticleEffect::flRT_LiveUpdate))
+	{
+		m.posI.set(m.pos); m.rotI.set(m.rot); m.velI.set(m.vel); m.sizeI.set(m.size);
+	}
+	else
+	{
+		float dt = 1.f - 10.f * Device.fTimeDelta;
+		clamp(dt, 0.f, 0.99f);
+		m.posI.inertion(m.pos, dt); m.rotI.inertion(m.rot, dt);
+		m.velI.inertion(m.vel, dt); m.sizeI.inertion(m.size, dt);
+	}
+}
+#if defined(USE_DX11) && !defined(_EDITOR)
+struct BloodSpriteSnapshot
+{
+	PAPI::Particle original, predicted;
+	Fmatrix transform;
+	CPEDef* definition;
+	u32 definition_flags;
+	u8 runtime_flags;
+};
+std::array<BloodSpriteSnapshot, BloodGpuParticles::MaxSprites> bloodSnapshots;
+std::array<BloodGpuParticles::Input, BloodGpuParticles::MaxSprites> bloodInputs;
+Fvector bloodTop, bloodRight;
+float bloodDelta = 0;
+u32 bloodFrame = 0, bloodCount = 0;
+bool bloodPrepared = false;
+
+bool BloodSpriteSupported(CParticleEffect* effect)
+{
+	const CPEDef* def = effect->m_Def;
+	if (!def || !def->m_Name.size() || std::strncmp(def->m_Name.c_str(), "painter\\fluid\\", 14) != 0 ||
+		def->m_MaxParticles != 1 || !def->m_Flags.is(CPEDef::dfSprite) || effect->GetHudMode()) return false;
+	const u32 unsupported = CPEDef::dfFramed | CPEDef::dfAlignToPath | CPEDef::dfVelocityScale;
+	return (def->m_Flags.get() & unsupported) == 0;
+}
+bool BuildBloodInput(CParticleEffect* effect, const PAPI::Particle& m, BloodGpuParticles::Input& input)
+{
+	Fvector position;
+	if (effect->m_RT_Flags.is(CParticleEffect::flRT_XFORM)) effect->m_XFORM.transform_tiny(position, m.posI);
+	else position.set(m.posI);
+	input = {};
+	std::memcpy(input.position, &position.x, sizeof(input.position));
+	std::memcpy(input.top, &RDEVICE.vCameraTop.x, sizeof(input.top));
+	std::memcpy(input.right, &RDEVICE.vCameraRight.x, sizeof(input.right));
+	input.radius_x = effect->m_SpriteSize.Radius(m.sizeI.x); input.radius_y = effect->m_SpriteSize.Radius(m.sizeI.y);
+	// Original single-sprite stream uses this finite value as its angle sentinel.
+	// At equality it retains zero sine/cosine rather than calling trig.
+	if (m.rotI.x != float(0xFFFFFFFF))
+	{
+		input.sine = std::sinf(m.rotI.x); input.cosine = std::cosf(m.rotI.x);
+	}
+	input.color = color_rgba_f(effect->m_SpriteColor.Red(m.colorR),effect->m_SpriteColor.Green(m.colorG),effect->m_SpriteColor.Blue(m.colorB),m.colorA);
+	for (unsigned i = 0; i < 3; ++i)
+		if (!std::isfinite(input.position[i]) || !std::isfinite(input.top[i]) || !std::isfinite(input.right[i])) return false;
+	return std::isfinite(input.radius_x) && std::isfinite(input.radius_y) &&
+		std::isfinite(input.sine) && std::isfinite(input.cosine);
+}
+bool ConsumeBloodSprite(CParticleEffect* effect, PAPI::Particle* particles, u32 count, u32& offset, bool& culled)
+{
+	if (!bloodPrepared || count != 1 || effect->m_BloodGeneration != BloodGpuParticles::Generation() ||
+		effect->m_BloodSprite >= bloodCount || !BloodGpuParticles::Vertices()) return false;
+	const u32 index = effect->m_BloodSprite;
+	effect->m_BloodGeneration = 0; // A second draw performs its original interpolation.
+	const BloodSpriteSnapshot& s = bloodSnapshots[index];
+	if (bloodFrame != Device.dwFrame || bloodDelta != Device.fTimeDelta ||
+		std::memcmp(&bloodTop, &RDEVICE.vCameraTop, sizeof(Fvector)) ||
+		std::memcmp(&bloodRight, &RDEVICE.vCameraRight, sizeof(Fvector)) ||
+		s.definition != effect->m_Def || s.definition_flags != effect->m_Def->m_Flags.get() ||
+		s.runtime_flags != effect->m_RT_Flags.get() ||
+		std::memcmp(&s.transform, &effect->m_XFORM, sizeof(Fmatrix)) ||
+		std::memcmp(&s.original, particles, sizeof(PAPI::Particle)))
+	{
+		BloodGpuParticles::CountFallback(); return false;
+	}
+	// Commit precisely the fields mutated by the original render stream.
+	particles->posI = s.predicted.posI; particles->rotI = s.predicted.rotI;
+	particles->velI = s.predicted.velI; particles->sizeI = s.predicted.sizeI;
+	Fvector world;
+	effect->m_XFORM.transform_tiny(world, particles->posI);
+	culled = Device.vCameraPosition.distance_to_sqr(world) >
+		_sqr(g_pGamePersistent->Environment().CurrentEnv->fog_distance);
+	offset = index * 4;
+	if (!culled) BloodGpuParticles::CountDraw();
+	return true;
+}
+#endif
+}
+
+#ifdef USE_DX11
+void BloodGpuParticles::Prepare(bool enabled)
+{
+	BeginPreparation();
+#if defined(USE_DX11) && !defined(_EDITOR)
+	bloodPrepared = false; bloodCount = 0;
+	if (!enabled || !Warmup()) return;
+	bloodTop = RDEVICE.vCameraTop; bloodRight = RDEVICE.vCameraRight;
+	bloodDelta = Device.fTimeDelta; bloodFrame = Device.dwFrame;
+	AcquireSRWLockShared(&bloodRegistryLock);
+	for (CParticleEffect* effect = bloodFirst; effect; effect = effect->m_BloodNext)
+	{
+		if (!BloodSpriteSupported(effect)) continue;
+		PAPI::Particle* particles = nullptr; u32 count = 0;
+		ParticleManager()->GetParticles(effect->GetHandleEffect(), particles, count);
+		if (count != 1) continue;
+		if (bloodCount == MaxSprites) { CountFallback(true); continue; }
+		BloodSpriteSnapshot& s = bloodSnapshots[bloodCount];
+		std::memcpy(&s.original, particles, sizeof(s.original)); s.predicted = particles[0];
+		InterpolateBloodParticle(s.predicted, effect);
+		if (!BuildBloodInput(effect, s.predicted, bloodInputs[bloodCount])) { CountFallback(); continue; }
+		s.transform = effect->m_XFORM; s.definition = effect->m_Def;
+		s.definition_flags = effect->m_Def->m_Flags.get(); s.runtime_flags = effect->m_RT_Flags.get();
+		effect->m_BloodSprite = bloodCount++; effect->m_BloodGeneration = Generation();
+	}
+	ReleaseSRWLockShared(&bloodRegistryLock);
+	if (bloodCount) bloodPrepared = Dispatch(bloodInputs.data(), bloodCount);
+	if (!bloodPrepared) for (u32 i = 0; i < bloodCount; ++i) CountFallback();
+#else
+	(void)enabled;
+#endif
+}
+#endif
 
 static void ApplyTexgen(const Fmatrix& mVP)
 {
@@ -79,10 +248,16 @@ CParticleEffect::CParticleEffect()
 	m_DestroyCallback = 0;
 	m_CollisionCallback = 0;
 	m_XFORM.identity();
+#if defined(USE_DX11) && !defined(_EDITOR)
+// Registration occurs only after a supported definition has finished Compile.
+#endif
 }
 
 CParticleEffect::~CParticleEffect()
 {
+#if defined(USE_DX11) && !defined(_EDITOR)
+	UnregisterBloodEffect(this);
+#endif
 	// Log					("--- destroy PE");
 	OnDeviceDestroy();
 	ParticleManager()->DestroyEffect(m_HandleEffect);
@@ -193,7 +368,7 @@ void CParticleEffect::OnFrame(u32 frame_dt)
 						if (m.size.y > p_size) p_size = m.size.y;
 						if (m.size.z > p_size) p_size = m.size.z;
 					}
-					vis.box.grow(p_size);
+					vis.box.grow(m_SpriteSize.Bounds(p_size));
 					vis.box.getsphere(vis.sphere.P, vis.sphere.R);
 				}
 				if (m_RT_Flags.is(flRT_DefferedStop) && (0 == p_cnt))
@@ -236,7 +411,7 @@ void CParticleEffect::OnFrame(u32 frame_dt)
 					if (m.size.y > p_size) p_size = m.size.y;
 					if (m.size.z > p_size) p_size = m.size.z;
 				}
-				vis.box.grow(p_size);
+				vis.box.grow(m_SpriteSize.Bounds(p_size));
 				vis.box.getsphere(vis.sphere.P, vis.sphere.R);
 			}
 			
@@ -268,6 +443,10 @@ void CParticleEffect::OnFrame(u32 frame_dt)
 
 BOOL CParticleEffect::Compile(CPEDef* def)
 {
+    m_BloodThermalSource={};m_BloodThermalAgeOffset=0.f;
+#if defined(USE_DX11) && !defined(_EDITOR)
+	UnregisterBloodEffect(this);
+#endif
 	m_Def = def;
 	if (m_Def)
 	{
@@ -284,6 +463,9 @@ BOOL CParticleEffect::Compile(CPEDef* def)
 			m_fElapsedLimit = m_Def->m_fTimeLimit;
 	}
 	if (def) shader = def->m_CachedShader;
+#if defined(USE_DX11) && !defined(_EDITOR)
+	if (BloodSpriteSupported(this)) RegisterBloodEffect(this);
+#endif
 	return TRUE;
 }
 
@@ -302,6 +484,8 @@ u32 CParticleEffect::ParticlesCount()
 //------------------------------------------------------------------------------
 void CParticleEffect::Copy(dxRender_Visual*)
 {
+    m_SpriteSize=BloodParticleSize{};
+    m_SpriteColor=BloodParticleColor{};
 	FATAL("Can't duplicate particle system - NOT IMPLEMENTED");
 }
 
@@ -319,6 +503,7 @@ void CParticleEffect::OnDeviceCreate()
 
 void CParticleEffect::OnDeviceDestroy()
 {
+    m_ThermalGeom.destroy(); m_ThermalShader.destroy();
 	if (m_Def)
 	{
 		if (m_Def->m_Flags.is(CPEDef::dfSprite))
@@ -510,35 +695,20 @@ __forceinline void magnitude_sse(Fvector& vec, float& res)
 	_mm_store_ss((float*)&res, tv);
 }
 
-bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, CParticleEffect * pPE)
+struct ParticleSpriteAngle { float angle=float(0xFFFFFFFF), sine=0.f, cosine=0.f; };
+
+bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, CParticleEffect * pPE, ParticleSpriteAngle* state=nullptr)
 {
-	float sina = 0.0f, cosa = 0.0f;
+	float sina = state?state->sine:0.0f, cosa = state?state->cosine:0.0f;
 	// Xottab_DUTY: changed angle to be float instead of DWORD
 	// But it must be 0xFFFFFFFF or otherwise some particles won't play
-	float angle = 0xFFFFFFFF;
+	float angle = state?state->angle:float(0xFFFFFFFF);
 
 
 	for (u32 i = 0; i != count; ++i)
 	{
 		PAPI::Particle& m = particles[i];
-		{
-			if (pPE->m_RT_Flags.is(CParticleEffect::flRT_LiveUpdate))
-			{
-				m.posI.set(m.pos);
-				m.rotI.set(m.rot);
-				m.velI.set(m.vel);
-				m.sizeI.set(m.size);
-			}
-			else
-			{
-				float dt = 1.f-10.f*Device.fTimeDelta;
-				clamp(dt,0.f,0.99f);
-				m.posI.inertion(m.pos, dt);
-				m.rotI.inertion(m.rot, dt);
-				m.velI.inertion(m.vel, dt);
-				m.sizeI.inertion(m.size, dt);
-			}
-		}
+		InterpolateBloodParticle(m, pPE);
 
 		Fvector wp_eff;
 		pPE->m_XFORM.transform_tiny(wp_eff, m.posI);
@@ -575,6 +745,8 @@ bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, C
 			r_y += speed * pPE->m_Def->m_VelocityScale.y;
 		}
 
+		r_x *= pPE->m_SpriteSize.factor; r_y *= pPE->m_SpriteSize.factor;
+
 		if (pPE->m_Def->m_Flags.is(CPEDef::dfAlignToPath))
 		{
 			if (!speed_calculated)
@@ -586,11 +758,11 @@ bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, C
 				if (pPE->m_RT_Flags.is(CParticleEffect::flRT_XFORM))
 				{
 					M.mulA_43(pPE->m_XFORM);
-					FillSprite(pv, M.k, M.i, wp_eff, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, M.k, M.i, wp_eff, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 				else
 				{
-					FillSprite(pv, M.k, M.i, m.posI, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, M.k, M.i, m.posI, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 			}
 			else if ((speed >= EPS_S) && pPE->m_Def->m_Flags.is(CPEDef::dfFaceAlign))
@@ -608,11 +780,11 @@ bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, C
 				if (pPE->m_RT_Flags.is(CParticleEffect::flRT_XFORM))
 				{
 					M.mulA_43(pPE->m_XFORM);
-					FillSprite(pv, M.j, M.i, wp_eff, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, M.j, M.i, wp_eff, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 				else
 				{
-					FillSprite(pv, M.j, M.i, m.posI, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, M.j, M.i, m.posI, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 			}
 			else
@@ -626,11 +798,11 @@ bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, C
 				{
 					Fvector d;
 					pPE->m_XFORM.transform_dir(d, dir);
-					FillSprite(pv, wp_eff, d, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, wp_eff, d, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 				else
 				{
-					FillSprite(pv, m.posI, dir, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+					FillSprite(pv, m.posI, dir, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 				}
 			}
 		}
@@ -638,16 +810,93 @@ bool ParticleRenderStream(FVF::LIT* pv, u32 count, PAPI::Particle * particles, C
 		{
 			if (pPE->m_RT_Flags.is(CParticleEffect::flRT_XFORM))
 			{
-				FillSprite(pv, RDEVICE.vCameraTop, RDEVICE.vCameraRight, wp_eff, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+				FillSprite(pv, RDEVICE.vCameraTop, RDEVICE.vCameraRight, wp_eff, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 			}
 			else
 			{
-				FillSprite(pv, RDEVICE.vCameraTop, RDEVICE.vCameraRight, m.posI, lt, rb, r_x, r_y, color_rgba_f(m.colorR, m.colorG, m.colorB, m.colorA), sina, cosa);
+				FillSprite(pv, RDEVICE.vCameraTop, RDEVICE.vCameraRight, m.posI, lt, rb, r_x, r_y, color_rgba_f(pPE->m_SpriteColor.Red(m.colorR),pPE->m_SpriteColor.Green(m.colorG),pPE->m_SpriteColor.Blue(m.colorB),m.colorA), sina, cosa);
 			}
 		}
 	}
+    if(state){state->angle=angle;state->sine=sina;state->cosine=cosa;}
 	return false;
 }
+
+#if defined(USE_DX11) && !defined(_EDITOR)
+bool CParticleEffect::RenderBloodThermal(PAPI::Particle* particles,u32 count)
+{
+    if (ps_r2_heatvision<=0 || !m_Def || !BloodEffect::IsParticle(m_Def->m_BloodEffectId) || !count || GetHudMode()) return false;
+    if (RImplementation.phase == CRender::PHASE_SMAP) return false; // thermal3: a shadow map keeps the stock draw (no heat target there)
+    LPCSTR material=*m_Def->m_ShaderName;
+    LPCSTR thermal=nullptr;
+    if(!xr_strcmp(material,"painter\\blood_droplet"))thermal="painter\\blood_thermal";
+    else if(!xr_strcmp(material,"painter\\blood_droplet_color"))thermal="painter\\blood_thermal_color";
+    // Material chooses the compatible program only AFTER authored per-effect eligibility.
+    // Neither donor ownership, PG ancestry nor shader/texture names create blood intent.
+    else if(!xr_strcmp(material,"painter\\hitfx_impact"))thermal="painter\\blood_thermal_impact";
+    else if(!xr_strcmp(material,"painter\\hitfx_impact_color"))thermal="painter\\blood_thermal_impact_color";
+    else if(!xr_strcmp(material,"particles\\blend"))thermal="painter\\blood_thermal_blend";
+    // thermal3: blood sprites with the other stock materials. Colour / G-buffer: the stock program and blend of that material
+    // (Blender_Particle): alpha_add mode 5 (srcalpha, one), add mode 2 (one, one), set mode 0 (opaque, deffer_particle into the
+    // G-buffer, alpha test 200); heat: the blood heat as for particles\blend (thermal3 shaders).
+    else if(!xr_strcmp(material,"particles\\alpha_add"))thermal="painter\\blood_thermal_alpha_add";
+    else if(!xr_strcmp(material,"particles\\add"))thermal="painter\\blood_thermal_add";
+    else if(!xr_strcmp(material,"particles\\set"))thermal="painter\\blood_thermal_set";
+    if(!thermal)return false;
+    // The ordinary single-sprite GPU route and all normal-view programs remain
+    // unchanged. Thermal uses actual per-particle simulation age, never TTL,
+    // alpha, a fabricated zero or an average across particles.
+    // Predict the existing whole-effect far-fog refusal before drawing a chunk.
+    for (u32 i=0;i<count;++i) {
+        PAPI::Particle copy=particles[i];InterpolateBloodParticle(copy,this);
+        Fvector world;m_XFORM.transform_tiny(world,copy.posI);
+        if (Device.vCameraPosition.distance_to_sqr(world)>_sqr(g_pGamePersistent->Environment().CurrentEnv->fog_distance)) return false;
+    }
+    struct ThermalVertex { FVF::LIT original; float age; };
+    static_assert(sizeof(FVF::LIT)==24 && sizeof(ThermalVertex)==28,"thermal particle stream ABI");
+    static D3DVERTEXELEMENT9 decl[]={
+        {0,0,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_POSITION,0},
+        {0,12,D3DDECLTYPE_D3DCOLOR,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_COLOR,0},
+        {0,16,D3DDECLTYPE_FLOAT2,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,0},
+        {0,24,D3DDECLTYPE_FLOAT1,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,2},D3DDECL_END()};
+    if (!m_ThermalGeom) m_ThermalGeom.create(decl,RCache.Vertex.Buffer(),RCache.QuadIB);
+    if (!m_ThermalShader) m_ThermalShader.create(thermal,*m_Def->m_TextureName);
+    // thermal3: each blood particle cools over ITS OWN lifetime (painter_blood_particle_heat.h): the smallest age limit of the
+    // effect's enabled KillOld actions (particles die at that age), else its time limit, else 1 s; passed as painter_blood_cooling.x.
+    float life=0.f;
+    for (EParticleAction* a:m_Def->m_EActionList)
+        if (a&&a->type==PAPI::PAKillOldID&&a->flags.is(EParticleAction::flEnabled)&&!a->_bool("Kill Less Than").val) {
+            const float v=a->_float("Age Limit").val;
+            if (std::isfinite(v)&&v>0.f&&(life<=0.f||v<life)) life=v;
+        }
+    if (!(life>0.f)) life=m_Def->m_fTimeLimit>0.f?m_Def->m_fTimeLimit:1.f;
+    constexpr u32 chunk=4096;
+    // Fixed bounded scratch, all particles visited; chunking is not admission.
+    static thread_local xr_vector<FVF::LIT> staged;
+    try { staged.resize(chunk*4); } catch (const std::bad_alloc&) { return false; }
+    ParticleSpriteAngle angle;
+    for (u32 start=0;start<count;) {
+        const u32 n=(std::min)(chunk,count-start);
+        if (ParticleRenderStream(staged.data(),n,particles+start,this,&angle)) return true;
+        u32 offset=0;auto* output=static_cast<ThermalVertex*>(RCache.Vertex.Lock(n*4,sizeof(ThermalVertex),offset));
+        for (u32 i=0;i<n;++i) for (u32 c=0;c<4;++c) {
+            output[i*4+c].original=staged[i*4+c];output[i*4+c].age=particles[start+i].age+m_BloodThermalAgeOffset;
+        }
+        RCache.Vertex.Unlock(n*4,sizeof(ThermalVertex));
+        RCache.set_xform_world(Fidentity);RCache.set_Shader(m_ThermalShader);RCache.set_Geometry(m_ThermalGeom);
+        RCache.set_c("painter_blood_cooling",life,heat_vision_cooldown?1.f:0.f, // thermal3: .x = the particle lifetime (was the global cool-down)
+            m_BloodThermalSource.known&&m_BloodThermalSource.corpse?BloodThermal::Corpse(Device.dwTimeGlobal,m_BloodThermalSource.death_time,heat_vision_cooldown_time,heat_vision_cooldown!=0):1.f,
+            m_BloodThermalSource.known?1.f:0.f);
+        RCache.set_CullMode(m_Def->m_Flags.is(CPEDef::dfCulling)?(m_Def->m_Flags.is(CPEDef::dfCullCCW)?CULL_CCW:CULL_CW):CULL_NONE);
+        RCache.Render(D3DPT_TRIANGLELIST,offset,0,n*4,0,n*2);RCache.set_CullMode(CULL_CCW);
+        start+=n;
+    }
+    return true;
+}
+#else
+bool CParticleEffect::RenderBloodThermal(PAPI::Particle*,u32) { return false; }
+#endif
+
 
 void CParticleEffect::Render(float)
 {
@@ -665,12 +914,18 @@ void CParticleEffect::Render(float)
 	{
 		if (m_Def && m_Def->m_Flags.is(CPEDef::dfSprite))
 		{
-			FVF::LIT* pv_start = (FVF::LIT*)RCache.Vertex.Lock(p_cnt * 4 * 4, geom->vb_stride, dwOffset);
-			bool NeedExit = ParticleRenderStream(pv_start, p_cnt, particles, this);
-
+			if (RenderBloodThermal(particles,p_cnt)) return;
+            bool gpuSprite = false, NeedExit = false;
+#if defined(USE_DX11) && !defined(_EDITOR)
+			gpuSprite = ConsumeBloodSprite(this, particles, p_cnt, dwOffset, NeedExit);
+#endif
 			dwCount = p_cnt << 2;
-
-			RCache.Vertex.Unlock(dwCount, geom->vb_stride);
+			if (!gpuSprite)
+			{
+				FVF::LIT* pv_start = (FVF::LIT*)RCache.Vertex.Lock(p_cnt * 4 * 4, geom->vb_stride, dwOffset);
+				NeedExit = ParticleRenderStream(pv_start, p_cnt, particles, this);
+				RCache.Vertex.Unlock(dwCount, geom->vb_stride);
+			}
 
 			if (NeedExit)
 				return;
@@ -703,6 +958,9 @@ void CParticleEffect::Render(float)
 
 				RCache.set_xform_world(Fidentity);
 				RCache.set_Geometry(geom);
+#if defined(USE_DX11) && !defined(_EDITOR)
+				if (gpuSprite) RCache.set_Vertices(BloodGpuParticles::Vertices(), sizeof(FVF::LIT));
+#endif
 
 				RCache.set_CullMode(m_Def->m_Flags.is(CPEDef::dfCulling)
 					                    ? (m_Def->m_Flags.is(CPEDef::dfCullCCW) ? CULL_CCW : CULL_CW)
@@ -801,6 +1059,7 @@ void CParticleEffect::Render(float )
 					r_x			+= speed*m_Def->m_VelocityScale.x;
 					r_y			+= speed*m_Def->m_VelocityScale.y;
 				}
+				r_x *= m_SpriteSize.factor; r_y *= m_SpriteSize.factor;
 				if (m_Def->m_Flags.is(CPEDef::dfAlignToPath)){
 					float speed	= m.vel.magnitude();
                     if ((speed<EPS_S)&&m_Def->m_Flags.is(CPEDef::dfWorldAlign)){
@@ -810,9 +1069,9 @@ void CParticleEffect::Render(float )
                             Fvector p;
                             m_XFORM.transform_tiny(p,m.pos);
 	                        M.mulA_43		(m_XFORM);
-                            FillSprite		(pv,M.k,M.i,p,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite		(pv,M.k,M.i,p,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }else{
-                            FillSprite		(pv,M.k,M.i,m.pos,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite		(pv,M.k,M.i,m.pos,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }
                     }else if ((speed>=EPS_S)&&m_Def->m_Flags.is(CPEDef::dfFaceAlign)){
                     	Fmatrix	M;  		M.identity();
@@ -824,9 +1083,9 @@ void CParticleEffect::Render(float )
                             Fvector p;
                             m_XFORM.transform_tiny(p,m.pos);
 	                        M.mulA_43		(m_XFORM);
-                            FillSprite		(pv,M.j,M.i,p,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite		(pv,M.j,M.i,p,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }else{
-                            FillSprite		(pv,M.j,M.i,m.pos,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite		(pv,M.j,M.i,m.pos,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }
                     }else{
 						Fvector 			dir;
@@ -836,18 +1095,18 @@ void CParticleEffect::Render(float )
                             Fvector p,d;
                             m_XFORM.transform_tiny	(p,m.pos);
                             m_XFORM.transform_dir	(d,dir);
-                            FillSprite	(pv,p,d,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite	(pv,p,d,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }else{
-                            FillSprite	(pv,m.pos,dir,lt,rb,r_x,r_y,m.color,m.rot.x);
+                            FillSprite	(pv,m.pos,dir,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
                         }
                     }
 				}else{
 					if (m_RT_Flags.is(flRT_XFORM)){
 						Fvector p;
 						m_XFORM.transform_tiny	(p,m.pos);
-						FillSprite	(pv,RDEVICE.vCameraTop,RDEVICE.vCameraRight,p,lt,rb,r_x,r_y,m.color,m.rot.x);
+						FillSprite	(pv,RDEVICE.vCameraTop,RDEVICE.vCameraRight,p,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
 					}else{
-						FillSprite	(pv,RDEVICE.vCameraTop,RDEVICE.vCameraRight,m.pos,lt,rb,r_x,r_y,m.color,m.rot.x);
+						FillSprite	(pv,RDEVICE.vCameraTop,RDEVICE.vCameraRight,m.pos,lt,rb,r_x,r_y,m_SpriteColor.Packed(m.color),m.rot.x);
 					}
 				}
 			}

@@ -40,6 +40,7 @@ public:
 	virtual ~CStalkerPlanner();
 	virtual void setup(CAI_Stalker* object);
 	virtual void update(u32 time_delta);
+	bool painter_forced_update();
 	IC void affect_cover(bool value);
 	IC bool affect_cover() const;
 

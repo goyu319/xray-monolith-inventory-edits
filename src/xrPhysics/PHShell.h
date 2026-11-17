@@ -11,6 +11,7 @@ class CPHShellSplitterHolder;
 #include "PHShellSplitter.h"
 #include "phmovestorage.h"
 #include "physics_scripted.h"
+#include "FittedShell.h"
 
 
 class CPhysicsShellAnimator;
@@ -36,9 +37,22 @@ class CPHShell :
 	JOINT_STORAGE joints;
 	CPHShellSplitterHolder* m_spliter_holder;
 	CPHMoveStorage m_traced_geoms;
-
+	const std::vector<PHFittedBone>* m_fitted_bones=nullptr;
+	u16 m_fitted_root=BI_NONE;
+	Fmatrix m_fitted_parent_bind=Fidentity;
+	std::vector<PHFittedPoseLink> m_fitted_pose_links;
 
 	CPhysicsShellAnimator* m_pPhysicsShellAnimatorC;
+
+	// Painter limb-torso collision: element root bones, how many geoms of each limb belong to the body (a weapon
+	// added to the hand later does not), and bit (limb * limb_torso_max + torso) once that pair was seen apart.
+	enum { limb_torso_max = 8 };
+	u16 m_limb_bone[limb_torso_max];
+	u16 m_limb_geoms[limb_torso_max];
+	u16 m_torso_bone[limb_torso_max];
+	u8 m_limb_count = 0;
+	u8 m_torso_count = 0;
+	u64 m_limb_torso_armed = 0;
 
 private:
 
@@ -51,6 +65,12 @@ protected:
 public:
 	Fmatrix m_object_in_root;
 	CPHShell();
+	void build_FittedFromKinematics(IKinematics* k,const std::vector<PHFittedBone>& bones,
+		u16 root,const Fmatrix& parent_bind);
+	bool BindFittedPoseLinks(const std::vector<PHFittedPoseLink>& links,bool apply_now);
+	bool RefreshFittedPose();
+	void InstallFittedPoseCallbacks();
+	static void _BCL FittedPoseCallback(CBoneInstance* B);
 	virtual ~CPHShell();
 	virtual void applyImpulseTrace(const Fvector& pos, const Fvector& dir, float val, const u16 id);
 	virtual void applyHit(const Fvector& pos, const Fvector& dir, float val, const u16 id, ALife::EHitType hit_type);
@@ -128,6 +148,8 @@ public:
 
 	virtual void SetSmall();
 	virtual void SetIgnoreSmall();
+	virtual u16 SetLimbTorsoCollision(const u16* limb_bones, u16 limb_count, const u16* torso_bones, u16 torso_count);
+	virtual void Collide();
 
 	virtual _flags<CLClassBits>& collide_class_bits() { return CPHObject::collide_class_bits(); }
 	virtual const CLBits& collide_bits() const { return CPHObject::collide_bits(); };
@@ -306,6 +328,7 @@ protected:
 
 	virtual void ClearRecentlyDeactivated();
 	void ClearCashedTries();
+	void CollideLimbTorso();
 private:
 	//breakable
 	void setEndElementSplitter();
@@ -315,7 +338,7 @@ private:
 	void AddSplitter(CPHShellSplitter::EType type, u16 element, u16 joint, u16 position);
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	void AddElementRecursive(CPhysicsElement* root_e, u16 id, Fmatrix global_parent, u16 element_number,
-	                         bool* vis_check);
+	                         bool* vis_check,u16 original_element=BI_NONE);
 	void PlaceBindToElFormsRecursive(Fmatrix parent, u16 id, u16 element, Flags64& mask);
 	void BonesBindCalculate(u16 id_from = 0);
 	void BonesBindCalculateRecursive(Fmatrix parent, u16 id);

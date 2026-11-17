@@ -31,6 +31,7 @@ protected:
 	bool m_torso_look;
 	bool m_path;
 	bool m_no_pitch;
+	bool m_predict_motion = true; // Per-action choice; ordinary/vanilla sights retain prediction.
 	Fvector m_vector3d;
 	const CGameObject* m_object_to_look;
 	const CMemoryInfo* m_memory_object;
@@ -74,7 +75,7 @@ public:
 	IC CSightAction(const ESightType& sight_type, const Fvector& vector3d, bool torso_look = false);
 	IC CSightAction(const ESightType& sight_type, const Fvector* vector3d);
 	IC CSightAction(const CGameObject* object_to_look, bool torso_look = false, bool fire_object = false,
-	                bool no_pitch = false);
+	                bool no_pitch = false, bool predict_motion = true);
 	IC CSightAction(const CMemoryInfo* memory_object, bool torso_look = false);
 	void initialize();
 	void execute();

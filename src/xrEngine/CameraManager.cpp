@@ -480,6 +480,16 @@ void CCameraManager::UpdateCamEffectors()
 {
 	if (m_EffectorsCam.empty()) return;
 
+	// A retained effector can change positioning mode (custom camera/death).
+	// Keep relative effects before absolute poses without allocation or replay.
+	auto position = m_EffectorsCam.begin();
+	for (size_t remaining = m_EffectorsCam.size(); remaining != 0; --remaining)
+	{
+		auto current = position++;
+		if ((*current)->AbsolutePositioning())
+			m_EffectorsCam.splice(m_EffectorsCam.end(), m_EffectorsCam, current);
+	}
+
 	for(auto it	= m_EffectorsCam.begin(); it != m_EffectorsCam.end();)
 	{
 		CEffectorCam* eff = (*it);

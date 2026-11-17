@@ -9,6 +9,7 @@
 #include "script_hit.h"
 #include "script_game_object.h"
 #include "GameObject.h"
+#include "painter_voxel/PainterExplosions.h"
 
 SHit::SHit(float powerA, Fvector& dirA, CObject* whoA, u16 elementA, Fvector p_in_bone_spaceA,
            float impulseA, ALife::EHitType hit_typeA, float armor_piercingA, bool AimBullet)
@@ -34,6 +35,8 @@ SHit::SHit(float powerA, Fvector& dirA, CObject* whoA, u16 elementA, Fvector p_i
 	SenderID = 0;
 	aim_bullet = AimBullet;
 	add_wound = true;
+	painter_effective_power=0.f;
+	painter_effective_power_valid=false;
 }
 
 SHit::SHit()
@@ -43,6 +46,12 @@ SHit::SHit()
 
 void SHit::invalidate()
 {
+	painter_armor_penetration=-1;
+	painter_alive_before=-1;
+	ammo.clear();
+	painter_fragment={};
+	painter_effective_power=0.f;
+	painter_effective_power_valid=false;
 	Time = 0;
 	PACKET_TYPE = 0;
 	DestID = 0;
@@ -90,6 +99,9 @@ void SHit::Read_Packet(NET_Packet Packet)
 
 void SHit::Read_Packet_Cont(NET_Packet Packet)
 {
+	painter_armor_penetration=-1; // decision is made by this receiver, never the sender
+	painter_alive_before=-1; // R62: stamped by the receiver at the start of its hit
+	ammo.clear();
 	Packet.r_u16(whoID);
 	Packet.r_u16(weaponID);
 	Packet.r_dir(dir);
@@ -112,6 +124,10 @@ void SHit::Read_Packet_Cont(NET_Packet Packet)
 	{
 		Packet.r_u32(SenderID);
 	}
+	// Optional SP-only trailer. Legacy packets remain valid with unknown ammo.
+	// MP/statistic layouts are unchanged (server rewrites statistic's last u32).
+	if (IsGameTypeSingle() && PACKET_TYPE==GE_HIT)
+		painter_hit_ammo_wire::read(Packet,ammo);
 }
 
 void SHit::Write_Packet_Cont(NET_Packet& Packet)
@@ -135,6 +151,8 @@ void SHit::Write_Packet_Cont(NET_Packet& Packet)
 	{
 		Packet.w_u32(SenderID);
 	}
+	if (IsGameTypeSingle() && PACKET_TYPE==GE_HIT)
+		painter_hit_ammo_wire::write(Packet,ammo);
 }
 
 void SHit::Write_Packet(NET_Packet& Packet)
@@ -149,6 +167,7 @@ void SHit::Write_Packet(NET_Packet& Packet)
 
 void SHit::ApplyScriptHit(CScriptHit* tLuaHit)
 {
+	painter_armor_penetration=tLuaHit->painter_armor_penetration_for(this);
 	power = tLuaHit->m_fPower;
 	impulse = tLuaHit->m_fImpulse;
 	dir = tLuaHit->m_tDirection;

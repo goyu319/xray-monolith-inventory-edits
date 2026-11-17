@@ -1,11 +1,17 @@
+// body_hit_outcomes_v1
 #include "stdafx.h"
 
 #include "CharacterPhysicsSupport.h"
+#include "weapon_grip_kinematics.h"
+#include "painter_arm_pose.h"
+#include "painter_voxel/PainterPieceContinuation.h"
+#include "painter_voxel/BodyHitOutcomes.h"
 #include "alife_space.h"
 #include "hit.h"
 #include "PHDestroyable.h"
 #include "PHMovementControl.h"
 #include "CustomMonster.h"
+#include "PhysicsSkeletonObject.h"
 
 
 #include "../Include/xrRender/KinematicsAnimated.h"
@@ -15,10 +21,27 @@
 #include "../xrphysics/iActivationShape.h"
 //#include "../xrphysics/Extendedgeom.h"
 #include "../xrphysics/geometry.h"
+#include "../xrphysics/dcylinder/dCylinder.h"
 //#include "../xrphysics/phdynamicdata.h"
 #include "../xrphysics/IPHCapture.h"
 //#include "../xrphysics/ICollideValidator.h"
 #include "../xrphysics/IPHWorld.h"
+#include "../xrphysics/PHWorld.h"
+#include "../include/xrapi/xrapi.h"
+class CGameMtlLibrary;
+IC CGameMtlLibrary& GMLibrary() { VERIFY(PGMLib); return *PGMLib; }
+#include "../xrphysics/PHElement.h"
+#include "../xrphysics/phvalide.h"
+#include "../xrphysics/PHShell.h"
+#include "level.h"
+#include "../xrphysics/PHJoint.h"
+#include "PainterSkinProxy.h"
+#include "../xrphysics/PHIsland.h"
+#include "../xrphysics/PHUpdateObject.h"
+#include "../xrphysics/console_vars.h"
+#include "../xrCore/LocatorAPI.h"
+#include <cstdio>
+#include <cmath>
 
 //#include "Physics.h"
 
@@ -46,6 +69,7 @@ extern	BOOL death_anim_debug;
 #endif // DEBUG
 
 #include "../xrEngine/device.h"
+#include "../Include/xrRender/PainterLogVerbose.h"
 
 #define USE_SMART_HITS
 #define USE_IK
@@ -53,6 +77,614 @@ extern	BOOL death_anim_debug;
 float IK_CALC_DIST = 100.f;
 float IK_ALWAYS_CALC_DIST = 20.f;
 float IK_CALC_SSA = 0.006f;
+
+extern int painter_ragdoll_capture_next;
+extern int painter_native_ragdoll; // console_commands.cpp (R35): 0 = Lua owns the joint motors, 1 = native controller
+extern int painter_sever_hold_ms; // PainterVoxelLive_impl.h (R63): longest frozen death-shell wait for a Painter sever
+namespace {
+CCharacterPhysicsSupport* painter_alive_reference_target = nullptr;
+u16 painter_alive_reference_target_id = u16(-1);
+u32 painter_alive_reference_armed_at = 0;
+}
+
+namespace {
+// Passive diagnostic. This object is enrolled after the shell has been built
+// and samples after physics steps; it never applies forces or changes settings.
+class CRagdollShellCapture : public CPHUpdateObject
+{
+    static CRagdollShellCapture* active_capture_;
+    CPhysicsShell* shell_ = nullptr;
+    IKinematics* reference_kinematics_ = nullptr;
+    FILE* file_ = nullptr;
+    unsigned step_ = 0;
+    xr_vector<float> previous_angles_;
+    xr_vector<u8> previous_angle_valid_;
+    xr_vector<CPhysicsElement*> original_bodies_;
+    xr_vector<CPhysicsJoint*> original_joints_;
+    bool invalid_numeric_ = false;
+    bool manual_request_ = false;
+    u32 manual_started_tc_ = 0;
+    static const unsigned trace_steps_ = 16;
+    static const unsigned manual_contact_limit_ = 4096;
+    static const long manual_file_limit_ = 16L * 1024L * 1024L;
+
+    void number(FILE* f, double v)
+    {
+        if (std::isfinite(v)) fprintf(f, "%.9g", v);
+        else { fputs("null", f); invalid_numeric_ = true; }
+    }
+    void vec(FILE* f, const dReal* v)
+    {
+        fputc('[',f); number(f,v[0]); fputc(',',f); number(f,v[1]); fputc(',',f); number(f,v[2]); fputc(']',f);
+    }
+    void vec(FILE* f, const Fvector& v)
+    {
+        fputc('[',f); number(f,v.x); fputc(',',f); number(f,v.y); fputc(',',f); number(f,v.z); fputc(']',f);
+    }
+    void frame(FILE* f, const Fmatrix& m)
+    {
+        fputc('[',f); vec(f,m.i); fputc(',',f); vec(f,m.j); fputc(',',f); vec(f,m.k); fputc(',',f); vec(f,m.c); fputc(']',f);
+    }
+    void ode_rotation(FILE* f, const dReal* m)
+    {
+        fputc('[',f);
+        for (int row=0;row<3;++row) {
+            if (row) fputc(',',f); fputc('[',f);
+            for (int col=0;col<3;++col) { if (col) fputc(',',f); number(f,m[row*4+col]); }
+            fputc(']',f);
+        }
+        fputc(']',f);
+    }
+    static void name(FILE* f, LPCSTR s)
+    {
+        fputc('"', f);
+        if (s) for (const unsigned char* p = reinterpret_cast<const unsigned char*>(s); *p; ++p)
+        {
+            if (*p == '"' || *p == '\\') fputc('\\', f);
+            if (*p >= 32 && *p < 127) fputc(*p, f);
+            else fprintf(f, "\\u%04x", unsigned(*p));
+        }
+        fputc('"', f);
+    }
+    static const char* joint_type(CPhysicsJoint::enumType t)
+    {
+        switch (t) {
+        case CPhysicsJoint::ball: return "ball";
+        case CPhysicsJoint::hinge: return "hinge";
+        case CPhysicsJoint::hinge2: return "hinge2";
+        case CPhysicsJoint::full_control: return "full_control";
+        case CPhysicsJoint::slider: return "slider";
+        default: return "unknown";
+        }
+    }
+    static double joint_param(CPHJoint* j, int axis, int param)
+    {
+        const int p = param + axis * dParamGroup;
+        switch (j->eType) {
+        case CPhysicsJoint::full_control: return j->GetDJoint1() ? dJointGetAMotorParam(j->GetDJoint1(), p) : 0.0;
+        case CPhysicsJoint::hinge: return j->GetDJoint() ? dJointGetHingeParam(j->GetDJoint(), p) : 0.0;
+        case CPhysicsJoint::hinge2: return j->GetDJoint() ? dJointGetHinge2Param(j->GetDJoint(), p) : 0.0;
+        case CPhysicsJoint::slider: return j->GetDJoint() ? dJointGetSliderParam(j->GetDJoint(), p) : 0.0;
+        default: return 0.0;
+        }
+    }
+    static bool valid_body_pose(CPHElement* element)
+    {
+        const dBodyID body = element->get_body();
+        if (!body) return false;
+        const dReal* values[] = {dBodyGetPosition(body),dBodyGetQuaternion(body),dBodyGetLinearVel(body),dBodyGetAngularVel(body)};
+        const int sizes[] = {3,4,3,3};
+        for (int group=0;group<4;++group)
+            for (int i=0;i<sizes[group];++i)
+                if (!std::isfinite(double(values[group][i]))) return false;
+        return true;
+    }
+    void body_state(CPHElement* e, bool static_data, bool pre_solver = false)
+    {
+        dBodyID body = e->get_body();
+        Fmatrix origin; e->GetGlobalTransformDynamic(&origin);
+        const dReal* p = dBodyGetPosition(body);
+        const dReal* q = dBodyGetQuaternion(body);
+        const dReal* v = dBodyGetLinearVel(body);
+        const dReal* w = dBodyGetAngularVel(body);
+        fprintf(file_, "{\"bone_id\":%u,\"ode_com_world\":", unsigned(e->m_SelfID)); vec(file_, p);
+        fprintf(file_, ",\"ode_quaternion_wxyz\":[");
+        for (int i=0;i<4;++i) { if (i) fputc(',',file_); number(file_,q[i]); }
+        fprintf(file_, "],\"linear_velocity\":"); vec(file_, v);
+        fprintf(file_, ",\"angular_velocity\":"); vec(file_, w);
+        fprintf(file_, ",\"ode_body_enabled\":%s,\"element_enabled\":%s",
+            dBodyIsEnabled(body) ? "true" : "false", e->isEnabled() ? "true" : "false");
+        const dxBody* ode_body = static_cast<const dxBody*>(body);
+        fprintf(file_, ",\"ode_body_flags\":%d,\"finite_rot_axis\":",ode_body->flags);
+        vec(file_,ode_body->finite_rot_axis);
+        if (pre_solver) {
+            fprintf(file_, ",\"force\":"); vec(file_,dBodyGetForce(body));
+            fprintf(file_, ",\"torque\":"); vec(file_,dBodyGetTorque(body));
+        }
+        fprintf(file_, ",\"element_frame_world_rows_ijkc\":"); frame(file_, origin);
+        if (static_data) {
+            dMass mass; dBodyGetMass(body, &mass);
+            fprintf(file_, ",\"mass\":"); number(file_,mass.mass);
+            fprintf(file_, ",\"mass_com_local\":"); vec(file_, mass.c);
+            fprintf(file_, ",\"inertia_ode_body_rows\":[");
+            for (int row=0;row<3;++row) {
+                if (row) fputc(',',file_); fputc('[',file_);
+                for (int col=0;col<3;++col) { if (col) fputc(',',file_); number(file_,mass.I[row*4+col]); }
+                fputc(']',file_);
+            }
+            fputc(']',file_);
+            fprintf(file_, ",\"shapes\":[");
+            for (u16 gidx=0; gidx<e->numberOfGeoms(); ++gidx) {
+                CODEGeom* g = e->geometry(gidx);
+                if (gidx) fputc(',', file_);
+                Fmatrix local; g->get_local_form(local);
+                fprintf(file_, "{\"bone_id\":%u,\"element_frame_rows_ijkc\":", unsigned(g->bone_id())); frame(file_, local);
+                IKinematics* source_k = reference_kinematics_ ? reference_kinematics_ : shell_->PKinematics();
+                if (source_k) {
+                    const IBoneData& bone = source_k->GetBoneData(g->bone_id());
+                    fprintf(file_, ",\"source_bone_shape_flags\":%u,\"source_game_material_id\":%u,\"source_bone_mass\":",
+                        unsigned(bone.get_shape().flags.flags), unsigned(bone.get_game_mtl_idx()));
+                    number(file_,bone.get_mass()); fprintf(file_, ",\"source_bone_com\":");
+                    vec(file_, bone.get_center_of_mass());
+                }
+                const int wrapper_cls = dGeomGetClass(g->geometry_transform());
+                const int cls = dGeomGetClass(g->geom());
+                fprintf(file_, ",\"ode_wrapper_class\":%d,\"ode_primitive_class\":%d", wrapper_cls, cls);
+                fprintf(file_, ",\"ode_wrapper_world_position\":"); vec(file_,dGeomGetPosition(g->geometry_transform()));
+                fprintf(file_, ",\"ode_wrapper_world_rotation_rows\":"); ode_rotation(file_,dGeomGetRotation(g->geometry_transform()));
+                fprintf(file_, ",\"ode_primitive_in_wrapper_position\":"); vec(file_,dGeomGetPosition(g->geom()));
+                fprintf(file_, ",\"ode_primitive_in_wrapper_rotation_rows\":"); ode_rotation(file_,dGeomGetRotation(g->geom()));
+                if (cls == dBoxClass) {
+                    Fvector half; static_cast<CBoxGeom*>(g)->get_size(half);
+                    fprintf(file_, ",\"type\":\"box\",\"half_size\":"); vec(file_, half);
+                } else if (cls == dSphereClass) {
+                    fprintf(file_, ",\"type\":\"sphere\",\"radius\":"); number(file_,static_cast<CSphereGeom*>(g)->radius());
+                } else if (cls == dCylinderClassUser) {
+                    CCylinderGeom* c = static_cast<CCylinderGeom*>(g);
+                    fprintf(file_, ",\"type\":\"cylinder\",\"radius\":"); number(file_,c->radius());
+                    fprintf(file_, ",\"height\":"); number(file_,c->height());
+                } else fprintf(file_, ",\"type\":\"other\",\"ode_class\":%d", cls);
+                fputc('}', file_);
+            }
+            fputc(']', file_);
+        }
+        fputc('}', file_);
+    }
+    void joint_state(CPHJoint* j, bool static_data, u16 joint_index, float elapsed_step)
+    {
+        const u16 source_axes = static_cast<CPhysicsJoint*>(j)->GetAxesNumber();
+        // full_control's constructor also appends two slider metadata axes.
+        // ODE has only three AMotor axes: querying phantom axes reads beyond
+        // angle[3] and a stride-three cache would overwrite the next joint.
+        const u16 physical_axes = source_axes > 3 ? 3 : source_axes;
+        fprintf(file_, "{\"bone_id\":%u,\"type\":\"%s\",\"parent_bone_id\":%u,\"child_bone_id\":%u,\"source_axis_count\":%u,\"physical_axis_count\":%u,\"rate_contract\":\"immediate_solver_delta_v2\",\"axes\":[",
+            unsigned(j->BoneID()), joint_type(j->eType),
+            j->PFirstElement() ? unsigned(j->PFirstElement()->m_SelfID) : 65535u,
+            j->PSecondElement() ? unsigned(j->PSecondElement()->m_SelfID) : 65535u,
+            unsigned(source_axes), unsigned(physical_axes));
+        for (u16 a=0; a<physical_axes; ++a) {
+            if (a) fputc(',', file_);
+            Fvector dir; j->GetAxisDirDynamic(a, dir);
+            fprintf(file_, "{\"index\":%u,\"direction_world\":", unsigned(a)); vec(file_, dir);
+            const float angle = j->GetAxisAngle(a);
+            const unsigned slot = unsigned(joint_index)*3 + a;
+            fprintf(file_, ",\"angle\":"); number(file_,angle);
+            fprintf(file_, ",\"rate\":");
+            if (!static_data && elapsed_step > 0.f && slot < previous_angle_valid_.size() && previous_angle_valid_[slot]) {
+                float delta = angle - previous_angles_[slot];
+                if (j->eType != CPhysicsJoint::slider) {
+                    while (delta > PI) delta -= PI_MUL_2;
+                    while (delta < -PI) delta += PI_MUL_2;
+                }
+                number(file_,double(delta / elapsed_step));
+            } else fputs("null",file_);
+            if (slot < previous_angle_valid_.size()) { previous_angles_[slot]=angle; previous_angle_valid_[slot]=1; }
+            if (static_data) {
+                float lo,hi; j->GetLimits(lo,hi,a);
+                fprintf(file_, ",\"source_low\":"); number(file_,lo);
+                fprintf(file_, ",\"source_high\":"); number(file_,hi);
+            }
+            if (j->eType != CPhysicsJoint::ball) {
+                fprintf(file_, ",\"ode_low\":"); number(file_,joint_param(j,a,dParamLoStop));
+                fprintf(file_, ",\"ode_high\":"); number(file_,joint_param(j,a,dParamHiStop));
+                fprintf(file_, ",\"ode_cfm\":"); number(file_,joint_param(j,a,dParamCFM));
+                fprintf(file_, ",\"ode_stop_erp\":"); number(file_,joint_param(j,a,dParamStopERP));
+                fprintf(file_, ",\"ode_stop_cfm\":"); number(file_,joint_param(j,a,dParamStopCFM));
+                fprintf(file_, ",\"ode_fmax\":"); number(file_,joint_param(j,a,dParamFMax));
+                fprintf(file_, ",\"ode_vel\":"); number(file_,joint_param(j,a,dParamVel));
+            }
+            fputc('}', file_);
+        }
+        fprintf(file_, "]");
+        if (static_data) {
+            if (j->eType != CPhysicsJoint::slider) {
+                Fvector anchor; j->GetAnchorDynamic(anchor);
+                fprintf(file_, ",\"anchor_world\":"); vec(file_, anchor);
+            }
+            if ((j->eType == CPhysicsJoint::ball || j->eType == CPhysicsJoint::full_control) && j->GetDJoint()) {
+                const dxJointBall* ball = static_cast<const dxJointBall*>(j->GetDJoint());
+                fprintf(file_, ",\"ball_local_anchor_parent\":"); vec(file_,ball->anchor1);
+                fprintf(file_, ",\"ball_local_anchor_child\":"); vec(file_,ball->anchor2);
+            }
+            if (j->eType == CPhysicsJoint::full_control && j->GetDJoint1()) {
+                const dxJointAMotor* m = static_cast<const dxJointAMotor*>(j->GetDJoint1());
+                fprintf(file_, ",\"amotor\":{\"mode\":%d,\"num_axes\":%d,\"rel\":[%d,%d,%d],\"axis\":[",
+                    m->mode,m->num,m->rel[0],m->rel[1],m->rel[2]);
+                for (int a=0;a<3;++a) { if (a) fputc(',',file_); vec(file_,m->axis[a]); }
+                fprintf(file_, "],\"reference1\":"); vec(file_,m->reference1);
+                fprintf(file_, ",\"reference2\":"); vec(file_,m->reference2);
+                fprintf(file_, "}");
+            }
+            if (j->eType == CPhysicsJoint::hinge && j->GetDJoint()) {
+                const dxJointHinge* h = static_cast<const dxJointHinge*>(j->GetDJoint());
+                fprintf(file_, ",\"hinge\":{\"anchor1\":"); vec(file_,h->anchor1);
+                fprintf(file_, ",\"anchor2\":"); vec(file_,h->anchor2);
+                fprintf(file_, ",\"axis1\":"); vec(file_,h->axis1);
+                fprintf(file_, ",\"axis2\":"); vec(file_,h->axis2);
+                fprintf(file_, ",\"qrel\":[");
+                for (int k=0;k<4;++k) { if (k) fputc(',',file_); number(file_,h->qrel[k]); }
+                fprintf(file_, "],\"limot\":[");
+                const double limot[] = {h->limot.vel,h->limot.fmax,h->limot.lostop,h->limot.histop,
+                    h->limot.fudge_factor,h->limot.normal_cfm,h->limot.stop_erp,h->limot.stop_cfm,h->limot.bounce};
+                for (int k=0;k<9;++k) { if (k) fputc(',',file_); number(file_,limot[k]); }
+                fprintf(file_, "],\"joint_flags\":%d}",h->flags);
+            }
+        }
+        fputc('}', file_);
+    }
+public:
+    static void physics_step_callback(CPHIsland* island, bool after_solver, bool exact_solver)
+    {
+        if (active_capture_) active_capture_->physics_step(island, after_solver, exact_solver);
+    }
+    int body_index(dBodyID body) const
+    {
+        if (!body) return -1;
+        for (u16 i=0;i<shell_->get_ElementsNumber();++i)
+            if (static_cast<CPHElement*>(shell_->get_ElementByStoreOrder(i))->get_body() == body) return int(i);
+        return -2; // Body from another shell in a merged island.
+    }
+    void physics_step(CPHIsland* island, bool after_solver, bool exact_solver)
+    {
+        if (!shell_ || !file_ || !island) return;
+        if (shell_->get_ElementsNumber() != original_bodies_.size() || shell_->get_JointsNumber() != original_joints_.size()) {
+            stop(nullptr,"topology_changed"); return;
+        }
+        for (u16 i=0;i<shell_->get_ElementsNumber();++i)
+            if (shell_->get_ElementByStoreOrder(i) != original_bodies_[i]) { stop(nullptr,"topology_changed"); return; }
+        for (u16 i=0;i<shell_->get_JointsNumber();++i)
+            if (shell_->get_JointByStoreOrder(i) != original_joints_[i]) { stop(nullptr,"topology_changed"); return; }
+        unsigned present = 0;
+        bool contains_root = false;
+        for (u16 i=0;i<shell_->get_ElementsNumber();++i) {
+            const dBodyID target = static_cast<CPHElement*>(original_bodies_[i])->get_body();
+            bool found = false;
+            for (dxBody* b=island->firstbody; b; b=static_cast<dxBody*>(b->next))
+                if (b == target) { found=true; break; }
+            if (i == 0) contains_root=found;
+            if (found) ++present;
+        }
+        if (!contains_root) return; // An unrelated island is stepping.
+        if (present != shell_->get_ElementsNumber()) { stop(nullptr,"split_island"); return; }
+        for (u16 i=0;i<shell_->get_ElementsNumber();++i)
+            if (!valid_body_pose(static_cast<CPHElement*>(original_bodies_[i]))) { stop(nullptr,"invalid_numeric"); return; }
+        const unsigned external = island->nb > shell_->get_ElementsNumber() ? unsigned(island->nb - shell_->get_ElementsNumber()) : 0u;
+        fprintf(file_, "{\"type\":\"%s\",\"index\":%u,\"frame\":%u,\"t\":%u,\"tc\":%u,\"shell_enabled\":%s,\"dt\":",
+            after_solver ? "post_step" : "pre_step",step_,Device.dwFrame,Device.dwTimeGlobal,Device.dwTimeContinual,
+            shell_->isEnabled() ? "true" : "false");
+        number(file_,fixed_step);
+        fprintf(file_, ",\"solver\":\"%s\",\"island_body_count\":%d,\"island_joint_count\":%d,\"external_body_count\":%u",
+            exact_solver ? "exact" : "quickstep",island->nb,island->nj,external);
+        if (!after_solver) {
+            dVector3 gravity; dWorldGetGravity(island->DWorld(),gravity);
+            fprintf(file_, ",\"world\":{\"gravity\":"); vec(file_,gravity);
+            fprintf(file_, ",\"erp\":"); number(file_,dWorldGetERP(island->DWorld()));
+            fprintf(file_, ",\"cfm\":"); number(file_,dWorldGetCFM(island->DWorld()));
+            fprintf(file_, ",\"quickstep_iterations\":%d}",dWorldGetQuickStepNumIterations(island->DWorld()));
+        }
+        fprintf(file_, ",\"bodies\":[");
+        for (u16 i=0;i<shell_->get_ElementsNumber();++i) {
+            if (i) fputc(',',file_);
+            body_state(static_cast<CPHElement*>(shell_->get_ElementByStoreOrder(i)),false,!after_solver);
+        }
+        fprintf(file_, "],\"joints\":[");
+        for (u16 i=0;i<shell_->get_JointsNumber();++i) {
+            if (i) fputc(',',file_);
+            joint_state(static_cast<CPHJoint*>(shell_->get_JointByStoreOrder(i)),false,i,after_solver ? fixed_step : 0.f);
+        }
+        fputc(']',file_);
+        if (!after_solver) {
+            fprintf(file_, ",\"contacts\":[");
+            bool first = true;
+            unsigned contact_count = 0;
+            bool contacts_truncated = false;
+            for (dxJoint* joint=island->firstjoint; joint; joint=static_cast<dxJoint*>(joint->next)) {
+                if (dJointGetType(joint) != dJointTypeContact) continue;
+                const int body1_index = body_index(joint->node[0].body);
+                const int body2_index = body_index(joint->node[1].body);
+                if (manual_request_ && body1_index < 0 && body2_index < 0) continue;
+                if (manual_request_ && contact_count >= manual_contact_limit_) { contacts_truncated=true; break; }
+                ++contact_count;
+                const dxJointContact* c = static_cast<const dxJointContact*>(joint);
+                const dContact& contact = c->contact;
+                if (!first) fputc(',',file_); first=false;
+                fprintf(file_, "{\"body1_index\":%d,\"body2_index\":%d,\"joint_flags\":%d,\"reverse\":%s,\"special\":%s,\"position\":",
+                    body1_index,body2_index,
+                    joint->flags,(joint->flags & dJOINT_REVERSE) ? "true" : "false",
+                    PHIslandContactIsSpecial(joint) ? "true" : "false");
+                vec(file_,contact.geom.pos); fprintf(file_, ",\"normal\":"); vec(file_,contact.geom.normal);
+                fprintf(file_, ",\"depth\":"); number(file_,contact.geom.depth);
+                fprintf(file_, ",\"geom1_class\":%d,\"geom2_class\":%d,\"fdir1\":",
+                    contact.geom.g1 ? dGeomGetClass(contact.geom.g1) : -1,
+                    contact.geom.g2 ? dGeomGetClass(contact.geom.g2) : -1);
+                if (contact.surface.mode & dContactFDir1) vec(file_,contact.fdir1);
+                else fputs("[0,0,0]",file_);
+                fprintf(file_, ",\"surface\":{\"mode\":%d,\"mu\":",contact.surface.mode); number(file_,contact.surface.mu);
+                fprintf(file_, ",\"mu2\":"); number(file_,(contact.surface.mode & dContactMu2) ? contact.surface.mu2 : 0);
+                fprintf(file_, ",\"bounce\":"); number(file_,(contact.surface.mode & dContactBounce) ? contact.surface.bounce : 0);
+                fprintf(file_, ",\"bounce_vel\":"); number(file_,(contact.surface.mode & dContactBounce) ? contact.surface.bounce_vel : 0);
+                fprintf(file_, ",\"soft_erp\":"); number(file_,(contact.surface.mode & dContactSoftERP) ? contact.surface.soft_erp : 0);
+                fprintf(file_, ",\"soft_cfm\":"); number(file_,(contact.surface.mode & dContactSoftCFM) ? contact.surface.soft_cfm : 0);
+                fprintf(file_, ",\"motion1\":"); number(file_,(contact.surface.mode & dContactMotion1) ? contact.surface.motion1 : 0);
+                fprintf(file_, ",\"motion2\":"); number(file_,(contact.surface.mode & dContactMotion2) ? contact.surface.motion2 : 0);
+                fprintf(file_, ",\"slip1\":"); number(file_,(contact.surface.mode & dContactSlip1) ? contact.surface.slip1 : 0);
+                fprintf(file_, ",\"slip2\":"); number(file_,(contact.surface.mode & dContactSlip2) ? contact.surface.slip2 : 0);
+                fprintf(file_, "}}");
+            }
+            fputc(']',file_);
+            if (manual_request_) fprintf(file_, ",\"contact_count\":%u,\"contacts_truncated\":%s",
+                contact_count, contacts_truncated ? "true" : "false");
+        }
+        fprintf(file_, "}\n"); fflush(file_);
+        if (invalid_numeric_) { stop(nullptr,"invalid_numeric"); return; }
+        if (manual_request_ && ftell(file_) >= manual_file_limit_) {
+            if (after_solver) ++step_; // count the completed post-step record above
+            stop(nullptr,"size_limit"); return;
+        }
+        if (after_solver && ++step_ >= trace_steps_) stop(nullptr,"complete");
+    }
+    void stop(CPhysicsShell* only = nullptr, const char* reason = "stopped")
+    {
+        if (only && only != shell_) return;
+        if (IsActive()) Deactivate();
+        if (active_capture_ == this) {
+            // Do not erase a hook another diagnostic installed after this one.
+            if (g_ph_island_step_capture == &CRagdollShellCapture::physics_step_callback)
+                g_ph_island_step_capture=nullptr;
+            active_capture_=nullptr;
+        }
+        if (file_) { fprintf(file_, "{\"type\":\"end\",\"steps\":%u,\"frame\":%u,\"t\":%u,\"tc\":%u,\"reason\":\"%s\"}\n",
+            step_,Device.dwFrame,Device.dwTimeGlobal,Device.dwTimeContinual,reason); fclose(file_); file_=nullptr; }
+        shell_=nullptr; step_=0;
+        manual_request_=false; manual_started_tc_=0;
+        reference_kinematics_=nullptr;
+        previous_angles_.clear(); previous_angle_valid_.clear();
+        original_bodies_.clear(); original_joints_.clear();
+        invalid_numeric_=false;
+    }
+    bool manual_available() const
+    {
+        return !file_ && !active_capture_ && !painter_alive_reference_target &&
+            !painter_ragdoll_capture_next && !g_ph_island_step_capture;
+    }
+    void start(CPhysicsShell* shell, CPhysicsShellHolder& entity, u16 requested_id = u16(-1))
+    {
+        stop();
+        if (!shell || !shell->PIsland()) return;
+        string_path path, filename;
+        xr_sprintf(filename, "painter_ragdoll_capture_%u_%u.jsonl", Device.dwTimeGlobal, unsigned(entity.ID()));
+        FS.update_path(path, "$logs$", filename);
+        file_ = fopen(path, "wb");
+        if (!file_) { Msg("! painter ragdoll capture: cannot open %s", path); return; }
+        shell_=shell;
+        manual_request_=requested_id != u16(-1);
+        manual_started_tc_=Device.dwTimeContinual;
+        for (u16 i=0;i<shell->get_ElementsNumber();++i) original_bodies_.push_back(shell->get_ElementByStoreOrder(i));
+        for (u16 i=0;i<shell->get_JointsNumber();++i) original_joints_.push_back(shell->get_JointByStoreOrder(i));
+        previous_angles_.assign(unsigned(shell->get_JointsNumber())*3,0.f);
+        previous_angle_valid_.assign(unsigned(shell->get_JointsNumber())*3,0);
+        dWorldID world = shell->PIsland()->DWorld();
+        dVector3 gravity; dWorldGetGravity(world,gravity);
+        fprintf(file_, "{\"type\":\"header\",\"schema\":1,\"source\":\"live-game\",\"observation_scope\":\"immediate pre/post solver\",\"entity_id\":%u,\"resolved_entity_id\":%u,\"requested_entity_id\":",
+            unsigned(entity.ID()),unsigned(entity.ID()));
+        if (manual_request_) fprintf(file_, "%u",unsigned(requested_id)); else fputs("null",file_);
+        fprintf(file_, ",\"frame\":%u,\"t\":%u,\"tc\":%u,\"contact_scope\":\"%s\",\"manual_contact_limit_per_step\":%u,\"manual_file_limit_bytes\":%ld,\"manual_time_limit_ms\":%u,\"section\":",
+            Device.dwFrame,Device.dwTimeGlobal,Device.dwTimeContinual,
+            manual_request_ ? "target shell contacts only" : "merged island contacts",
+            manual_request_ ? manual_contact_limit_ : 0u,
+            manual_request_ ? manual_file_limit_ : 0L, manual_request_ ? 2000u : 0u);
+        name(file_, entity.cNameSect().c_str());
+        fprintf(file_, ",\"visual\":"); name(file_, entity.cNameVisual().c_str());
+        fprintf(file_, ",\"body_count\":%u,\"joint_count\":%u,\"fixed_step\":",
+            unsigned(shell->get_ElementsNumber()),unsigned(shell->get_JointsNumber()));
+        number(file_,fixed_step); fprintf(file_, ",\"ph_step_time\":"); number(file_,ph_console::ph_step_time);
+        fprintf(file_, ",\"gravity\":"); vec(file_,gravity);
+        fprintf(file_, ",\"world_erp\":"); number(file_,dWorldGetERP(world));
+        fprintf(file_, ",\"world_cfm\":"); number(file_,dWorldGetCFM(world));
+        fprintf(file_, ",\"quickstep_iterations\":%d,\"prefers_exact_integration\":%s,\"forces_exact_integration\":%s,\"trace_target_steps\":%u,\"unavailable\":[\"contact_impulses\",\"contact_material_pairs\"]}\n",
+            dWorldGetQuickStepNumIterations(world),
+            shell->PIsland()->PrefersExactIntegration() ? "true" : "false", shell->PIsland()->ForcesExactIntegration() ? "true" : "false", trace_steps_);
+        if (manual_request_ && ftell(file_) >= manual_file_limit_) { stop(nullptr,"size_limit"); return; }
+        IKinematics* k = shell->PKinematics();
+        for (u16 i=0;i<shell->get_ElementsNumber();++i)
+            if (!valid_body_pose(static_cast<CPHElement*>(original_bodies_[i]))) { stop(nullptr,"invalid_numeric"); return; }
+        for (u16 i=0;i<shell->get_ElementsNumber();++i) {
+            CPHElement* e = static_cast<CPHElement*>(shell->get_ElementByStoreOrder(i));
+            fprintf(file_, "{\"type\":\"body\",\"index\":%u,\"name\":",unsigned(i));
+            name(file_,k ? k->LL_BoneName_dbg(e->m_SelfID) : "");
+            fprintf(file_, ",\"data\":"); body_state(e,true); fprintf(file_, "}\n");
+            if (manual_request_ && ftell(file_) >= manual_file_limit_) { stop(nullptr,"size_limit"); return; }
+        }
+        for (u16 i=0;i<shell->get_JointsNumber();++i) {
+            CPHJoint* j = static_cast<CPHJoint*>(shell->get_JointByStoreOrder(i));
+            fprintf(file_, "{\"type\":\"joint\",\"index\":%u,\"name\":",unsigned(i));
+            name(file_,k ? k->LL_BoneName_dbg(j->BoneID()) : "");
+            fprintf(file_, ",\"data\":"); joint_state(j,true,i,0.f); fprintf(file_, "}\n");
+            if (manual_request_ && ftell(file_) >= manual_file_limit_) { stop(nullptr,"size_limit"); return; }
+        }
+        fflush(file_);
+        if (invalid_numeric_) { stop(nullptr,"invalid_numeric"); return; }
+        if (manual_request_ && ftell(file_) >= manual_file_limit_) { stop(nullptr,"size_limit"); return; }
+        active_capture_=this;
+        g_ph_island_step_capture=&CRagdollShellCapture::physics_step_callback;
+        Activate(); // Receive NetRelcase before the shell can be destroyed.
+        Msg("* painter ragdoll capture: %s", path);
+    }
+    // Static reference only. The shell is an unattached ghost; no solver hook,
+    // actor callback, world membership, or simulated standing is implied.
+    bool write_alive_reference(CPhysicsShell* shell, CEntityAlive& entity,
+        IKinematics* k, u16 animated_root_bone_id, u32 stable_frames, float movement_speed,
+        const Fvector& animated_root_world)
+    {
+        if (!shell || !k || file_ || active_capture_ || !shell->get_ElementsNumber()) return false;
+        string_path path, filename;
+        xr_sprintf(filename, "painter_alive_reference_%u_%u.jsonl", Device.dwTimeGlobal, unsigned(entity.ID()));
+        FS.update_path(path, "$logs$", filename);
+        file_ = fopen(path, "wb");
+        if (!file_) { Msg("! painter alive reference: cannot open %s", path); return false; }
+        shell_ = shell;
+        reference_kinematics_ = k;
+        previous_angles_.assign(unsigned(shell->get_JointsNumber())*3,0.f);
+        previous_angle_valid_.assign(unsigned(shell->get_JointsNumber())*3,0);
+        fprintf(file_, "{\"type\":\"header\",\"schema\":\"alive-shell-reference-v1\",\"source\":\"live-game-animation-plus-inactive-native-shell\",\"reference_only\":true,\"solver_steps\":0,\"entity_id\":%u,\"section\":", unsigned(entity.ID()));
+        name(file_,entity.cNameSect().c_str());
+        fprintf(file_, ",\"visual\":"); name(file_,entity.cNameVisual().c_str());
+        fprintf(file_, ",\"body_count\":%u,\"joint_count\":%u,\"frame\":%u,\"time_global_ms\":%u,\"stable_frames\":%u,\"movement_speed\":",
+            unsigned(shell->get_ElementsNumber()),unsigned(shell->get_JointsNumber()),Device.dwFrame,Device.dwTimeGlobal,stable_frames);
+        number(file_,movement_speed);
+        fprintf(file_, ",\"animated_root_bone_id\":%u,\"physics_root_bone_id\":%u,\"physics_root_body_bone_id\":%u,\"animated_root_bone_world\":",
+            unsigned(animated_root_bone_id),unsigned(k->LL_BoneID("bip01_pelvis")),
+            unsigned(static_cast<CPHElement*>(shell->get_ElementByStoreOrder(0))->m_SelfID)); vec(file_,animated_root_world);
+        CInventoryOwner* inventory_owner = smart_cast<CInventoryOwner*>(&entity);
+        PIItem active_item = inventory_owner ? inventory_owner->inventory().ActiveItem() : nullptr;
+        fprintf(file_, ",\"active_item_id\":");
+        if (active_item) fprintf(file_, "%u",unsigned(active_item->object().ID()));
+        else fprintf(file_, "null");
+        fprintf(file_, ",\"active_item_section\":");
+        if (active_item) name(file_,active_item->object().cNameSect().c_str());
+        else fprintf(file_, "null");
+        fprintf(file_, ",\"active_item_parent_is_entity\":%s,\"weapon_collision_in_ghost\":false,",
+            active_item && active_item->object().H_Parent()==&entity ? "true" : "false");
+        fprintf(file_, "\"joint_reference_provenance\":\"native bind-built joints retained while bodies follow current animation; local anchors and Euler/hinge references are not rebased\",\"body_velocity_provenance\":\"detached ghost starts with zero ODE body velocities; not measured animated bone velocities\",\"actuator_provenance\":\"living character has no ragdoll actuator; death controller is phase-limited PD and must be evaluated separately\"}\n");
+        for (u16 i=0;i<shell->get_ElementsNumber();++i)
+            if (!valid_body_pose(static_cast<CPHElement*>(shell->get_ElementByStoreOrder(i)))) {
+                stop(nullptr,"invalid_numeric"); return false;
+            }
+        for (u16 i=0;i<shell->get_ElementsNumber();++i) {
+            CPHElement* e = static_cast<CPHElement*>(shell->get_ElementByStoreOrder(i));
+            fprintf(file_, "{\"type\":\"body\",\"index\":%u,\"name\":",unsigned(i));
+            name(file_,k->LL_BoneName_dbg(e->m_SelfID));
+            fprintf(file_, ",\"data\":"); body_state(e,true); fprintf(file_, "}\n");
+        }
+        for (u16 i=0;i<shell->get_JointsNumber();++i) {
+            CPHJoint* j = static_cast<CPHJoint*>(shell->get_JointByStoreOrder(i));
+            fprintf(file_, "{\"type\":\"joint\",\"index\":%u,\"name\":",unsigned(i));
+            name(file_,k->LL_BoneName_dbg(j->BoneID()));
+            fprintf(file_, ",\"data\":"); joint_state(j,true,i,0.f); fprintf(file_, "}\n");
+        }
+        const bool success = !invalid_numeric_;
+        stop(nullptr,success ? "reference_complete" : "invalid_numeric");
+        Msg("* painter alive reference: %s (%s)",path,success ? "complete" : "invalid numeric");
+        return success;
+    }
+    void PhDataUpdate(float) override
+    {
+        // Global update enrollment also expires a manual capture whose target sleeps.
+        // A paused/frozen world checks this deadline when physics resumes.
+        if (manual_request_ && file_ && u32(Device.dwTimeContinual-manual_started_tc_) >= 2000u)
+            stop(nullptr,step_ ? "time_limit" : "no_target_steps");
+    }
+    void PhTune(float) override {}
+    void NetRelcase(CPhysicsShell* s) override { stop(s,"shell_destroyed"); }
+} ragdoll_shell_capture;
+CRagdollShellCapture* CRagdollShellCapture::active_capture_ = nullptr;
+
+// One transient request, resolved only at the joined main-thread barrier. The
+// stored object pointer is compared for equality only, never dereferenced later.
+// This check does not establish an object generation or rule out address reuse.
+class CRequestedRagdollCapture
+{
+    bool armed_ = false;
+    u16 requested_id_ = u16(-1);
+    const CObject* requested_object_ = nullptr;
+    const void* requested_level_ = nullptr;
+    u32 requested_tc_ = 0;
+public:
+    bool Queue(u16 object_id)
+    {
+        if (armed_ || object_id == u16(-1) || !g_pGameLevel || !Level().game || Device.Paused()) return false;
+        CObject* object = Level().Objects.net_Find(object_id);
+        if (!object || object->getDestroy()) return false;
+        xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
+        Device.seqParallelBeforRender.push_back(xr_make_delegate(this,&CRequestedRagdollCapture::Apply));
+        armed_=true; requested_id_=object_id; requested_object_=object;
+        requested_level_=g_pGameLevel; requested_tc_=Device.dwTimeContinual;
+        Msg("* painter ragdoll capture queued: requested_id=%u frame=%u t=%u tc=%u",
+            unsigned(object_id),Device.dwFrame,Device.dwTimeGlobal,Device.dwTimeContinual);
+        return true;
+    }
+    void CancelPending()
+    {
+        armed_=false; requested_id_=u16(-1); requested_object_=nullptr; requested_level_=nullptr; requested_tc_=0;
+        const auto callback = xr_make_delegate(this,&CRequestedRagdollCapture::Apply);
+        xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
+        for (auto& entry : Device.seqParallelBeforRender)
+            if (entry == callback) entry.clear(); // do not erase while this queue drains
+        Msg("* painter ragdoll capture: pending request cleared");
+    }
+    void Apply()
+    {
+        if (!armed_) return;
+        const u16 requested_id=requested_id_;
+        const CObject* requested_object=requested_object_;
+        const void* requested_level=requested_level_;
+        const u32 requested_tc=requested_tc_;
+        armed_=false; requested_id_=u16(-1); requested_object_=nullptr; requested_level_=nullptr; requested_tc_=0;
+        if (!Device.IsGeometryPublishBarrier() || !g_pGameLevel || requested_level != g_pGameLevel || !Level().game ||
+            Device.Paused() || !physics_world() || physics_world()->Processing() ||
+            static_cast<CPHWorld*>(physics_world())->IsFreezed() ||
+            u32(Device.dwTimeContinual-requested_tc) >= 1000u || !ragdoll_shell_capture.manual_available()) {
+            Msg("! painter ragdoll capture rejected: requested_id=%u reason=barrier_expired_or_capture_busy",unsigned(requested_id));
+            return;
+        }
+        CObject* object=Level().Objects.net_Find(requested_id);
+        if (!object || object != requested_object || object->getDestroy()) {
+            Msg("! painter ragdoll capture rejected: requested_id=%u reason=current_object_changed",unsigned(requested_id));
+            return;
+        }
+        CAI_Stalker* npc=smart_cast<CAI_Stalker*>(object);
+        CPhysicsSkeletonObject* piece=smart_cast<CPhysicsSkeletonObject*>(object);
+        CPhysicsShellHolder* holder=smart_cast<CPhysicsShellHolder*>(object);
+        if (!holder || (!piece && (!npc || npc->g_Alive()))) {
+            Msg("! painter ragdoll capture rejected: requested_id=%u reason=target_not_dead_stalker_or_piece",unsigned(requested_id));
+            return;
+        }
+        CPhysicsShell* shell=holder->PPhysicsShell();
+        if (!shell || !shell->get_ElementsNumber() || !shell->isActive() || !shell->isFullActive() ||
+            static_cast<CPHShell*>(shell)->IsFreezed() || !shell->PIsland()) {
+            Msg("! painter ragdoll capture rejected: requested_id=%u reason=shell_absent_frozen_or_inactive",unsigned(requested_id));
+            return;
+        }
+        IPhysicsShellHolder* expected_owner=static_cast<IPhysicsShellHolder*>(holder);
+        for (u16 i=0;i<shell->get_ElementsNumber();++i) {
+            CPhysicsElement* element=shell->get_ElementByStoreOrder(i);
+            if (!element || element->PhysicsRefObject()!=expected_owner) {
+                Msg("! painter ragdoll capture rejected: requested_id=%u reason=body_owner_mismatch",unsigned(requested_id));
+                return;
+            }
+            if (!element->isFullActive()) {
+                Msg("! painter ragdoll capture rejected: requested_id=%u reason=activating_body",unsigned(requested_id));
+                return;
+            }
+        }
+        // Sleeping is allowed: enabled state is observed without waking the shell.
+        ragdoll_shell_capture.start(shell,*holder,requested_id);
+    }
+} requested_ragdoll_capture;
+}
+
+bool painter_queue_ragdoll_capture(u16 object_id) { return requested_ragdoll_capture.Queue(object_id); }
+void painter_cancel_pending_ragdoll_capture() { requested_ragdoll_capture.CancelPending(); }
 
 //void  NodynamicsCollide( bool& do_colide, bool bo1, dContact& c, SGameMtl * /*material_1*/, SGameMtl * /*material_2*/ )
 //{
@@ -64,6 +696,177 @@ float IK_CALC_SSA = 0.006f;
 //}
 
 
+
+// Explicit geometry-only admission probe. The owned test launcher verifies the
+// exact GFY bytes under these hash aliases before launch. This is not a public
+// arbitrary-model admission API or a physical amputation implementation.
+void CCharacterPhysicsSupport::CancelPainterGeometryProbe()
+{
+    CancelPainterVoxelLive();
+    m_painter_runtime_cookie = 0;
+    m_painter_runtime_state = 0;
+    m_painter_geometry_pending = -1;
+    auto callback = xr_make_delegate(this, &CCharacterPhysicsSupport::ApplyPainterGeometryProbe);
+    xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
+    for (auto& entry : Device.seqParallelBeforRender)
+        if (entry == callback) entry.clear(); // never erase while the queue drains
+}
+
+bool CCharacterPhysicsSupport::QueuePainterGeometryProbe(u32 mode)
+{
+    if (mode > 4 || m_painter_geometry_pending >= 0 || m_eType != etStalker ||
+        m_EntityAlife.g_Alive() || m_EntityAlife.getDestroy() || !m_pPhysicsShell)
+        return false;
+    m_painter_geometry_pending = static_cast<int>(mode);
+    xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
+    Device.seqParallelBeforRender.push_back(
+        xr_make_delegate(this, &CCharacterPhysicsSupport::ApplyPainterGeometryProbe));
+    Msg("[butcher_geometry_native] id=%u mode=%u phase=queued geometry_only=true",
+        m_EntityAlife.ID(), mode);
+    return true;
+}
+
+void CCharacterPhysicsSupport::ApplyPainterGeometryProbe()
+{
+    const int mode = m_painter_geometry_pending;
+    m_painter_geometry_pending = -1;
+    if (mode < 0) return;
+    if (mode >= 100) { ApplyPainterRuntimeGeometryProbe(u32(mode - 100)); return; }
+    // This callback runs in the main-thread queue after previous workers have
+    // joined, before FrameMove starts new work. The queue owns our lifetime via
+    // explicit cancellation on net destroy, visual change and destruction.
+    if (m_eType != etStalker || m_EntityAlife.g_Alive() || m_EntityAlife.getDestroy() ||
+        !m_pPhysicsShell || !m_pPhysicsShell->isActive() || !physics_world() ||
+        physics_world()->Processing() || Device.Paused() ||
+        static_cast<CPHShell*>(m_pPhysicsShell)->IsFreezed())
+    {
+        Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=owner_shell_or_barrier", m_EntityAlife.ID(), mode);
+        return;
+    }
+    for (u16 i = 0; i < m_pPhysicsShell->get_ElementsNumber(); ++i)
+        if (!m_pPhysicsShell->get_ElementByStoreOrder(i)->isFullActive())
+        {
+            Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=activating_body", m_EntityAlife.ID(), mode);
+            return;
+        }
+    IKinematics* k = smart_cast<IKinematics*>(m_EntityAlife.Visual());
+    if (!k || !k->LL_BoneCount() || !m_weapon_geoms.empty() || m_weapon_attach_bone)
+    {
+        Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=rig_or_weapon", m_EntityAlife.ID(), mode);
+        return;
+    }
+    const char* source_hand = "painter\\butcher_review\\gfy_sources\\4be67c0445cef074a61fabfabc76db1c5d0cd73f75486a09e15b197f3e714276";
+    const char* source_calf = "painter\\butcher_review\\gfy_sources\\99474d54c1dd24767d057f71e95ac6bbdcb2dae63fb04b0120708addf8c75aa8";
+    const char* actual_source = *m_EntityAlife.cNameVisual();
+    const bool is_hand = actual_source && !xr_strcmp(actual_source, source_hand);
+    const bool is_calf = actual_source && !xr_strcmp(actual_source, source_calf);
+    if ((!is_hand && !is_calf) || ((mode == 1 || mode == 3) && !is_hand) || ((mode == 2 || mode == 4) && !is_calf) ||
+        (mode == 0 && !m_painter_geometry_installed))
+    {
+        Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=source_or_state visual=%s",
+            m_EntityAlife.ID(), mode, actual_source ? actual_source : "<null>");
+        return;
+    }
+    // Both-arm diagnostics require the exact ordinary GFY rig and the
+    // successful pre-shell hide state. This does not transfer arm physics.
+    if (mode == 3 || mode == 4)
+    {
+        bool hidden = k->LL_BoneCount() == 47 &&
+            k->LL_BoneID("bip01_l_upperarm") == 21 && k->LL_BoneID("bip01_r_upperarm") == 34;
+        for (u16 i = 21; hidden && i <= 32; ++i) hidden = !k->LL_GetBoneVisible(i);
+        for (u16 i = 34; hidden && i <= 45; ++i) hidden = !k->LL_GetBoneVisible(i);
+        if (!hidden || m_pPhysicsShell->get_ElementsNumber() != 7 || m_pPhysicsShell->get_JointsNumber() != 6)
+        {
+            Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=both_arm_hide_or_shell", m_EntityAlife.ID(), mode);
+            return;
+        }
+    }
+    CPhysicsShell* shell = m_pPhysicsShell;
+    const void* bone_instances = &k->LL_GetBoneInstance(0);
+    const void* shared_rig = &k->LL_GetData(0);
+    const u64 visibility = k->LL_GetBonesVisible();
+    const u16 root = k->LL_GetBoneRoot();
+    xr_vector<CPhysicsElement*> bodies;
+    xr_vector<CPhysicsJoint*> joints;
+    for (u16 i = 0; i < shell->get_ElementsNumber(); ++i) bodies.push_back(shell->get_ElementByStoreOrder(i));
+    for (u16 i = 0; i < shell->get_JointsNumber(); ++i) joints.push_back(shell->get_JointByStoreOrder(i));
+    bool applied = false;
+    if (mode == 0)
+    {
+        k->LL_ClearGeometryVariant();
+        m_painter_geometry_installed = false;
+        applied = true;
+    }
+    else
+    {
+        LPCSTR donor_path = mode == 1 ? "painter\\butcher_native_v2\\neutral0a_body_closed_left_hand"
+            : mode == 2 ? "painter\\butcher_native_v2\\greh_body_closed_left_calf"
+            : mode == 3 ? "painter\\detached_arms_v1\\neutral_body_closed_both_arms"
+                        : "painter\\detached_arms_v1\\coat_body_closed_both_arms";
+        string_path resource;
+        xr_strconcat(resource, donor_path, ".ogf");
+        if (!FS.exist("$game_meshes$", resource))
+        {
+            Msg("[butcher_geometry_native] id=%u mode=%d phase=rejected reason=donor_missing", m_EntityAlife.ID(), mode);
+            return;
+        }
+        IRenderVisual* staged = ::Render->model_Create(donor_path);
+        applied = staged && k->LL_InstallGeometryVariant(staged);
+        if (staged) ::Render->model_Delete(staged);
+        if (applied) m_painter_geometry_installed = true;
+    }
+    bool identities = m_pPhysicsShell == shell && smart_cast<IKinematics*>(m_EntityAlife.Visual()) == k &&
+        &k->LL_GetBoneInstance(0) == bone_instances && &k->LL_GetData(0) == shared_rig &&
+        k->LL_GetBonesVisible() == visibility && k->LL_GetBoneRoot() == root &&
+        shell->get_ElementsNumber() == bodies.size() && shell->get_JointsNumber() == joints.size();
+    for (u16 i = 0; identities && i < bodies.size(); ++i) identities = shell->get_ElementByStoreOrder(i) == bodies[i];
+    for (u16 i = 0; identities && i < joints.size(); ++i) identities = shell->get_JointByStoreOrder(i) == joints[i];
+    Msg("[butcher_geometry_native] id=%u mode=%d phase=%s geometry_only=true identities=%s bodies=%u joints=%u bone_instances=%p shared_rig=%p shell=%p frame=%u physics_processing=%d",
+        m_EntityAlife.ID(), mode, applied ? (mode == 0 ? "restored" : "committed") : "rejected_rig_contract",
+        identities ? "unchanged" : "FAILED", (u32)bodies.size(), (u32)joints.size(), bone_instances, shared_rig, shell,
+        Device.dwFrame, physics_world()->Processing() ? 1 : 0);
+    R_ASSERT2(identities, "Butcher geometry probe unexpectedly changed rig or physics identities");
+}
+
+bool painter_queue_geometry_probe(u16 object_id, u32 mode)
+{
+    if (!g_pGameLevel) return false;
+    CAI_Stalker* npc = smart_cast<CAI_Stalker*>(Level().Objects.net_Find(object_id));
+    return npc && npc->character_physics_support() &&
+        npc->character_physics_support()->QueuePainterGeometryProbe(mode);
+}
+
+void painter_cancel_alive_reference()
+{
+    painter_alive_reference_target = nullptr;
+    painter_alive_reference_target_id = u16(-1);
+    painter_alive_reference_armed_at = 0;
+}
+
+bool CCharacterPhysicsSupport::QueuePainterAliveReference()
+{
+    if (painter_alive_reference_target || m_eType != etStalker || m_eState != esAlive || !m_EntityAlife.g_Alive() ||
+        m_EntityAlife.getDestroy() || m_pPhysicsShell || m_physics_skeleton ||
+        !movement() || !movement()->CharacterExist() || !physics_world() ||
+        physics_world()->Processing()) return false;
+    painter_alive_reference_target = this;
+    painter_alive_reference_target_id = m_EntityAlife.ID();
+    painter_alive_reference_armed_at = Device.dwTimeGlobal;
+    m_painter_alive_reference_frames = 0;
+    m_painter_alive_reference_has_previous = false;
+    Msg("* painter alive reference armed: entity=%u frame=%u expires_ms=%u",
+        unsigned(m_EntityAlife.ID()),Device.dwFrame,Device.dwTimeGlobal+10000u);
+    return true;
+}
+
+bool painter_queue_alive_reference(u16 object_id)
+{
+    if (!g_pGameLevel) return false;
+    CAI_Stalker* npc = smart_cast<CAI_Stalker*>(Level().Objects.net_Find(object_id));
+    return npc && npc->character_physics_support() &&
+        npc->character_physics_support()->QueuePainterAliveReference();
+}
+
 IC bool is_imotion(interactive_motion* im)
 {
 	return im && im->is_enabled();
@@ -71,6 +874,14 @@ IC bool is_imotion(interactive_motion* im)
 
 CCharacterPhysicsSupport::~CCharacterPhysicsSupport()
 {
+    painter_piece_continuation::forget(m_EntityAlife);
+    painter_arm_pose_owner_gone(m_EntityAlife);
+	if (painter_alive_reference_target == this) painter_cancel_alive_reference();
+	CancelPainterGeometryProbe();
+	if (m_pPhysicsShell) ragdoll_shell_capture.stop(m_pPhysicsShell);
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	m_active_ragdoll_controller.detach();
+#endif
 	xr_delete(m_collision_hit_callback);
 	if (m_flags.test(fl_skeleton_in_shell))
 	{
@@ -132,6 +943,10 @@ CCharacterPhysicsSupport::CCharacterPhysicsSupport(EType atype, CEntityAlive* ae
 
 void CCharacterPhysicsSupport::SetRemoved()
 {
+	if (painter_alive_reference_target == this) painter_cancel_alive_reference();
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	m_active_ragdoll_controller.detach();
+#endif
 	m_eState = esRemoved;
 	if (m_flags.test(fl_skeleton_in_shell))
 	{
@@ -344,6 +1159,15 @@ void CCharacterPhysicsSupport::destroy_imotion()
 
 void CCharacterPhysicsSupport::in_NetDestroy()
 {
+    painter_piece_continuation::forget(m_EntityAlife);
+    painter_arm_pose_owner_gone(m_EntityAlife);
+	if (painter_alive_reference_target == this) painter_cancel_alive_reference();
+	CancelPainterGeometryProbe();
+	m_painter_geometry_installed = false;
+	if (m_pPhysicsShell) ragdoll_shell_capture.stop(m_pPhysicsShell);
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	m_active_ragdoll_controller.detach();
+#endif
 	destroy(m_interactive_motion);
 	m_PhysicMovementControl->DestroyCharacter();
 
@@ -479,8 +1303,10 @@ void CCharacterPhysicsSupport::KillHit(SHit& H)
 	//ActivateShell( H.who );
 
 	//	if(Type() == etStalker && xr_strcmp(dbg_stalker_death_anim, "none") != 0)
+	// R63 sever hold: decided before the death animation (a held shell takes none: it waits frozen in the hit pose)
+	const bool painter_hold = PainterSeverHoldWanted(H);
 	float hit_angle = 0;
-	MotionID m = m_death_anims.motion(m_EntityAlife, H, hit_angle);
+	MotionID m = painter_hold ? MotionID() : m_death_anims.motion(m_EntityAlife, H, hit_angle);
 
 	CAI_Stalker* const holder = m_EntityAlife.cast_stalker();
 	if (holder && (holder->wounded() || holder->movement().current_params().cover()))
@@ -517,6 +1343,16 @@ void CCharacterPhysicsSupport::KillHit(SHit& H)
 
 		EndActivateFreeShell(H.who, start, death_position, velocity);
 		m_flags.set(fl_block_hit, TRUE);
+		if (painter_hold && m_pPhysicsShell)
+		{
+			m_pPhysicsShell->get_LinearVel(m_painter_hold_velocity);
+			m_pPhysicsShell->set_LinearVel(Fvector().set(0.f, 0.f, 0.f));
+			m_pPhysicsShell->set_AngularVel(Fvector().set(0.f, 0.f, 0.f));
+			m_pPhysicsShell->Disable();
+			m_painter_hold = true; m_painter_hold_started = Device.dwTimeContinual;
+			m_painter_hold_hit = H; m_painter_hold_hit_valid = true;
+			Msg("[painter_voxel_live] id=%u phase=sever_hold_started bone=%u hit_type=%u t=%u tc=%u", m_EntityAlife.ID(), unsigned(H.bone()), unsigned(H.type()), Device.dwTimeGlobal, Device.dwTimeContinual);
+		}
 	}
 }
 
@@ -524,10 +1360,19 @@ const u32 hit_valide_time = 1000;
 
 void CCharacterPhysicsSupport::in_Hit(SHit& H, bool is_killing)
 {
+    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s",s);});
+    body_hit_outcomes::Scope hit_trace(m_EntityAlife.ID(),H.BulletID,H.bone(),m_EntityAlife.g_Alive());
 	m_sv_hit = H;
 	m_hit_valide_time = Device.dwTimeGlobal + hit_valide_time;
 	if (m_EntityAlife.use_simplified_visual() || esRemoved == m_eState)
-		return;
+		{body_hit_outcomes::report("not_queued",m_EntityAlife.use_simplified_visual()?"simplified_visual":"physics_removed");return;}
+    // in_Die(true) replays m_sv_hit for shell creation. Only PHHit receipt
+    // owns a damage event; never carve a second time for the fatal replay.
+    if (!is_killing) CapturePainterVoxelHit(H);
+    else body_hit_outcomes::report("not_queued","death_shell_replay_not_new_hit");
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+    m_active_ragdoll_controller.hit(H);
+#endif
 	if (m_flags.test(fl_block_hit))
 	{
 		VERIFY2(!m_EntityAlife.g_Alive( ),
@@ -566,7 +1411,8 @@ void CCharacterPhysicsSupport::in_Hit(SHit& H, bool is_killing)
 				Msg( "death anim: applied fatal impulse dir: (%f,%f,%f), value: (%f) ", H.dir.x,H.dir.y,H.dir.z, H.impulse );
 		}
 #endif
-		m_pPhysicsShell->applyHit(H.bone_space_position(), H.direction(), H.phys_impulse(), H.bone(), H.type());
+		if (!m_painter_hold) // R63: a held shell keeps the fatal impulse for PainterHoldRelease
+			m_pPhysicsShell->applyHit(H.bone_space_position(), H.direction(), H.phys_impulse(), H.bone(), H.type());
 	}
 }
 
@@ -611,6 +1457,7 @@ void CCharacterPhysicsSupport::in_UpdateCL()
 	{
 		return;
 	}
+    QueuePainterVoxelLive(); // Poll next owner barrier; never wait for worker here.
 #ifdef DEBUG
 	if( dbg_draw_character_bones )
 				dbg_draw_geoms( m_weapon_geoms );
@@ -627,6 +1474,8 @@ void CCharacterPhysicsSupport::in_UpdateCL()
 	if( dbg_draw_character_physics && m_pPhysicsShell )
 				m_pPhysicsShell->dbg_draw_geometry( 0.2f, D3DCOLOR_ARGB( 100 ,255, 0, 0 ) );
 #endif
+	if (m_painter_hold && Device.dwTimeContinual - m_painter_hold_started > u32(painter_sever_hold_ms))
+		PainterHoldRelease("timeout"); // R63: never an indefinitely suspended corpse
 	update_animation_collision();
 	m_character_shell_control.CalculateTimeDelta();
 	if (m_pPhysicsShell)
@@ -698,6 +1547,194 @@ void CCharacterPhysicsSupport::in_UpdateCL()
 #endif
 }
 
+void CCharacterPhysicsSupport::UpdatePainterAliveReference()
+{
+	if (painter_alive_reference_target != this) {
+		m_painter_alive_reference_frames = 0;
+		m_painter_alive_reference_has_previous = false;
+		return;
+	}
+	if (Device.dwTimeGlobal - painter_alive_reference_armed_at > 10000u ||
+		!g_pGameLevel || painter_alive_reference_target_id != m_EntityAlife.ID() ||
+		Level().Objects.net_Find(painter_alive_reference_target_id) != &m_EntityAlife) {
+		Msg("! painter alive reference expired or identity changed: entity=%u",unsigned(m_EntityAlife.ID()));
+		painter_cancel_alive_reference();
+		m_painter_alive_reference_frames = 0;
+		m_painter_alive_reference_has_previous = false;
+		return;
+	}
+	if (m_eType != etStalker || m_eState != esAlive || !m_EntityAlife.g_Alive() ||
+		m_EntityAlife.getDestroy() || m_pPhysicsShell || m_physics_skeleton ||
+		!movement() || !movement()->CharacterExist() ||
+		m_EntityAlife.animation_movement_controlled() || !physics_world() ||
+		physics_world()->Processing() || Device.Paused()) {
+		m_painter_alive_reference_frames = 0;
+		m_painter_alive_reference_has_previous = false;
+		return;
+	}
+	IKinematics* k = smart_cast<IKinematics*>(m_EntityAlife.Visual());
+	if (!k) return;
+	// The render animation is sampled only for this specifically armed NPC.
+	k->CalculateBones(TRUE);
+	const Fmatrix owner_xform = m_EntityAlife.XFORM();
+	u16 root_id = u16(-1);
+	Fvector root_world;
+	{
+		xrCriticalSectionGuard guard(&k->UCalc_Mutex);
+		root_id = k->LL_GetBoneRoot();
+		owner_xform.transform_tiny(root_world,k->LL_GetTransform(root_id).c);
+	}
+	Fvector movement_velocity;
+	movement()->GetCharacterVelocity(movement_velocity);
+	const float speed = movement_velocity.magnitude();
+	float root_delta = 0.f;
+	if (m_painter_alive_reference_has_previous) {
+		Fvector displacement;
+		displacement.sub(root_world,m_painter_alive_reference_previous_root);
+		root_delta = displacement.magnitude();
+	}
+	m_painter_alive_reference_previous_root.set(root_world);
+	const bool had_previous = m_painter_alive_reference_has_previous;
+	m_painter_alive_reference_has_previous = true;
+	if (!std::isfinite(double(speed)) || !std::isfinite(double(root_delta)) ||
+		!_valid(owner_xform) || !had_previous ||
+		speed >= 0.03f || root_delta >= 0.003f) {
+		m_painter_alive_reference_frames = 0;
+		return;
+	}
+	if (++m_painter_alive_reference_frames < 60) return;
+	const u16 physics_root = k->LL_BoneID("bip01_pelvis");
+	if (physics_root == BI_NONE) {
+		Msg("! painter alive reference rejected: physics pelvis bone missing");
+		painter_cancel_alive_reference();
+		return;
+	}
+	struct callback_snapshot {
+		BoneCallback callback; void* param; BOOL overwrite; u32 type;
+	};
+	xr_vector<callback_snapshot> callbacks(k->LL_BoneCount());
+	{
+		xrCriticalSectionGuard guard(&k->UCalc_Mutex);
+		for (u16 i=0;i<k->LL_BoneCount();++i) {
+			CBoneInstance& bone=k->LL_GetBoneInstance(i);
+			callbacks[i]={bone.callback(),bone.callback_param(),bone.callback_overwrite(),bone.callback_type()};
+		}
+	}
+
+	// Build uses native model mass, collision shapes, inertia smoothing, limits,
+	// and bind-created ODE joint references. The ghost never enters RunSimulation,
+	// receives an owner/callback, or replaces the living movement character.
+	CPhysicsShell* ghost = P_create_Shell();
+	// CreateShell temporarily makes the pelvis the kinematics root before it
+	// builds the death shell. Keep that shared change inside the bone mutex and
+	// restore it before any other thread can read the living animation root.
+	{
+		xrCriticalSectionGuard guard(&k->UCalc_Mutex);
+		struct restore_bone_root {
+			IKinematics* kinematics; u16 original;
+			restore_bone_root(IKinematics* k, u16 root, u16 physics) : kinematics(k),original(root) {
+				kinematics->LL_SetBoneRoot(physics);
+			}
+			~restore_bone_root() { kinematics->LL_SetBoneRoot(original); }
+		} restore(k,root_id,physics_root);
+		ghost->preBuild_FromKinematics(k);
+	}
+	// PHShell::Build only builds already-selected elements and ODE joints; it
+	// does not read the kinematics root. Do that ODE work after releasing the lock.
+	ghost->mXFORM.set(owner_xform);
+	ghost->SmoothElementsInertia(0.3f);
+	SAllDDOParams disable_params;
+	disable_params.Load(k->LL_UserData());
+	ghost->set_DisableParams(disable_params);
+	ghost->Build();
+	auto callbacks_same = [&]() -> bool {
+		xrCriticalSectionGuard guard(&k->UCalc_Mutex);
+		for (u16 i=0;i<k->LL_BoneCount();++i) {
+			CBoneInstance& bone=k->LL_GetBoneInstance(i);
+			if (bone.callback()!=callbacks[i].callback || bone.callback_param()!=callbacks[i].param ||
+				bone.callback_overwrite()!=callbacks[i].overwrite || bone.callback_type()!=callbacks[i].type)
+				return false;
+		}
+		return true;
+	};
+	const bool callbacks_unchanged = callbacks_same();
+	const bool root_restored = k->LL_GetBoneRoot()==root_id;
+	const bool physics_root_built = ghost->get_ElementsNumber() &&
+		static_cast<CPHElement*>(ghost->get_ElementByStoreOrder(0))->m_SelfID==physics_root;
+	if (!callbacks_unchanged || !root_restored || !physics_root_built) {
+		Msg("! painter alive reference rejected: root/callback readback root=%d callbacks=%d physics_root=%d",
+			root_restored ? 1 : 0,callbacks_unchanged ? 1 : 0,physics_root_built ? 1 : 0);
+		destroy_physics_shell(ghost);
+		painter_cancel_alive_reference();
+		return;
+	}
+	xr_vector<Fmatrix> animated_element_poses(ghost->get_ElementsNumber());
+	{
+		// CalculateBones has the same mutex. Copy a coherent pose and release
+		// it before touching ODE or dispatching any shell destructor callback.
+		xrCriticalSectionGuard guard(&k->UCalc_Mutex);
+		for (u16 i=0;i<ghost->get_ElementsNumber();++i) {
+			CPHElement* e = static_cast<CPHElement*>(ghost->get_ElementByStoreOrder(i));
+			animated_element_poses[i].set(k->LL_GetTransform(e->m_SelfID));
+		}
+	}
+	xr_vector<Fmatrix> world_element_poses(ghost->get_ElementsNumber());
+	bool valid_poses = true;
+	for (u16 i=0;i<ghost->get_ElementsNumber();++i) {
+		world_element_poses[i].mul_43(owner_xform,animated_element_poses[i]);
+		valid_poses = valid_poses && _valid(world_element_poses[i]) &&
+			valid_pos(world_element_poses[i].c);
+	}
+	if (!valid_poses) {
+		Msg("! painter alive reference rejected: nonfinite or out-of-bounds animated pose");
+		destroy_physics_shell(ghost);
+		painter_cancel_alive_reference();
+		m_painter_alive_reference_frames = 0;
+		m_painter_alive_reference_has_previous = false;
+		return;
+	}
+	for (u16 i=0;i<ghost->get_ElementsNumber();++i) {
+		CPHElement* e = static_cast<CPHElement*>(ghost->get_ElementByStoreOrder(i));
+		// This is BoneGlPos + SetTransform, exactly as ToBonePos uses it.
+		// Skip ToBonePos's debug-only PhysicsRefObject dereference: the ghost
+		// deliberately has no owner and interpolation is irrelevant to a snapshot.
+		e->SetTransform(world_element_poses[i],mh_clear);
+	}
+	// DWorld() is a cast of the island object even when empty; inspect membership.
+	bool unattached = !ghost->PKinematics() && ghost->PIsland()->nb == 0 &&
+		ghost->PIsland()->nj == 0 && !ghost->PIsland()->firstbody &&
+		!ghost->PIsland()->firstjoint && !static_cast<CPHShell*>(ghost)->SpatialComponent->spatial.node_ptr;
+	for (u16 i=0;i<ghost->get_ElementsNumber();++i)
+		unattached = unattached &&
+			!static_cast<dxBody*>(static_cast<CPHElement*>(ghost->get_ElementByStoreOrder(i))->get_body())->world;
+	for (u16 i=0;i<ghost->get_JointsNumber();++i) {
+		CPHJoint* j = static_cast<CPHJoint*>(ghost->get_JointByStoreOrder(i));
+		unattached = unattached && j->GetDJoint() && !static_cast<dxJoint*>(j->GetDJoint())->world &&
+			(!j->GetDJoint1() || !static_cast<dxJoint*>(j->GetDJoint1())->world);
+	}
+	const bool original_unchanged = !m_pPhysicsShell && !m_physics_skeleton &&
+		movement()->CharacterExist() && m_EntityAlife.g_Alive();
+	const bool written = unattached && original_unchanged &&
+		ragdoll_shell_capture.write_alive_reference(ghost,m_EntityAlife,k,root_id,
+			m_painter_alive_reference_frames,speed,root_world);
+	destroy_physics_shell(ghost);
+	const bool post_unchanged = m_EntityAlife.g_Alive() && !m_pPhysicsShell &&
+		!m_physics_skeleton && movement() && movement()->CharacterExist() &&
+		smart_cast<IKinematics*>(m_EntityAlife.Visual()) == k && g_pGameLevel &&
+		Level().Objects.net_Find(m_EntityAlife.ID()) == &m_EntityAlife &&
+		k->LL_GetBoneRoot()==root_id && callbacks_same();
+	if (written && post_unchanged) {
+		Msg("* painter alive reference marker: entity=%u frame=%u stable_frames=%u speed=%g root_delta=%g post_readback=alive:1,shell:0,movement:1,visual:1,identity:1,root:1,callbacks:1",
+			unsigned(m_EntityAlife.ID()),Device.dwFrame,m_painter_alive_reference_frames,speed,root_delta);
+	} else
+		Msg("! painter alive reference rejected: entity=%u unattached=%d original_unchanged=%d post_unchanged=%d",
+			unsigned(m_EntityAlife.ID()),unattached ? 1 : 0,original_unchanged ? 1 : 0,post_unchanged ? 1 : 0);
+	// A failed build is not retried every idle interval without a new command.
+	painter_cancel_alive_reference();
+	m_painter_alive_reference_frames = 0;
+	m_painter_alive_reference_has_previous = false;
+}
+
 void CCharacterPhysicsSupport::CreateSkeleton(CPhysicsShell* & pShell)
 {
 	R_ASSERT2(!pShell, "pShell already initialized!!");
@@ -711,8 +1748,9 @@ void CCharacterPhysicsSupport::CreateSkeleton(CPhysicsShell* & pShell)
 	IKinematics* k = smart_cast<IKinematics*>(m_EntityAlife.Visual());
 
 	phys_shell_verify_object_model(m_EntityAlife);
-	pShell->preBuild_FromKinematics(k);
-
+	BONE_P_MAP proxy_owners;for(u16 bone=0;bone<k->LL_BoneCount();++bone)proxy_owners.emplace(bone,physicsBone{});
+	pShell->preBuild_FromKinematics(k,&proxy_owners);
+    if(m_eType==etStalker)painter_skin_proxy::append(*pShell,*k,proxy_owners);
 
 	pShell->mXFORM.set(mXFORM);
 
@@ -1033,6 +2071,7 @@ void CCharacterPhysicsSupport::bone_chain_disable(u16 bone, u16 r_bone, IKinemat
 	}
 }
 
+
 void CCharacterPhysicsSupport::AddActiveWeaponCollision()
 {
 	if (m_eType != etStalker)
@@ -1051,6 +2090,15 @@ void CCharacterPhysicsSupport::AddActiveWeaponCollision()
 	m_EntityAlife.g_WeaponBones(bl, br, br2);
 	if (br == -1)
 		return;
+	IKinematics* grip_kinematics = smart_cast<IKinematics*>(m_EntityAlife.Visual());
+	if (!grip_kinematics ||
+		!painter_weapon_grip_chain_visible(*grip_kinematics, br) ||
+		(br2 != -1 && !painter_weapon_grip_chain_visible(*grip_kinematics, br2)) ||
+		(bl != -1 && !painter_weapon_grip_chain_visible(*grip_kinematics, bl)))
+	{
+		Msg("* active weapon collision skipped: grip bone hidden during death handover");
+		return;
+	}
 
 	active_weapon_item->UpdateXForm();
 
@@ -1100,6 +2148,30 @@ void CCharacterPhysicsSupport::AddActiveWeaponCollision()
 
 	//m_pPhysicsShell->dbg_draw_geometry( 1, D3DCOLOR_XRGB( 0, 0, 255 ) );
 	//DBG_ClosedCashedDraw( 50000 );
+}
+
+// Painter: a dead stalker's forearms and hands collide with its own torso (pelvis up to the collarbones), so a
+// hand clutching a chest or belly wound stays on the body instead of passing through it. Set up before the
+// weapon joins the right hand, so the rifle is not treated as part of the hand.
+// [painter_ragdoll] limb_torso_collision = false turns it off.
+static void painter_limb_torso_collision(CPhysicsShell& shell, IKinematics& K)
+{
+	static const bool on = !pSettings || !pSettings->section_exist("painter_ragdoll") ||
+		!pSettings->line_exist("painter_ragdoll", "limb_torso_collision") ||
+		pSettings->r_bool("painter_ragdoll", "limb_torso_collision");
+	if (!on)
+		return;
+	static const char* const limb_names[] = {"bip01_l_forearm", "bip01_r_forearm", "bip01_l_hand", "bip01_r_hand"};
+	static const char* const torso_names[] = {"bip01_pelvis", "bip01_spine", "bip01_spine1", "bip01_spine2",
+	                                          "bip01_l_clavicle", "bip01_r_clavicle"};
+	u16 limbs[4], torso[6];
+	for (int i = 0; i < 4; ++i)
+		limbs[i] = K.LL_BoneID(limb_names[i]);
+	for (int i = 0; i < 6; ++i)
+		torso[i] = K.LL_BoneID(torso_names[i]);
+	const u16 pairs = shell.SetLimbTorsoCollision(limbs, 4, torso, 6);
+	if (painter_log_verbose())
+		Msg("[painter_ragdoll] limb_torso_collision pairs=%u", unsigned(pairs));
 }
 
 void CCharacterPhysicsSupport::CreateShell(CObject* who, Fvector& dp, Fvector& velocity)
@@ -1212,7 +2284,18 @@ void CCharacterPhysicsSupport::CreateShell(CObject* who, Fvector& dp, Fvector& v
 	else
 		m_pPhysicsShell->SetIgnoreDynamic();
 	m_pPhysicsShell->SetIgnoreSmall();
+	if (m_eType == etStalker)
+		painter_limb_torso_collision(*m_pPhysicsShell, *K);
 	AddActiveWeaponCollision();
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	// The native controller uses the shared human stalker shell profile.  Keep
+	// actors and all monster families on the stock ragdoll path until they have
+	// their own verified bone and joint map.
+    if (m_eType == etStalker)
+    {
+        m_active_ragdoll_controller.attach(m_pPhysicsShell, &m_EntityAlife);
+    }
+#endif
 }
 
 void CCharacterPhysicsSupport::EndActivateFreeShell(CObject* who, const Fvector& inital_entity_position,
@@ -1292,10 +2375,36 @@ if( dbg_draw_ragdoll_spawn )
 
 	K->CalculateBones_Invalidate();
 	K->CalculateBones(TRUE);
+
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	// Enable only after the shell has its final death transform and velocity.
+	// The controller performs a two frame ODE warmup before capturing its pose.
+	if (m_eType == etStalker) {
+        m_active_ragdoll_controller.hit(m_sv_hit,true);
+        // R35: enabled only when painter_native_ragdoll is on (or the balance test wants the shell); otherwise the
+        // controller stays passive and the Lua controller runs its motors at full strength, as in the co-op exe.
+        m_active_ragdoll_controller.set_enabled((painter_native_ragdoll || painter_balance_test_enabled) &&
+                                                m_active_ragdoll_controller.supported());
+    }
+#endif
+	if (m_eType == etStalker && !m_EntityAlife.g_Alive() && painter_ragdoll_capture_next && m_pPhysicsShell)
+	{
+		painter_ragdoll_capture_next = 0;
+		ragdoll_shell_capture.start(m_pPhysicsShell, m_EntityAlife);
+	}
 }
 
 void CCharacterPhysicsSupport::in_ChangeVisual()
 {
+    painter_piece_continuation::forget(m_EntityAlife);
+    painter_arm_pose_owner_gone(m_EntityAlife);
+	CancelPainterGeometryProbe();
+	m_painter_geometry_installed = false;
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	// Visual replacement can tear down and recreate the shell.  Detach first
+	// so the controller never retains joints from the old shell.
+	m_active_ragdoll_controller.detach();
+#endif
 	IKinematicsAnimated* KA = smart_cast<IKinematicsAnimated*>(m_EntityAlife.Visual());
 	if (m_ik_controller)
 	{
@@ -1318,6 +2427,15 @@ void CCharacterPhysicsSupport::in_ChangeVisual()
 
 	if (m_pPhysicsShell)
 	{
+		// Painter: the old shell is destroyed below (visual change, or a script changed bone visibility); drop every
+		// Painter hold on it first, as in_ChangeVisual does (idempotent, so that path is unchanged)
+		painter_piece_continuation::forget(m_EntityAlife);
+		painter_arm_pose_owner_gone(m_EntityAlife);
+		CancelPainterGeometryProbe();
+		m_painter_geometry_installed = false;
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+		m_active_ragdoll_controller.detach();
+#endif
 		VERIFY(m_eType!=etStalker);
 		if (m_physics_skeleton)
 		{
@@ -1450,3 +2568,8 @@ CPHSynchronize* CCharacterPhysicsSupport::PHGetSyncItem(u16 item)
 	else
 		return m_EntityAlife.CPhysicsShellHolder::PHGetSyncItem(item);
 }
+
+
+#include "PainterRuntimeGeometryDiagnostic_impl.h"
+
+#include "PainterVoxelLive_impl.h"

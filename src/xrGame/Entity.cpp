@@ -19,6 +19,7 @@
 #include "alife_time_manager.h"
 #include "../Layers/xrRender/xrRender_console.h"
 #include "InventoryOwner.h"
+#include "../Include/xrRender/BloodThermal.h"
 #include "Inventory.h"
 #include "Weapon.h"
 
@@ -408,14 +409,9 @@ void CEntity::ChangeTeam(int team, int squad, int group)
 }
 
 //--DSR-- HeatVision_start
-static u32 clampU(u32 x, u32 a, u32 b) 
-{
-	return x < a ? a : (x > b ? b : x);
-}
-
 float CEntity::GetHotness() {
 	if (heat_vision_cooldown && (AlreadyDie() || !g_Alive())) 
-		return 1.0f - (float)clampU(Device.dwTimeGlobal - m_level_death_time, 0, heat_vision_cooldown_time) / heat_vision_cooldown_time;
+		return BloodThermal::Corpse(Device.dwTimeGlobal, m_level_death_time, heat_vision_cooldown_time, true);
 	return 1.0f;
 }
 

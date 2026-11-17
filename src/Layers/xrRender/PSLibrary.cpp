@@ -5,6 +5,7 @@
 #pragma hdrstop
 
 #include "PSLibrary.h"
+#include "../../Include/xrRender/PainterFilePrefetch.h"
 #include "ParticleEffect.h"
 #include "ParticleGroup.h"
 
@@ -205,6 +206,12 @@ bool CPSLibrary::Load(const char* nm)
 
 	FS.update_path(_path, "$game_particles$", "");
 	FS.file_list(files, _path, FS_ListFiles, "*.pe,*.pg");
+	{ // R62: read the loose files ahead on 16 threads (first opens cost ~3.4 ms each one after another, ~0.3 ms in parallel)
+		std::vector<std::string> paths; paths.reserve(files.size());
+		for (const FS_File& f : files) { string_path full; FS.update_path(full, "$game_particles$", f.name.c_str()); paths.emplace_back(full); }
+		CTimer prefetch; prefetch.Start(); painter_prefetch::files(paths);
+		Msg("* particles read ahead: %u files in %.0f ms", unsigned(paths.size()), prefetch.GetElapsed_sec() * 1000.f);
+	}
 
 	FS_FileSet::iterator it = files.begin();
 	FS_FileSet::iterator it_e = files.end();

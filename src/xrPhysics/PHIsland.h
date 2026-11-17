@@ -277,10 +277,20 @@ public:
 
 	void SetPrefereExactIntegration() { m_flags.set_prefere_exact_integration(); }
 	void SetForceExactIntegration() { m_flags.set_force_exact_integration(); }
+	bool PrefersExactIntegration() { return !!m_flags.is_exact_integration_prefeared(); }
+	bool ForcesExactIntegration() { return !!m_flags.is_exact_integration_forced(); }
 	void Step(dReal step);
 	void Enable();
 	void Repair();
 protected:
 private:
 };
+
+// Optional read-only diagnostic hook around each ODE island step. Null during
+// normal gameplay; a consumer may observe pre/post solver state only.
+typedef void (*PHIslandStepCaptureCallback)(CPHIsland* island, bool after_solver, bool exact_solver);
+extern XRPHYSICS_API PHIslandStepCaptureCallback g_ph_island_step_capture;
+// Separate pre-solver control consumer: never replace the read-only recorder.
+extern XRPHYSICS_API PHIslandStepCaptureCallback g_ph_island_step_policy;
+XRPHYSICS_API bool PHIslandContactIsSpecial(const dxJoint* joint);
 #endif

@@ -1,4 +1,5 @@
 #include "pch_script.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "entity_alive.h"
 #include "inventoryowner.h"
 #include "inventory.h"
@@ -277,6 +278,7 @@ void CEntityAlive::HitImpulse(float /**amount/**/, Fvector& /**vWorldDir/**/, Fv
 
 void CEntityAlive::Hit(SHit* pHDS)
 {
+	BloodNativeProfile::Scope bloodHit(BloodNativeProfile::Stage::EntityHit);
 	SHit HDS = *pHDS;
 	//-------------------------------------------------------------------
 	if (HDS.hit_type == ALife::eHitTypeWound_2)
@@ -328,7 +330,10 @@ void CEntityAlive::Die(CObject* who)
 	inherited::Die(who);
 
 	const CGameObject* who_object = smart_cast<const CGameObject*>(who);
-	callback(GameObject::eDeath)(lua_game_object(), who_object ? who_object->lua_game_object() : 0);
+	{
+		BloodNativeProfile::Scope bloodCallback(BloodNativeProfile::Stage::EntityDeathCallback);
+		callback(GameObject::eDeath)(lua_game_object(), who_object ? who_object->lua_game_object() : 0);
+	}
 
 	if (!getDestroy() && (GameID() == eGameIDSingle))
 	{

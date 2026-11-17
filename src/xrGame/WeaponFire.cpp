@@ -16,7 +16,91 @@
 #include "reward_event_generator.h"
 #include "../Layers/xrRender/xrRender_console.h"
 
+#include "PainterKillcamAim.h"
+#include "level.h"
+#include "HUDManager.h"
+#include "inventory.h"
+#include "../xrEngine/CameraBase.h"
 #define FLAME_TIME 0.05f
+// Qualified, short-lived player aim authority; never stores a target point or
+// rewrites generated bullets. GameObject retirement invalidates all raw keys.
+namespace painter_killcam_aim {
+namespace {
+struct AimLease {
+    const CActor* actor{};
+    const CWeapon* weapon{};
+    const CGameObject* target{};
+    const CLevel* world{};
+    u32 time{};
+};
+xrCriticalSection aim_lock;
+AimLease aim_lease;
+bool current(CActor& actor, CWeapon& weapon) {
+    return g_pGameLevel && Level().CurrentControlEntity() == &actor && actor.g_Alive()
+        && weapon.H_Parent() == &actor
+        && smart_cast<CWeapon*>(actor.inventory().ActiveItem()) == &weapon;
+}
+}
+bool origin(CActor& actor, CWeapon& weapon, Fvector& point) {
+    if (!current(actor, weapon)) return false;
+    // The physical world weapon frame is independent of HUD/Device projection.
+    static_cast<CHudItem&>(weapon).UpdateXForm();
+    const Fvector& local = weapon.SilencerAttachable() && weapon.IsSilencerAttached()
+        ? weapon.vLoadedFirePointSilencer : weapon.vLoadedFirePoint;
+    weapon.XFORM().transform_tiny(point, local);
+    return _valid(point);
+}
+bool renew(CActor& actor, CWeapon& weapon, CGameObject& target) {
+    if (!current(actor, weapon) || Level().Objects.net_Find(target.ID()) != &target
+        || &target == &actor || &target == &weapon) return false;
+    xrCriticalSectionGuard guard(&aim_lock);
+    aim_lease.actor=&actor; aim_lease.weapon=&weapon; aim_lease.target=&target;
+    aim_lease.world=&Level(); aim_lease.time=Device.dwTimeContinual;
+    return true;
+}
+void clear(CActor& actor) {
+    xrCriticalSectionGuard guard(&aim_lock);
+    if (aim_lease.actor == &actor) aim_lease=AimLease{};
+}
+void retire(const CGameObject& object) {
+    xrCriticalSectionGuard guard(&aim_lock);
+    if (aim_lease.actor == &object || aim_lease.weapon == &object || aim_lease.target == &object)
+        aim_lease=AimLease{};
+}
+bool apply(CWeapon& weapon, Fvector& point, Fvector& direction) {
+    CActor* actor=smart_cast<CActor*>(weapon.H_Parent());
+    if (!actor || !current(*actor, weapon)) return false;
+    {
+        xrCriticalSectionGuard guard(&aim_lock);
+        if (aim_lease.actor != actor || aim_lease.weapon != &weapon
+            || aim_lease.world != &Level() || u32(Device.dwTimeContinual-aim_lease.time)>100)
+            return false;
+    }
+    CCameraBase* camera=actor->cam_Active();
+    Fvector muzzle;
+    if (!camera || !origin(*actor, weapon, muzzle) || !_valid(camera->vPosition)
+        || !_valid(camera->yaw) || !_valid(camera->pitch)) return false;
+    Fvector base;
+    base.setHP(-camera->yaw, -camera->pitch);
+    // Match stock CHudItem::Ray's first-person eye-to-barrel obstruction
+    // treatment, with the underlying physical eye instead of cinematic Device.
+    SPickParam clearance(CDB::OPT_CULL | CDB::OPT_ONLYFIRST);
+    clearance.defs.start=camera->vPosition;
+    clearance.defs.dir.sub(muzzle, camera->vPosition);
+    clearance.defs.range=clearance.defs.dir.magnitude();
+    if (clearance.defs.range>EPS_L) {
+        clearance.defs.dir.div(clearance.defs.range);
+        if (HUD().DoPick(clearance)) {
+            point=clearance.defs.start;
+            direction=clearance.defs.dir;
+            return true;
+        }
+    }
+    point=muzzle; direction=base;
+    return true;
+}
+} // namespace painter_killcam_aim
+
 
 
 float _nrand(float sigma)
@@ -62,8 +146,10 @@ void CWeapon::FireStart()
 	CShootingObject::FireStart();
 }
 
-void CWeapon::FireTrace(const Fvector& P, const Fvector& D)
+void CWeapon::FireTrace(const Fvector& native_point, const Fvector& native_direction)
 {
+	Fvector P = native_point, D = native_direction;
+	painter_killcam_aim::apply(*this, P, D);
 	VERIFY(m_magazine.size());
 
 	CCartridge& l_cartridge = m_magazine.back();

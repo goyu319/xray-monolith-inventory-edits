@@ -991,6 +991,7 @@
     <ClInclude Include="..\car_memory.h" />
     <ClInclude Include="..\cdkey_ban_list.h" />
     <ClInclude Include="..\CharacterPhysicsSupport.h" />
+    <ClInclude Include="..\active_ragdoll_controller.h" />
     <ClInclude Include="..\character_community.h" />
     <ClInclude Include="..\character_hit_animations.h" />
     <ClInclude Include="..\character_hit_animations_params.h" />
@@ -2710,6 +2711,7 @@
     <ClCompile Include="..\car_memory.cpp" />
     <ClCompile Include="..\cdkey_ban_list.cpp" />
     <ClCompile Include="..\CharacterPhysicsSupport.cpp" />
+    <ClCompile Include="..\active_ragdoll_controller.cpp" />
     <ClCompile Include="..\character_community.cpp" />
     <ClCompile Include="..\character_hit_animations.cpp" />
     <ClCompile Include="..\character_rank.cpp" />

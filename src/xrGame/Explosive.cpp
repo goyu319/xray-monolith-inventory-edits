@@ -37,7 +37,12 @@
 #include "profiler.h"
 
 #include "../Include/xrRender/Kinematics.h"
+#include "ai/stalker/ai_stalker.h"
+#include "CharacterPhysicsSupport.h"
+#include "painter_voxel/PainterExplosions.h"
 #define EFFECTOR_RADIUS 30.f
+#include "painter_voxel/RocketStrike_impl.h" // rpgdirect: a rocket strike on a stalker (RocketStrike.h)
+
 const u16 TEST_RAYS_PER_OBJECT = 5;
 const u16 BLASTED_OBJ_PROCESSED_PER_FRAME = 3;
 const float exp_dist_extinction_factor = 3.f;
@@ -356,6 +361,8 @@ void CExplosive::Explode()
 	//m_bExploding = true;
 	m_explosion_flags.set(flExploding,TRUE);
 	cast_game_object()->processing_activate();
+	// rpgdirect: a rocket that struck a stalker goes off at the strike (RocketStrike.h; its contact put it a physics step back)
+	painter_rocket_strike::place(*cast_game_object(), m_vExplodePos, true);
 
 	Fvector& pos = m_vExplodePos;
 	Fvector& dir = m_vExplodeDir;
@@ -376,6 +383,8 @@ void CExplosive::Explode()
 	//играем звук взрыва
 
 	m_layered_sounds.PlaySound("sndExplode", pos, smart_cast<CObject*>(this), false, false, (u8)-1);
+	// Grenade gore: its fragments are recognised by this explosive's ID (PainterExplosions.h).
+	const PainterFragmentSource painter_fragment_emission=painter_explosions::record(*cast_game_object(), pos, m_fBlastRadius, cast_game_object()->cNameSect(), Initiator());
 
 	//показываем эффекты
 
@@ -410,6 +419,7 @@ void CExplosive::Explode()
 	else SendHits = false;
 
 
+	{painter_fragment_source::Scope painter_fragment_scope(&painter_fragment_emission);
 	for (int i = 0; i < m_iFragsNum; ++i)
 	{
 		frag_dir.random_dir();
@@ -436,6 +446,7 @@ void CExplosive::Explode()
 		                                  cartridge, m_fFragAirRes, SendHits, false, i + 1);
 	}
 
+	}
 	if (cast_game_object()->Remote()) return;
 
 	/////////////////////////////////
@@ -460,6 +471,8 @@ void CExplosive::Explode()
 	START_PROFILE("explosive/activate explosion box")
 		ActivateExplosionBox(m_vExplodeSize, m_vExplodePos);
 	STOP_PROFILE
+	// rpgdirect: the explosion box moves the explosion out of the ground, walls and corpses - a strike stays where it hit
+	painter_rocket_strike::place(*cast_game_object(), m_vExplodePos, false);
 	//---------------------------------------------------------------------
 #ifdef DEBUG
 	if(ph_dbg_draw_mask.test(phDbgDrawExplosions))
@@ -751,6 +764,13 @@ void CExplosive::ExplodeWaveProcessObject(collide::rq_results& storage, CPhysics
 #endif
 
 	float l_effect = ExplosionEffect(storage, this, l_pGO, m_vExplodePos, m_fBlastRadius);
+	// rpgdirect: the stalker a rocket struck takes the blast at point blank, whatever the rays say (RocketStrike.h)
+	if (painter_rocket_strike::struck(*cast_game_object(), *l_pGO)) l_effect = 1.f;
+	// Grenade gore: craters facing the blast, before the blast hit itself (which may kill and ragdoll the body).
+	if (auto* npc = smart_cast<CAI_Stalker*>(l_pGO))
+		if (l_effect > 0.f && npc->character_physics_support())
+			{const PainterFragmentSource source=painter_explosions::source_for(*cast_game_object());
+			 npc->character_physics_support()->PainterVoxelBlast(m_vExplodePos, l_effect, cast_game_object()->cNameSect().c_str(), Initiator(),&source);}
 	float l_impuls = m_fBlastHitImpulse * l_effect;
 	float l_hit = m_fBlastHit * l_effect;
 

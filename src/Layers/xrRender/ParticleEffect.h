@@ -4,6 +4,9 @@
 //---------------------------------------------------------------------------
 
 #include "ParticleEffectDef.h"
+#include "../../Include/xrRender/BloodParticleSize.h"
+#include "../../Include/xrRender/BloodParticleThermalSource.h"
+#include "../../Include/xrRender/BloodParticleColor.h"
 
 #ifdef _EDITOR
 #	include "../../Layers/xrRender/FBasicVisual.h"
@@ -30,6 +33,20 @@ namespace PS
 		Fvector m_InitialPosition;
 	public:
 		CPEDef* m_Def;
+        ref_geom m_ThermalGeom;
+        ref_shader m_ThermalShader;
+        bool RenderBloodThermal(PAPI::Particle*,u32);
+        BloodParticleSize m_SpriteSize;
+        BloodParticleThermalSource m_BloodThermalSource;
+        float m_BloodThermalAgeOffset=0.f;
+        bool SetBloodThermalSource(bool known,bool corpse,u32 death) override {
+            if(IsPlaying())return false;
+            m_BloodThermalSource={known,corpse,death};return true;
+        }
+
+        BloodParticleColor m_SpriteColor;
+        bool SetColorScale(float r,float g,float b) override { return !IsPlaying() && m_SpriteColor.Set(r,g,b); }
+        bool SetSizeScale(float value) override { return !IsPlaying() && m_SpriteSize.Set(value); }
 		Fmatrix m_XFORM;
 	protected:
 		DestroyCallback m_DestroyCallback;
@@ -46,6 +63,14 @@ namespace PS
 		};
 
 		Flags8 m_RT_Flags;
+#if defined(USE_DX11) && !defined(_EDITOR)
+		// Intrusive registration avoids allocating a registry node per packet.
+		CParticleEffect* m_BloodPrevious = nullptr;
+		CParticleEffect* m_BloodNext = nullptr;
+		u64 m_BloodGeneration = 0;
+		u32 m_BloodSprite = u32(-1);
+		bool m_BloodRegistered = false;
+#endif
 	protected:
 		BOOL SaveActionList(IWriter& F);
 		BOOL LoadActionList(IReader& F);

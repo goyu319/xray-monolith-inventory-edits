@@ -42,13 +42,14 @@ IC CSightAction::CSightAction(const ESightType& sight_type, const Fvector& vecto
 {
 }
 
-IC CSightAction::CSightAction(const CGameObject* object_to_look, bool torso_look, bool fire_object, bool no_pitch) :
+IC CSightAction::CSightAction(const CGameObject* object_to_look, bool torso_look, bool fire_object, bool no_pitch, bool predict_motion) :
 	m_sight_type(fire_object ? SightManager::eSightTypeFireObject : SightManager::eSightTypeObject),
 	m_torso_look(torso_look),
 	m_path(false),
 	m_object_to_look(object_to_look),
 	m_memory_object(0),
 	m_no_pitch(no_pitch),
+	m_predict_motion(predict_motion),
 	m_state_fire_object(0),
 	m_initialized(false)
 {
@@ -108,7 +109,8 @@ IC bool CSightAction::operator==(const CSightAction& sight_action) const
 	case SightManager::eSightTypeCoverLookOver:
 		return (m_time == sight_action.m_time);
 	case SightManager::eSightTypeFireObject:
-		return ((m_torso_look == sight_action.m_torso_look) && (m_object_to_look == sight_action.m_object_to_look));
+		return ((m_torso_look == sight_action.m_torso_look) && (m_object_to_look == sight_action.m_object_to_look) &&
+		        (m_predict_motion == sight_action.m_predict_motion));
 	case SightManager::eSightTypeAnimationDirection:
 		return (true);
 	default: NODEFAULT;

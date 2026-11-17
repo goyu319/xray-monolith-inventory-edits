@@ -78,12 +78,9 @@ int	CParticleManager::CreateActionList()
 {
 	int actionId = m_action_counter++;
 
-    xrSpinWait w;
-	while (ActionIter.load(std::memory_order_acquire) != 0)
-	{
-        w();
-	}
-
+	// This list is new and cannot be executing before its ID is returned.
+	// Existing workers retain intrusive references to their own lists; the
+	// map lock protects insertion/rehashing. Do not wait for unrelated actions.
 	xrSRWLockGuard guard(m_action_guard);
 	auto ActionResultPair = m_alist_map.emplace(actionId, xr_new<ParticleActions>());
 	R_ASSERT2(ActionResultPair.second, "Can't create particle action with global counter");

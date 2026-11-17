@@ -14,6 +14,8 @@
 #include "Level_network_map_sync.h"
 #include "secure_messaging.h"
 #include "traffic_optimization.h"
+#include <atomic>
+namespace painter_stream {class NativeStream;}
 
 class CHUDManager;
 class CParticlesObject;
@@ -59,6 +61,7 @@ struct prefetch_event
 	models_set models;
     u16 id;
     bool hasAlifeObject;
+    painter_stream::Stamp painter_stamp;
 };
 using prefetch_event_queue = xr_vector<prefetch_event>;
 using spawn_events_data_map = xr_unordered_flat_map<u16, prefetch_event>;
@@ -69,6 +72,15 @@ class CLevel :
 {
 #include "Level_network_Demo.h"
 	void ClearAllObjects();
+    u64 m_painter_world_cookie = 0;
+    painter_stream::NativeStream* m_painter_spawn_stream = nullptr;
+public:
+    u64 PainterWorldCookie() const noexcept {return m_painter_world_cookie;}
+    painter_stream::NativeStream* PainterSpawnStream() const noexcept {return m_painter_spawn_stream;}
+    bool PainterDispatchSpawn(const NET_Event&);
+    bool PainterNativeBacklogBefore(const NET_Event&);
+    void PainterStopSpawnPrefetch();
+    void PainterRetireSpawnStream();
 private:
 #ifdef DEBUG
     bool m_bSynchronization = false;
@@ -266,7 +278,8 @@ public:
 	static void ProcessPrefetchEvents(void* args);
 	void SortSpawnEventsQueue();
 private:
-	bool closeSignal = false;
+	std::atomic<bool> closeSignal{false};
+    void* m_painter_prefetch_thread = nullptr;
 	int GetSpawnEventPriority(const NET_Event& e) const;
 	bool PostponedSpawnFind(u16 id, const NET_Event& E) const;
 	bool PostponedSpawnFind(u16 id, NET_Packet& P) const;

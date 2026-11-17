@@ -1,6 +1,7 @@
 #ifndef CHARACTER_PHYSICS_SUPPORT
 #define CHARACTER_PHYSICS_SUPPORT
 
+#include "../build_config_defines.h"
 #include "alife_space.h"
 #include "PHSkeleton.h"
 #include "Entity_Alive.h"
@@ -10,7 +11,16 @@
 #include "death_anims.h"
 #include "character_shell_control.h"
 #include "animation_utils.h"
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+#include "active_ragdoll_controller.h"
+#endif
+#include <memory>
+#include <atomic> // bodypass
+#include <vector> // bodypass
+struct PainterVoxelLiveOwner;
+struct PainterFragmentSource;
 class CPhysicsShell;
+struct PHFittedBone; // bodypass
 class CPHMovementControl;
 class CIKLimbsController;
 class interactive_motion;
@@ -80,12 +90,38 @@ private:
 	float m_BonceDamageFactor;
 	interactive_motion* m_interactive_motion;
 	character_shell_control m_character_shell_control;
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+	CActiveRagdollController m_active_ragdoll_controller;
+#endif
 	interactive_animation* m_interactive_animation;
 	physics_shell_animated* m_physics_shell_animated;
 	activating_character_delay* m_collision_activating_delay;
 	xr_vector<CODEGeom*> m_weapon_geoms;
 	xr_vector<anim_bone_fix*> m_weapon_bone_fixes;
 	CPhysicsElement* m_weapon_attach_bone;
+	std::shared_ptr<PainterVoxelLiveOwner> m_painter_voxel_live;
+    bool m_painter_voxel_bind_requested=false;
+    bool m_painter_voxel_bind_failed=false;
+    u32 m_painter_voxel_bind_retry_at=0;
+    bool m_painter_voxel_bind_target=false; // the player's target (aimed at or shot): may load body data past the budget
+    bool m_painter_voxel_queued=false;
+    // R63 sever hold: the death shell waits frozen (bodies disabled, no death animation) for Painter's sever; see PainterHoldRelease.
+    bool m_painter_hold=false;bool m_painter_hold_hit_valid=false;u32 m_painter_hold_started=0;SHit m_painter_hold_hit;Fvector m_painter_hold_velocity{0.f,0.f,0.f};
+    void CapturePainterVoxelHit(const SHit& hit);
+    void QueuePainterVoxelLive();
+    unsigned WarmPainterVoxelShaders(IKinematics* k); // bind-time wound shader warm-up (main thread)
+    void ApplyPainterVoxelLive();
+    void CancelPainterVoxelLive();
+	int m_painter_geometry_pending = -1;
+	u64 m_painter_runtime_cookie = 0;
+	u32 m_painter_runtime_state = 0;
+	void ApplyPainterRuntimeGeometryProbe(u32 state);
+	bool m_painter_geometry_installed = false;
+	u32 m_painter_alive_reference_frames = 0;
+	bool m_painter_alive_reference_has_previous = false;
+	Fvector m_painter_alive_reference_previous_root;
+	void ApplyPainterGeometryProbe();
+	void CancelPainterGeometryProbe();
 	CPhysicsShellHolder* m_active_item_obj;
 	SHit m_sv_hit;
 	u32 m_hit_valide_time;
@@ -129,6 +165,34 @@ public:
 	IC CIKLimbsController* ik_controller() { return m_ik_controller; }
 	bool interactive_motion();
 	bool can_drop_active_weapon();
+	bool QueuePainterGeometryProbe(u32 mode);
+	bool QueuePainterRuntimeGeometryProbe(u32 state);
+    bool BindPainterVoxelLive(bool target=false);
+    bool UnbindPainterVoxelLive();
+    void ApplyPainterPieceContinuation();
+    int PainterVoxelLiveState()const{return m_painter_voxel_live?2:m_painter_voxel_bind_requested?1:m_painter_voxel_bind_failed?-1:0;}
+    bool PainterVoxelHandlesBone(u16 bone) const;
+	bool PainterCanSwapFittedShell(CPhysicsShell* expected) const;
+	// R63 sever hold (PainterVoxelLive_impl.h): KillHit asks PainterSeverHoldWanted; the frozen death shell starts with its kept velocity
+	// and fatal impulse in PainterHoldRelease (hit_shell: the severed piece holding the hit bone, else the stump/corpse shell).
+	bool PainterSeverHoldWanted(const SHit& H);
+	bool PainterHoldActive() const { return m_painter_hold; }
+	const SHit* PainterHoldHit() const { return m_painter_hold_hit_valid ? &m_painter_hold_hit : nullptr; }
+	void PainterHoldRelease(const char* why, CPhysicsShell* hit_shell = nullptr);
+	void PainterSwapFittedShell(CPhysicsShell* prepared,CPhysicsShell* expected,u64 visible_bones);
+	// bodypass: the body's own flesh after a separation - the fitted boxes the shell `shell` was built from - for the bullet thread
+	// (PainterFleshOnRay: 0 no rule, 1 flesh in the struck shape or undecided, 2 none). Two slots: the one not published is
+	// written, then published; the one published before stays untouched until the next swap.
+	void PainterSetFlesh(const std::vector<PHFittedBone>& flesh, CPhysicsShell* shell, const std::vector<PHFittedBone>* gear = nullptr); // gearbody: + merged gear boxes
+	int PainterFleshOnRay(const Fvector& start, const Fvector& dir, float range, u16 bone);
+	std::vector<PHFittedBone> m_painter_flesh[2];
+	std::atomic<const std::vector<PHFittedBone>*> m_painter_flesh_list{nullptr};
+	std::atomic<CPhysicsShell*> m_painter_flesh_shell{nullptr};
+	// Grenade gore: craters facing an explosion at `blast_world` (effect = the engine's occlusion-aware explosion effect).
+	void PainterVoxelBlast(const Fvector& blast_world,float effect,LPCSTR section,u16 initiator,
+        const PainterFragmentSource* fragment_source=nullptr);
+	void PainterReleaseWeaponCollision();
+	bool QueuePainterAliveReference();
 	void SetRemoved();
 	bool IsRemoved() { return m_eState == esRemoved; }
 	bool IsSpecificDamager() { return !!m_flags.test(fl_specific_bonce_demager); }
@@ -143,6 +207,7 @@ public:
 	bool CollisionCorrectObjPos();
 
 	void in_UpdateCL();
+	void UpdatePainterAliveReference(); // regular stalker client update only
 	void in_shedule_Update(u32 DT);
 	void in_NetSpawn(CSE_Abstract* e);
 	void in_NetDestroy();

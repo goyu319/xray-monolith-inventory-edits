@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "ParticlesAsyncManager.h"
 
 #include "../Include/xrRender/ParticleCustom.h"
@@ -24,6 +25,8 @@ void CParticlesAsync::Start()
 
 	{
 		PROF_EVENT("Particle Update");
+        // One scope for the entire visual loop, not one clock pair per particle.
+        BloodNativeProfile::Scope profileSimulation(BloodNativeProfile::Stage::ParticleSimulation);
         for (intrusive_ptr<CPS_Instance>& particle: g_pGamePersistent->ps_active)
         {
             if (particle->m_bDead)
@@ -33,12 +36,14 @@ void CParticlesAsync::Start()
         }
     }
 
+    BloodNativeProfile::Scope profileSchedule(BloodNativeProfile::Stage::ParticleSchedule);
     PROF_EVENT("Particle Shedule");
     for (intrusive_ptr<CPS_Instance>& particle : g_pGamePersistent->ps_active)
 	{
 		particle->Update(Device.dwTimeDelta);
 	}
 
+    profileSchedule.Stop();
 	Instance.IsStarted = false;
 }
 
@@ -47,6 +52,7 @@ void CParticlesAsync::Wait()
 	if (psDeviceFlags.test(mtParticles))
 	{
 		PROF_EVENT("Particles Wait");
+        BloodNativeProfile::Scope profileWait(BloodNativeProfile::Stage::ParticleWait);
         xrSpinWait w;
 		while (Instance.IsStarted)
 		{
@@ -60,6 +66,8 @@ void CParticlesAsync::ForceUpdate(intrusive_ptr<CPS_Instance> Obj)
 	if (!Instance.IsStarted)
 		return;
 
+    // Legacy synchronous forced updates are outside the worker-loop scope.
+    BloodNativeProfile::Scope profileSimulation(BloodNativeProfile::Stage::ParticleSimulation);
 	Instance.UpdateParticle(Obj);
 }
 
@@ -88,6 +96,8 @@ void CParticlesAsync::UpdateParticle(intrusive_ptr<CPS_Instance> particle) const
 		return;
 
 	PROF_EVENT("Particle OnFrame");
+	if (particle->AdvancePacketPlayback(V, Device.dwTimeGlobal))
+		return;
 	V->OnFrame(dt);
 
 	particle->dwLastTime = Device.dwTimeGlobal;

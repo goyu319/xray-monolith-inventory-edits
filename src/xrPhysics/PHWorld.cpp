@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 
 #include "PHWorld.h"
 #include "tri-colliderknoopc/dTriList.h"
@@ -291,7 +292,8 @@ void CPHWorld::OnFrame()
 	//DBG_DrawStatBeforeFrameStep();
 #endif
 	Device().StatPhysics()->Physics.Begin();
-	FrameStep(Device().fTimeDelta);
+	{BloodNativeProfile::Scope bloodPhysics(BloodNativeProfile::Stage::PhysicsStep);
+	FrameStep(Device().fTimeDelta);}
 	Device().StatPhysics()->Physics.End();
 #ifdef DEBUG
 	//DBG_DrawStatAfterFrameStep();

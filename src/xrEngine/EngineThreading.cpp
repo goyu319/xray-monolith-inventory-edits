@@ -3,6 +3,7 @@
 #include "CustomHUD.h"
 #include "IGame_Persistent.h"
 #include "IGame_Level.h"
+#include "../Layers/xrRender/BloodNativeProfile.h"
 #include "Rain.h"
 #include "../../xrCDB/ISpatial.h"
 #include "../../xrCDB/Frustum.h"
@@ -120,10 +121,11 @@ void XRay::Engine::CalculateBonesThread()
 }
 
 extern BOOL psLua_ParallelGC;
-int psLua_ParallelGC_CallAmount = 25;
+int psLua_ParallelGC_CallAmount = 8; // was 25: measured 60-70% less GC CPU per frame for the same headroom (perf-research/lua-luajit.md 3.2); console lua_parallel_gc_call_amount
 void XRay::Engine::GameThread()
 {
 	PROF_THREAD("Secondary Task 2")
+	BloodNativeProfile::Scope bloodGameThread(BloodNativeProfile::Stage::GameThreadTotal, Device.dwFrame);
 		
 	// we has granted permission to execute
 	if (g_hud)
@@ -143,6 +145,7 @@ void XRay::Engine::GameThread()
 		if (mt_Scheduler)
 		{
 			PROF_EVENT("Sheduler Deferred");
+			BloodNativeProfile::Scope bloodScheduler(BloodNativeProfile::Stage::SchedulerUpdate, Device.dwFrame);
             if (mt_SchedulerRT)
             {
                 ::Engine.Sheduler.Update();

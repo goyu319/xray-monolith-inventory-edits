@@ -168,6 +168,9 @@ public: //
 	void ToBonePos(const CBoneInstance* B, motion_history_state history_state);
 	void ToBonePos(const Fmatrix& BoneTransform, motion_history_state history_state);
 	void ActivatingPos(const Fmatrix& BoneTransform);
+	// A fitted fragment already has a native pose. Do not seed it from the
+	// first animation callback or interpolate from its discarded spawn pose.
+	void RefreshFittedPose();
 	IC void CalculateBoneTransform(Fmatrix& bone_transform) const;
 
 #ifdef		DEBUG

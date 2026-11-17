@@ -9,6 +9,7 @@
 #pragma once
 
 #include "memory_space.h"
+#include "painter_ai/PhysicalHitCapture.h"
 
 #ifdef DEBUG
 #	define USE_SELECTED_HIT
@@ -52,6 +53,7 @@ private:
 #endif
 	ALife::_OBJECT_ID m_last_hit_object_id;
 	u32 m_last_hit_time;
+	painter::combat::engine::PhysicalHitCapture m_physical_hits;
 
 public:
 	IC CHitMemoryManager(CCustomMonster* object, CAI_Stalker* stalker);
@@ -77,6 +79,7 @@ public:
 	IC void set_squad_objects(HITS* squad_objects);
 	IC const ALife::_OBJECT_ID& last_hit_object_id() const;
 	IC u32 const& last_hit_time() const;
+	const painter::combat::engine::PhysicalHitCapture& physical_hits() const { return m_physical_hits; }
 
 public:
 	void enable(const CObject* object, bool enable);

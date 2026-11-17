@@ -114,6 +114,10 @@ public:
 
 	Fmatrix mView_saved;
 	Fmatrix mProject_saved;
+	// Previous camera of the 3D-scope (second viewport) frames, kept apart from the main camera so the
+	// motion vectors of a main frame never reproject against an interleaved scope frame (DLSS, R11).
+	Fmatrix mView_saved_svp;
+	Fmatrix mProject_saved_svp;
 	Fmatrix mFullTransform_saved;
 
 	// Camera copy owned by the bones task. Written in on_idle before the task is
@@ -247,12 +251,31 @@ public:
 	// ForserX: Pre-Render sequence
 	xr_vector<xr_delegate<void()>> seqParallelRender;
 	xr_vector<xr_delegate<void()>> seqParallelBeforRender;
+	bool m_geometry_publish_barrier = false;
+	DWORD m_geometry_publish_thread = 0;
+	DWORD m_main_thread_id = 0; // set in Run(); the painter thread-entry wrapper uses it to recognise the main thread
+	bool IsGeometryPublishBarrier() const { return m_geometry_publish_barrier && GetCurrentThreadId() == m_geometry_publish_thread; }
 
 	// seqParallelBeforRender is filled from the particle worker thread
-	// (CParticleGroup::SItem::OnFrame) and drained on the main thread in
-	// CRenderDevice::on_idle(). Guard every access with this section.
+	// (CParticleGroup::SItem::OnFrame), from the painter voxel worker threads
+	// (PainterVoxelLive_impl.h ready hook) and from the game update, and drained
+	// on the main thread by ProcessParallelBeforeRender() up to three times per
+	// frame (see painter_publish_drains). Guard every access with this section.
 	// Same pattern as CEventAPI::CS and CEffect_Rain::rainCS.
 	xrCriticalSection seqParallelBeforRenderCS;
+	// Entries for the NEXT drain: a callback that must run again after the
+	// current drain re-queues itself here (a push into seqParallelBeforRender
+	// from inside a drain runs in that same drain). ProcessParallelBeforeRender
+	// moves them into seqParallelBeforRender after its clear(). Same section.
+	xr_vector<xr_delegate<void()>> seqParallelBeforRenderNext;
+	// Pushed by worker threads under its own section (never held across a drain); every drain merges it into
+	// seqParallelBeforRender first. Cleared entries are skipped like the others.
+	xrCriticalSection seqParallelBeforRenderPendingCS;
+	xr_vector<xr_delegate<void()>> seqParallelBeforRenderPending;
+	// Drains seqParallelBeforRender under seqParallelBeforRenderCS with the
+	// geometry-publish barrier set for the calling (main) thread. Every call
+	// site has no frame task (secondary_tasks) running and no rendering active.
+	void ProcessParallelBeforeRender(u32 profile_frame);
 
 	xr_delegate<void()> ParticleWorkerCallback;
 	xr_delegate<void()> ModelDefferClear;
@@ -588,6 +611,19 @@ inline bool svp_clear_shared_list(bool svp_first)
 	if (!(Device.true_pip_on && Device.m_SecondViewport.IsSVPActive())) return true;
 	return svp_first ? !Device.m_SecondViewport.m_render_pass_is_svp : Device.m_SecondViewport.m_render_pass_is_svp;
 }
+// Painter (voxel wound) scheduling. Console variables registered in xr_ioc_cmd.cpp.
+// painter_thread_priority: 0 = normal, 1 = below normal (default) for the painter
+// kernel job/region threads, its asset/separation services and the renderer's
+// publish thread. Scheduling only; no wound output depends on it.
+// painter_publish_drains: how often per frame seqParallelBeforRender is drained:
+// 1 = frame start only, 2 = also after secondary_tasks.wait() (end of frame),
+// 3 = also right after FrameMove (default).
+extern ENGINE_API int painter_thread_priority;
+extern ENGINE_API int painter_publish_drains;
+// Applies painter_thread_priority to the calling thread (cached per thread; a
+// changed console value is re-applied on the next call). Called at the start
+// of every painter worker thread and before each kernel job.
+ENGINE_API void painter_apply_thread_priority();
 
 #ifndef _EDITOR
 #define RDEVICE Device

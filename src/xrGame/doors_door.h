@@ -37,6 +37,9 @@ namespace doors
 		Fvector const& get_vector(door_state state) const;
 		bool is_locked(door_state state) const;
 		bool is_blocked(door_state state) const;
+		CPhysicObject& object() const { return m_object; }
+		door_state state() const { return m_state; }
+		door_state target_state() const { return m_target_state; }
 
 	private:
 		void change_state(actor* initiator, door_state start_state, door_state stop_state);

@@ -3,6 +3,9 @@
 #pragma once
 
 #include "../../xrCore/xr_resource.h"
+#ifdef USE_DX11
+#include "PainterBloodTextureSource.h"
+#endif
 
 class ENGINE_API CAviPlayerCustom;
 class CTheoraSurface;
@@ -68,6 +71,9 @@ public:
 	//	void								Apply			(u32 dwStage);
 
 	void surface_set(ID3DBaseTexture* surf);
+#ifdef USE_DX11
+    bool surface_set_prepared(ID3DBaseTexture* surf, ID3DShaderResourceView* view);
+#endif
 	ID3DBaseTexture* surface_get();
 	// Exchanges surfaces and views with another render target texture, without
 	// creating views. Shaders bound by name then read the other storage.
@@ -128,6 +134,9 @@ public: //	Public class members (must be encapsulated furthur)
 #endif	//	USE_DX10
 	} flags;
 
+#ifdef USE_DX11
+    PainterBloodTextureSource::SnapshotSlot painter_blood_snapshot; // nonblocking capture of immutable loader result
+#endif
     u32 dwLastUsedFrame = 0; // frame index of last Apply() call — used for eviction
     u32 dwLastUsedTime = 0; // Device.dwTimeGlobal of last Apply() call, used by VRAM pressure relief
 

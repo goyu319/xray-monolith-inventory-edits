@@ -356,6 +356,10 @@ public:
 	virtual void AnimatorOnFrame(bool calculate_bones = true) = 0;
 	virtual void SetSmall() = 0;
 	virtual void SetIgnoreSmall() = 0;
+	// Painter: the elements of the listed limb bones (forearms, hands) collide with the elements carrying the
+	// listed torso bones, within this shell. Returns the number of limb-torso pairs (0 = off).
+	virtual u16 SetLimbTorsoCollision(const u16* limb_bones, u16 limb_count, const u16* torso_bones,
+	                                  u16 torso_count) = 0;
 	virtual bool isFractured() = 0;
 	virtual CPHShellSplitterHolder* SplitterHolder() = 0;
 	virtual void SplitterHolderActivate() = 0;

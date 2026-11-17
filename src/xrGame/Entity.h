@@ -94,6 +94,7 @@ public:
 	IC void SetMaxHealth(float v) { m_entity_condition->max_health() = v; }
 
 	virtual float GetGlowing();			//--DSR-- SilencerOverheat
+	bool IsThermalCorpse() override { return AlreadyDie() || !g_Alive(); }
 	virtual float GetHotness();			//--DSR-- HeatVision
 	virtual void  OnChangeVisual();		//--DSR-- HeatVision
 

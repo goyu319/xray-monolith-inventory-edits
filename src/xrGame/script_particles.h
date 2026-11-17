@@ -14,6 +14,7 @@
 // refs
 class CObjectAnimator;
 class CScriptParticles;
+class CScriptGameObject;
 
 class CScriptParticlesCustom : public CParticlesObject
 {
@@ -43,6 +44,10 @@ public:
 	virtual ~CScriptParticles();
 
 	void Play(bool bHudMode = false);
+	bool PlayPacket(bool bHudMode = false);
+    bool SetSizeScale(float scale);
+    bool SetColorScale(float red,float green,float blue);
+    bool SetBloodThermalSource(CScriptGameObject* source);
 	void PlayAtPos(const Fvector& pos, bool bHudMode = false);
 	void Stop();
 	void StopDeffered();

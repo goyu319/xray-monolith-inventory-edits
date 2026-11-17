@@ -1,4 +1,6 @@
 #pragma once
+#include "painter_hit_ammo.h"
+#include "painter_fragment_source.h"
 
 class CScriptHit;
 
@@ -81,6 +83,12 @@ struct SHit
 	bool aim_bullet;
 	//---------------------------------------------------
 	//GE_HIT_STATISTIC
+	PainterHitAmmo ammo; // owned native fired-cartridge provenance
+	PainterFragmentSource painter_fragment; // exact local delivery witness; never serialized
+	float painter_effective_power=0.f; // transient receiver-side post-protection damage
+	bool painter_effective_power_valid=false; // receiver-only; never serialized
+	int painter_armor_penetration=-1; // receiver-local: -1 unknown, 0 stopped, 1 penetrated; never serialized
+	int painter_alive_before=-1; // R62 receiver-local: the body before this hit's damage and its before-hit Lua (-1 unknown, 0 dead, 1 alive); never serialized
 	u32 BulletID;
 	u32 SenderID;
 #ifdef DEBUG

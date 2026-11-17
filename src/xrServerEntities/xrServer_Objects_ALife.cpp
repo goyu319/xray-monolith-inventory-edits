@@ -1009,6 +1009,10 @@ CSE_ALifeObjectPhysic::CSE_ALifeObjectPhysic(LPCSTR caSection) : CSE_ALifeDynami
 	if (pSettings->line_exist(caSection, "fixed_bones"))
 		fixed_bones = pSettings->r_string(caSection, "fixed_bones");
 
+	// Temporary physics objects (gore fragments): `not_save = true` keeps them out of saved games.
+	if (pSettings->section_exist(caSection) && pSettings->line_exist(caSection, "not_save") && pSettings->r_bool(caSection, "not_save"))
+		_flags.set(flNotSave, TRUE);
+
 	m_flags.set(flUseSwitches,FALSE);
 	m_flags.set(flSwitchOffline,FALSE);
 	m_flags.set(flUsedAI_Locations,FALSE);

@@ -2,11 +2,14 @@
 #pragma hdrstop
 
 #include "ModelPool.h"
+#include "SkeletonRuntimeGeometry.h"
+#include "PainterBloodOwner.h"
 
 #ifndef _EDITOR
 #include "../../xrEngine/IGame_Persistent.h"
 #include "../../xrEngine/fmesh.h"
 #include "../../xrCore/spawn_cost.h"
+#include "../../xrEngine/PainterQuitWatch.h" // quitfix: teardown stage names
 #include "fhierrarhyvisual.h"
 #include "SkeletonAnimated.h"
 #include "fvisual.h"
@@ -203,6 +206,21 @@ dxRender_Visual* CModelPool::Instance_Register(LPCSTR N, dxRender_Visual* V)
 
 void CModelPool::Destroy()
 {
+    // Resident donors are registered instances too. Restore borrowers first,
+    // before pointer-ordered registry teardown can destroy their donors.
+    for (;;)
+    {
+        CKinematics* borrower = nullptr;
+        for (const auto& entry : Registry)
+        {
+            auto* k = fast_dynamic_cast<CKinematics*>(entry.first);
+            if (k && k->HasGeometryVariant()) { borrower = k; break; }
+        }
+        if (!borrower) break;
+        // Restart the scan: returning a donor may change pool/registry state.
+        borrower->LL_ClearGeometryVariant();
+    }
+
 	// Pool
 	Pool.clear();
 
@@ -247,7 +265,16 @@ CModelPool::CModelPool()
 
 CModelPool::~CModelPool()
 {
+	// Off-thread publication stages own only unbound buffers; stop their worker
+	// (queued stages are canceled) before the device and models go away.
+	PainterQuitWatch::stage("render_workers"); // the publish worker and the blood bake worker are joined here
+	RuntimeGeometryStageShutdown();
+	PainterQuitWatch::stage("models");
 	Destroy();
+	CollectRuntimeGeometryRetired(true);
+#ifdef USE_DX11
+    PainterBloodFinalOwnerDrain(); // models released late projection/packet references after worker join
+#endif
 	xr_delete(g_pMotionsContainer);
 }
 
@@ -406,6 +433,7 @@ void CModelPool::Delete(dxRender_Visual* &V, BOOL bDiscard)
 
 void CModelPool::DeleteQueue()
 {
+	CollectRuntimeGeometryRetired(false);
 	for (u32 it = 0; it < ModelsToDelete.size(); it++)
 		DeleteInternal(ModelsToDelete[it]);
 	ModelsToDelete.clear();
@@ -413,6 +441,7 @@ void CModelPool::DeleteQueue()
 
 void CModelPool::DeleteQueuedDeffer()
 {
+	CollectRuntimeGeometryRetired(false);
 	xrCriticalSectionGuard guard(&deffered_del_lock);
 
     for (dxRender_Visual* Vis : ModelsToDeleteDeffer)

@@ -494,3 +494,36 @@ void CPHGeometryOwner::dbg_draw( float scale, u32 color, Flags32 flags )const
 	}
 }
 #endif
+
+// Optional shape-only source coverage. Complete element transaction before
+// native Build: no mass/inertia/material/joint/filter/sleep policy mutation.
+bool CPHGeometryOwner::try_append_Spheres_prebuild(const std::vector<Fsphere>& spheres,u16 bone,const Flags16& flags)
+{
+    if(b_builded||spheres.empty()||spheres.size()>40||m_geoms.size()+spheres.size()>128)return false;
+    for(const auto& s:spheres)if(!std::isfinite(s.P.x)||!std::isfinite(s.P.y)||!std::isfinite(s.P.z)||!std::isfinite(s.R)||s.R<=0)return false;
+    std::vector<CODEGeom*> staged;
+    try {
+        staged.reserve(spheres.size());m_geoms.reserve(m_geoms.size()+spheres.size());
+        for(const auto& s:spheres){auto* g=smart_cast<CODEGeom*>(xr_new<CSphereGeom>(s));g->set_bone_id(bone);g->set_shape_flags(flags);staged.push_back(g);}
+    } catch(...) { for(auto* g:staged)xr_delete(g);return false; }
+    for(auto* g:staged)m_geoms.push_back(g); // all storage already reserved
+    return true;
+}
+
+// Atomic optional source-tight boxes, with source-certified dimensions retained.
+bool CPHGeometryOwner::try_append_Boxes_prebuild(const std::vector<Fobb>& boxes,u16 bone,const Flags16& flags)
+{
+    if(b_builded||boxes.empty()||boxes.size()>40||m_geoms.size()+boxes.size()>128)return false;
+    for(const auto& b:boxes){
+        if(!std::isfinite(b.m_translate.x)||!std::isfinite(b.m_translate.y)||!std::isfinite(b.m_translate.z)||!std::isfinite(b.m_halfsize.x)||!std::isfinite(b.m_halfsize.y)||!std::isfinite(b.m_halfsize.z)||b.m_halfsize.x<=0||b.m_halfsize.y<=0||b.m_halfsize.z<=0)return false;
+        for(const auto* axis:{&b.m_rotate.i,&b.m_rotate.j,&b.m_rotate.k})if(!std::isfinite(axis->x)||!std::isfinite(axis->y)||!std::isfinite(axis->z)||std::abs(axis->square_magnitude()-1.f)>1e-4f)return false;
+        if(std::abs(b.m_rotate.i.dotproduct(b.m_rotate.j))>1e-4f||std::abs(b.m_rotate.i.dotproduct(b.m_rotate.k))>1e-4f||std::abs(b.m_rotate.j.dotproduct(b.m_rotate.k))>1e-4f)return false;
+    }
+    std::vector<CODEGeom*> staged;
+    try {
+        staged.reserve(boxes.size());m_geoms.reserve(m_geoms.size()+boxes.size());
+        for(const auto& b:boxes){auto* g=smart_cast<CODEGeom*>(xr_new<CBoxGeom>(b));g->set_bone_id(bone);g->set_shape_flags(flags);staged.push_back(g);}
+    } catch(...) { for(auto* g:staged)xr_delete(g);return false; }
+    for(auto* g:staged)m_geoms.push_back(g);
+    return true;
+}

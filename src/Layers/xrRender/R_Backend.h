@@ -86,8 +86,12 @@ public:
 #if defined(USE_DX10) || defined(USE_DX11)
 	enum MaxTextures
 	{
-		//	Actually these values are 128
+		// D3D11 supports 128 SRVs; anatomy detail needs 19 pixel resources.
+#ifdef USE_DX11
+		mtMaxPixelShaderTextures = 64, // blood cells + full tissue/gear resources; D3D11 supports 128
+#else
 		mtMaxPixelShaderTextures = 16,
+#endif
 		mtMaxVertexShaderTextures = 4,
 		mtMaxGeometryShaderTextures = 16,
 #	ifdef USE_DX11
@@ -483,6 +487,8 @@ public:
 	ICF void RenderInstanced(D3DPRIMITIVETYPE T, u32 baseV, u32 countV, u32 startI, u32 PC, u32 instances);
 	ICF void RenderInstancedIndirect(D3DPRIMITIVETYPE T, ID3D11Buffer* args, u32 offset);
 	ICF void RenderInstancedUAV(D3DPRIMITIVETYPE T, u32 baseV, u32 countV, u32 startI, u32 PC, u32 instances, u32 slot, ID3D11UnorderedAccessView* uav);
+	// GPU-produced vertex count stays on the device; no CPU readback for statistics (BloodEngine).
+	ICF void RenderIndirect(D3DPRIMITIVETYPE T, ID3D11Buffer* arguments, u32 arguments_byte_offset);
 	ICF void Compute(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ);
 #endif
 

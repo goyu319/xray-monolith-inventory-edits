@@ -436,6 +436,28 @@ IC void CBackend::Render(D3DPRIMITIVETYPE T, u32 startV, u32 PC)
 	PGO(Msg("PGO:DIP:%dv/%df",3*PC,PC));
 }
 
+#ifdef USE_DX11
+IC void CBackend::RenderIndirect(D3DPRIMITIVETYPE T, ID3D11Buffer* arguments, u32 arguments_byte_offset)
+{
+    PROF_EVENT("RCache.Render_indirect");
+    if (T == D3DPT_TRIANGLEFAN)
+        return;
+    VERIFY(arguments);
+    VERIFY((arguments_byte_offset & 3u) == 0);
+    // Match non-indexed Render's state application. The accepted geometry count
+    // is GPU-owned; do not substitute a capacity estimate into verts/polys.
+    stat.calls++;
+    ApplyPrimitieTopology(TranslateTopology(T));
+    SRVSManager.Apply();
+    ApplyRTandZB();
+    ApplyVertexLayout();
+    StateManager.Apply();
+    constants.flush();
+    HW.pContext->DrawInstancedIndirect(arguments, arguments_byte_offset);
+}
+
+#endif
+
 IC void CBackend::set_Geometry(SGeometry* _geom)
 {
 	set_Format(&*_geom->dcl);

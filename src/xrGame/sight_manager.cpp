@@ -14,9 +14,43 @@
 #include "aimers_weapon.h"
 #include "aimers_bone.h"
 #include "stalker_animation_manager.h"
+#include "detail_path_manager.h"
 #include "weapon.h"
+#include "../Include/xrRender/Kinematics.h"
+#include "../Include/xrRender/KinematicsAnimated.h"
+#include "../xrEngine/SkeletonMotions.h"
 
 using MonsterSpace::SBoneRotation;
+
+// Console "painter_pose_log 1": one [painter_pose] line per stalker per second with rendered-skeleton sanity metrics
+// (world space, from the posed bones): head height over the pelvis, each hand's height relative to the head, the hand
+// line (right index -> left index = the engine's rifle axis) pitch, torso lean from vertical, and flags: 1 = a hand above
+// the head, 2 = rifle line steeper than 45 deg while both hands hold it, 4 = standing but bent over 60 deg, 8 = head
+// collapsed toward the pelvis. This is what catches an animation that the sight angles cannot see.
+int g_painter_pose_log = 0;
+
+LPCSTR painter_motion_name(IKinematicsAnimated* const animated, MotionID const& id); // stalker_animation_manager.cpp
+// Console "painter_lean_test N" (-100..100): forces every stalker's lean target to N/100 so the lean can be exercised and
+// measured (pose log lean= / head_dx=) without script support. 0 = scripts control the lean. Diagnostics only.
+int g_painter_lean_test = 0;
+extern int g_painter_fire_log; // ai_stalker_fire.cpp
+float painter_support_hand_weight(u16 id); // IKLimbsController.cpp: left hand on the gun's grip
+float painter_support_hand_error(u16 id);
+float painter_support_hand_short(u16 id);
+float painter_support_hand_elbow(u16 id);
+float painter_support_hand_fade(u16 id);
+int g_painter_shoulder_test = -1; // -1 off; 0/1/2 force every stalker's shoulder mode (diagnostics)
+
+// Console "painter_look_log 1": one [painter_look] line per NPC per second with the selected sight action, the
+// head/body yaw+pitch (degrees, positive pitch = up, as Fvector::setHP), the look point/object and the pitch the
+// target would imply from the eye. Off by default; read-only diagnostics for the AI test ground.
+int g_painter_look_log = 0;
+static LPCSTR painter_sight_type_name(u32 type)
+{
+	static LPCSTR names[] = {"current_direction", "path_direction", "direction", "position", "object", "cover", "search",
+	                         "look_over", "cover_look_over", "fire_object", "fire_position", "animation_direction"};
+	return type < sizeof(names) / sizeof(names[0]) ? names[type] : "dummy";
+}
 
 //												head  shoulder  spine
 static Fvector const s_danger_factors = {.0f, .50f, .50f};
@@ -29,6 +63,8 @@ CSightManager::CSightManager(CAI_Stalker* object) :
 	inherited(object),
 	m_enabled(true),
 	m_turning_in_place(false),
+	m_painter_look_logged_at(0),
+	m_painter_pose_logged_at(0),
 	m_aiming_type(aiming_none)
 {
 }
@@ -103,6 +139,11 @@ static inline float select_speed(float const distance, float const speed, float 
 void CSightManager::Exec_Look(float time_delta)
 {
 	START_PROFILE("Sight Manager")
+		if (g_painter_lean_test) m_object->set_painter_lean(float(g_painter_lean_test) / 100.f);
+		if (g_painter_shoulder_test >= 0) m_object->set_painter_shoulder(g_painter_shoulder_test);
+		m_object->painter_lean_update(time_delta); // procedural lean target -> current, consumed by the spine bone callback
+		if (g_painter_fire_log)
+			m_object->painter_fire_log();
 		SBoneRotation& body = object().movement().m_body;
 		SBoneRotation& head = object().movement().m_head;
 
@@ -128,6 +169,21 @@ void CSightManager::Exec_Look(float time_delta)
 		float head_speed = head.speed;
 		if (current_action().change_head_speed())
 			head_speed = current_action().head_speed();
+
+		extern float g_painter_look_head_rate_deg;
+		extern float g_painter_look_body_rate_deg;
+		extern float g_painter_look_dead_zone_deg;
+		body_speed = _min(body_speed, deg2rad(g_painter_look_body_rate_deg));
+		head_speed = _min(head_speed, deg2rad(g_painter_look_head_rate_deg));
+		bool head_in_dead_zone = false;
+		{
+			const u32 sight_type = u32(current_action().sight_type());
+			const bool on_enemy = sight_type == SightManager::eSightTypeObject || sight_type == SightManager::eSightTypeFireObject;
+			const float dead = deg2rad(g_painter_look_dead_zone_deg);
+			head_in_dead_zone = !on_enemy && dead > 0.f &&
+				_abs(angle_difference(head.current.yaw, head.target.yaw)) < dead &&
+				_abs(angle_difference(head.current.pitch, head.target.pitch)) < dead;
+		}
 
 #ifdef SIGHT_DEBUG
 	if ( object().cName() == "level_prefix_stalker" ) {
@@ -168,14 +224,17 @@ void CSightManager::Exec_Look(float time_delta)
 		                                         m_object->aim_min_speed(), m_object->aim_min_angle(), m_object->aim_max_angle()),
 		                            time_delta);
 
-		m_object->angle_lerp_bounds(head.current.yaw, head.target.yaw,
-		                            select_speed(angle_difference(head.current.yaw, head.target.yaw), head_speed,
-		                                         m_object->aim_min_speed(), m_object->aim_min_angle(), m_object->aim_max_angle()),
-		                            time_delta);
-		m_object->angle_lerp_bounds(head.current.pitch, head.target.pitch,
-		                            select_speed(angle_difference(head.current.pitch, head.target.pitch), head_speed,
-		                                         m_object->aim_min_speed(), m_object->aim_min_angle(), m_object->aim_max_angle()),
-		                            time_delta);
+		if (!head_in_dead_zone)
+		{
+			m_object->angle_lerp_bounds(head.current.yaw, head.target.yaw,
+			                            select_speed(angle_difference(head.current.yaw, head.target.yaw), head_speed,
+			                                         m_object->aim_min_speed(), m_object->aim_min_angle(), m_object->aim_max_angle()),
+			                            time_delta);
+			m_object->angle_lerp_bounds(head.current.pitch, head.target.pitch,
+			                            select_speed(angle_difference(head.current.pitch, head.target.pitch), head_speed,
+			                                         m_object->aim_min_speed(), m_object->aim_min_angle(), m_object->aim_max_angle()),
+			                            time_delta);
+		}
 
 #ifdef DEBUG
 	if ( g_ai_dbg_sight )
@@ -201,6 +260,140 @@ void CSightManager::Exec_Look(float time_delta)
 		{
 			compute_aiming(time_delta, head_speed);
 			current_action().on_frame();
+		}
+
+		if (g_painter_look_log && enabled() && Device.dwTimeGlobal - m_painter_look_logged_at >= 1000)
+		{
+			m_painter_look_logged_at = Device.dwTimeGlobal;
+			const CSightAction& action = current_action();
+			const u32 type = u32(action.sight_type());
+			const Fvector eye = m_object->eye_matrix.c;
+			// Internal pitch is positive DOWN; the public head_orientation() export uses setHP(-yaw, -pitch). Log world
+			// directions with the same convention so dir.y > 0 means looking up, and world pitch = -internal (degrees).
+			Fvector head_dir; head_dir.setHP(-head.current.yaw, -head.current.pitch);
+			Fvector target_dir; target_dir.setHP(-head.target.yaw, -head.target.pitch);
+			Fvector point = action.vector3d();
+			const bool aim_solution_valid = type == SightManager::eSightTypeFireObject || type == SightManager::eSightTypePosition || type == SightManager::eSightTypeFirePosition;
+			Fvector aim_solution; aim_solution.set(0.f, 0.f, 0.f);
+			if (aim_solution_valid) aim_solution = action.vector3d();
+			const int fire_mode = type == SightManager::eSightTypeFireObject ? int(action.state_fire_object()) : -1;
+			const CGameObject* look_object = action.object_to_look();
+			u32 object_id = u32(-1);
+			bool point_is_position = (type == SightManager::eSightTypePosition) || (type == SightManager::eSightTypeFirePosition);
+			if (look_object)
+			{
+				object_id = look_object->ID();
+				point = look_object->Position();
+				point_is_position = true;
+			}
+			float implied_pitch = 0.f;
+			if (point_is_position)
+			{
+				const Fvector delta = Fvector().sub(point, eye);
+				implied_pitch = atan2f(delta.y, _sqrt(delta.x * delta.x + delta.z * delta.z));
+			}
+			// B2 (AI session): the yaw the legs use (path segment, else the movement history), the movement-history yaw, the
+			// selected legs direction, turn-in-place, and the clips on the legs and torso. Same yaw convention as head_yaw.
+			bool const on_path = !object().movement().path().empty() &&
+				(m_object->movement().detail().curr_travel_point_index() + 1 < m_object->movement().detail().path().size());
+			float path_h = 0.f, path_p = 0.f, vel_h = 0.f, vel_p = 0.f;
+			bool const path_ok = GetDirectionAngles(path_h, path_p);
+			bool const vel_ok = GetDirectionAnglesByPrevPositions(vel_h, vel_p);
+			float const path_yaw = path_ok ? rad2deg(angle_normalize_signed(-path_h)) : 999.f;
+			float const vel_yaw = vel_ok ? rad2deg(angle_normalize_signed(-vel_h)) : 999.f;
+			LPCSTR const path_src = on_path ? "path" : (path_ok ? "history" : "none");
+			LPCSTR const legs_dirs[4] = {"forward", "backward", "left", "right"};
+			u32 const legs_dir = m_object->animation().painter_legs_direction();
+			IKinematicsAnimated* const look_animated = smart_cast<IKinematicsAnimated*>(m_object->Visual());
+			LPCSTR const look_legs = painter_motion_name(look_animated, m_object->animation().legs().animation());
+			LPCSTR const look_torso = painter_motion_name(look_animated, m_object->animation().torso().animation());
+
+			Msg("[painter_look] t=%u id=%u name=%s type=%s torso_look=%u head_yaw=%.1f head_pitch_world=%.1f head_pitch_internal=%.1f head_dir_y=%.2f target_yaw=%.1f target_pitch_world=%.1f target_pitch_internal=%.1f target_dir_y=%.2f body_yaw=%.1f body_pitch_world=%.1f eye=%.2f,%.2f,%.2f point=%.2f,%.2f,%.2f point_is_position=%u object=%u implied_pitch_world=%.1f factors=%.2f/%.2f/%.2f path_yaw=%.1f path_src=%s vel_yaw=%.1f legs_dir=%s turning=%u legs=%s torso=%s point_source=%s aim_solution_valid=%u aim_solution=%.2f,%.2f,%.2f fire_mode=%d",
+			    Device.dwTimeGlobal, object().ID(), object().cName().c_str(), painter_sight_type_name(type), unsigned(use_torso_look()),
+			    rad2deg(head.current.yaw), -rad2deg(head.current.pitch), rad2deg(head.current.pitch), head_dir.y, rad2deg(head.target.yaw), -rad2deg(head.target.pitch), rad2deg(head.target.pitch), target_dir.y,
+			    rad2deg(body.current.yaw), -rad2deg(body.current.pitch), eye.x, eye.y, eye.z, point.x, point.y, point.z, unsigned(point_is_position), object_id,
+			    rad2deg(implied_pitch), m_current.m_head.m_factor, m_current.m_shoulder.m_factor, m_current.m_spine.m_factor,
+			    path_yaw, path_src, vel_yaw, legs_dirs[legs_dir < 4 ? legs_dir : 0], unsigned(turning_in_place()), look_legs, look_torso, look_object ? "target_origin" : "sight_intent", unsigned(aim_solution_valid),
+			    aim_solution.x, aim_solution.y, aim_solution.z, fire_mode);
+		}
+
+		if (g_painter_pose_log && Device.dwTimeGlobal - m_painter_pose_logged_at >= 1000)
+		{
+			m_painter_pose_logged_at = Device.dwTimeGlobal;
+			IKinematics* kinematics = smart_cast<IKinematics*>(m_object->Visual());
+			if (kinematics)
+			{
+				LPCSTR names[] = {"bip01_head", "bip01_pelvis", "bip01_spine2", "bip01_r_finger1", "bip01_l_finger1", "bip01_r_hand", "bip01_l_hand", "bip01_r_finger11"};
+				Fvector p[8]; u16 ids[8]; bool ok = true;
+				for (u32 i = 0; i < 8; ++i)
+				{
+					u16 const id = kinematics->LL_BoneID(names[i]);
+					ids[i] = id;
+					if (id == BI_NONE) { ok = false; break; }
+					m_object->XFORM().transform_tiny(p[i], kinematics->LL_GetTransform(id).c);
+				}
+				if (ok)
+				{
+					Fvector const& head_p = p[0]; Fvector const& pelvis_p = p[1];
+					Fvector barrel = Fvector().sub(p[4], p[3]); float const hands_dist = barrel.magnitude();
+					if (hands_dist > EPS) barrel.div(hands_dist);
+					float const barrel_pitch = asinf(clampr(barrel.y, -1.f, 1.f));
+					Fvector trunk = Fvector().sub(head_p, pelvis_p); float const trunk_len = trunk.magnitude();
+					if (trunk_len > EPS) trunk.div(trunk_len);
+					float const torso_lean = acosf(clampr(trunk.y, -1.f, 1.f));
+					bool const standing = m_object->movement().body_state() == MonsterSpace::eBodyStateStand;
+					u32 flags = 0;
+					if (p[5].y > head_p.y + .05f || p[6].y > head_p.y + .05f) flags |= 1;
+					if (_abs(barrel_pitch) > deg2rad(45.f) && hands_dist > .15f) flags |= 2;
+					if (standing && torso_lean > deg2rad(60.f)) flags |= 4;
+					if (standing && head_p.y - pelvis_p.y < .35f) flags |= 8;
+					// Motion currently selected on each partition, so a log reader can tell which clip an order produced.
+					IKinematicsAnimated* animated = smart_cast<IKinematicsAnimated*>(m_object->Visual());
+					LPCSTR const legs_name = painter_motion_name(animated, m_object->animation().legs().animation());
+					LPCSTR const torso_name = painter_motion_name(animated, m_object->animation().torso().animation());
+					float wpn_up = 0.f, wpn_fwd = 0.f, wpn_dx = 0.f;
+					LPCSTR wpn_section = "-";
+					Fvector sup_w, sup_h;
+					sup_w.set(0.f, 0.f, 0.f);
+					sup_h.set(0.f, 0.f, 0.f);
+					{
+						// stock one-hand weapon frame from the right index finger (model space), as CWeapon::UpdateXForm builds it
+						Fmatrix const& finger = kinematics->LL_GetTransform(ids[3]);
+						Fvector D = Fvector().sub(kinematics->LL_GetTransform(ids[7]).c, finger.c);
+						if (D.square_magnitude() > EPS_L)
+						{
+							D.normalize();
+							Fvector R = Fvector().crossproduct(finger.j, D);
+							if (R.square_magnitude() > EPS_L)
+							{
+								R.normalize();
+								Fvector const N = Fvector().crossproduct(D, R);
+								Fvector const v = Fvector().sub(kinematics->LL_GetTransform(ids[4]).c, finger.c);
+								sup_h.set(v.dotproduct(R), v.dotproduct(N), v.dotproduct(D));
+							}
+						}
+					}
+					if (CWeapon const* const weapon = smart_cast<CWeapon const*>(m_object->best_weapon()))
+					{
+						wpn_section = weapon->cNameSect().c_str();
+						wpn_up = weapon->XFORM().j.y;
+						wpn_fwd = weapon->XFORM().k.dotproduct(m_object->XFORM().k);
+						wpn_dx = Fvector().sub(weapon->Position(), m_object->Position()).dotproduct(m_object->XFORM().i);
+						Fmatrix weapon_inverse;
+						weapon_inverse.invert(weapon->XFORM());
+						weapon_inverse.transform_tiny(sup_w, m_object->painter_grip_blend() >= .5f ? p[3] : p[4]);
+					}
+					Msg("[painter_pose] t=%u id=%u name=%s alive=%u body=%u move=%u speed=%.2f scale=%.2f head_h=%.2f rhand_dh=%.2f lhand_dh=%.2f hands_dist=%.2f barrel_pitch=%.1f torso_lean=%.1f lean=%.2f head_dx=%.2f flags=%u legs=%s torso=%s shoulder=%u mirror=%u grip=%.2f wpn_up=%.2f wpn_fwd=%.2f wpn_dx=%.2f sup_w=%.3f,%.3f,%.3f sup_h=%.3f,%.3f,%.3f lh=%.2f lh_err=%.3f lh_short=%.3f lh_elbow=%.0f lh_fade=%.2f gait=%u/%u wpn=%s",
+					    Device.dwTimeGlobal, m_object->ID(), m_object->cName().c_str(), unsigned(m_object->g_Alive()), unsigned(m_object->movement().body_state()),
+					    unsigned(m_object->movement().movement_type()), m_object->m_fCurSpeed, m_object->painter_speed_scale(), head_p.y - pelvis_p.y,
+					    p[5].y - head_p.y, p[6].y - head_p.y, hands_dist, rad2deg(barrel_pitch), rad2deg(torso_lean),
+					    m_object->painter_lean(), Fvector().sub(head_p, pelvis_p).dotproduct(m_object->XFORM().i), flags, legs_name, torso_name,
+						unsigned(m_object->painter_shoulder_left()), unsigned(m_object->animation().painter_torso_mirrored()), m_object->painter_grip_blend(), wpn_up, wpn_fwd, wpn_dx, sup_w.x, sup_w.y, sup_w.z, sup_h.x, sup_h.y, sup_h.z,
+						painter_support_hand_weight(m_object->ID()), painter_support_hand_error(m_object->ID()), painter_support_hand_short(m_object->ID()),
+							painter_support_hand_elbow(m_object->ID()), painter_support_hand_fade(m_object->ID()),
+							unsigned(m_object->painter_gait()), m_object->painter_gait_effective(), wpn_section);
+				}
+			}
 		}
 
 #ifdef DEBUG
@@ -300,7 +493,9 @@ void CSightManager::remove_links(CObject* object)
 
 Fvector CSightManager::object_position() const
 {
-	CGameObject const* object = &current_action().object();
+	CGameObject const* object = current_action().object_to_look();
+	if (!object)
+		return m_object->eye_matrix.c;
 	Fvector look_pos;
 
 	if (const_cast<CGameObject*>(object)->cast_actor())
@@ -683,6 +878,35 @@ void CSightManager::process_action(float const time_delta)
 	m_current.m_head.m_rotation.setXYZ(Fvector(angles).mul(m_current.m_head.m_factor));
 	m_current.m_shoulder.m_rotation.setXYZ(Fvector(angles).mul(m_current.m_shoulder.m_factor));
 	m_current.m_spine.m_rotation.setXYZ(Fvector(angles).mul(m_current.m_spine.m_factor));
+}
+
+// native17 (v2.24 Order::gait): the gait the legs, torso and speed use = the native action's request after the engine's
+// guard. Aimed (0) whenever: no request; crouched; not running; the weapon is firing; the sight is on an enemy object;
+// or the body faces more than 30 deg away from the path direction (the rifle-down cycles are forward-only).
+u32 CAI_Stalker::painter_gait_effective() const
+{
+	if (!m_painter_gait)
+		return 0;
+	stalker_movement_manager_smart_cover const& move = movement();
+	if (move.body_state() == MonsterSpace::eBodyStateCrouch)
+		return 0;
+	if (move.movement_type() != MonsterSpace::eMovementTypeRun)
+		return 0;
+	if (CWeapon const* const weapon = smart_cast<CWeapon const*>(inventory().ActiveItem()))
+		if (weapon->GetState() == CWeapon::eFire || weapon->GetState() == CWeapon::eFire2 ||
+			weapon->GetState() == CWeapon::eReload)
+			return 0;
+	const u32 sight_type = u32(sight().current_action().sight_type());
+	if (sight_type == SightManager::eSightTypeObject || sight_type == SightManager::eSightTypeFireObject)
+		return 0;
+	float path_h = 0.f, path_p = 0.f;
+	if (sight().GetDirectionAngles(path_h, path_p))
+	{
+		float const path_yaw = angle_normalize_signed(-path_h);
+		if (angle_difference(path_yaw, move.body_orientation().current.yaw) > deg2rad(30.f))
+			return 0;
+	}
+	return m_painter_gait;
 }
 
 void CSightManager::compute_aiming(float const time_delta, float const angular_speed)

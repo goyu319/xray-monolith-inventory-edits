@@ -68,6 +68,8 @@ ICF u32 get_pool(size_t size)
 # define pure_aligned_free(ptr) _aligned_free(ptr)
 # define pure_aligned_msize(ptr, align) _aligned_msize(ptr, align, 0)
 #endif // PURE_ALLOC_TBBMALLOC
+static thread_local bool g_xr_memory_no_zero_fill = false;
+void xr_memory_thread_no_zero_fill(bool enable) { g_xr_memory_no_zero_fill = enable; }
 
 void* xrMemory::mem_alloc(size_t size
 # ifdef DEBUG_MEMORY_NAME
@@ -75,14 +77,16 @@ void* xrMemory::mem_alloc(size_t size
 # endif // DEBUG_MEMORY_NAME
 , bool zeroMemory)
 {
-	mem_calls_record();
+	const bool painter_thread = g_xr_memory_no_zero_fill;
+	if (!painter_thread)
+		mem_calls_record();
 
 #ifdef PURE_ALLOC
 	{
 		//void* result = malloc(size);
 		void* result = pure_aligned_malloc(size, PURE_MEMORY_ALIGNMENT);
 #ifdef PURE_MEMORY_FILL_ZERO
-		if (result && zeroMemory)
+		if (result && zeroMemory && !painter_thread)
 			memset(result, 0, size);
 #endif // PURE_MEMORY_FILL_ZERO
 

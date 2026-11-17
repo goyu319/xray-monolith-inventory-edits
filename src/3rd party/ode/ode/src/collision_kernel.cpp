@@ -56,8 +56,12 @@ struct SpaceGeomColliderData {
 static void space_geom_collider (void *data, dxGeom *o1, dxGeom *o2)
 {
   SpaceGeomColliderData *d = (SpaceGeomColliderData*) data;
-  if (d->flags & NUMC_MASK) {
+  const int left = d->flags & NUMC_MASK;
+  if (left > 0) {
     int n = dCollide (o1,o2,d->flags,d->contact,d->skip);
+    // Never count more contacts than there was room for: a negative remainder masked with NUMC_MASK would read as ~65000
+    // free slots and let the following pairs write past the caller's contact array.
+    if (n > left) n = left;
     d->contact = CONTACT (d->contact,d->skip*n);
     d->flags -= n;
 #ifndef dNODEBUG
