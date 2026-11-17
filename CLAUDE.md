@@ -48,6 +48,16 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
 - **MO2 の構成（2026-11-06）**：本家パックの 3（Compat Patch remerged 0.71）、4（core v0.5.1）、6（Scope Effects Guard v0.5.1）、Add-on（RC7、Glossy、Better Beef、Anti-Lag、Viper 2）を有効。GSquared.Away.FG.UI.Scope.Patch、GSA031、GDLSS FSR3 Compatibility Patch、旧 G6、旧 3/4/5 は無効。変更前は `modlist.txt.before_v051`
 - **旧ブランチ**：`sa-fg-v04-bc031` / `freelook-keep-view`（Fomok ベース、AnomalyDX11AVX.exe）。下の記録はその時代のもの
 
+## 作業中：`goyu-v051-painter`（2026-11-18〜、BloodEngine / Painter V13 のマージ）
+
+- 元：ユーザーが渡した BloodEngine_f14n_source.zip（demonized 3470feeb 上のパッチ）。`git apply --3way` で当て、R3 は除外。衝突 156 か所を解決（DLSS/FG/PiP/LuaJIT 割り当ては自前を残す。xr_alloc に Painter 用の互換シムを追加）
+- ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）
+  - 1回目：重複宣言（r__dsgraph native_ui）と PHGeometryOwner の GMLibrary → 修正
+  - 2回目：xrRender_R4 は通った。xrGame で script_game_object.cpp の include 不足 → 修正
+  - 3回目：Actions 44120327457（結果未確認）。次はリンクエラーの可能性
+- 通ったら：今の exe を退避 → 成果物を上書き。Painter V13 本体（v13.zip）と GFY V6 モデルパック（31GB）が必要。旧「Painter of the Zone OVERHAUL」は無効に
+- 不安点：Painter の描画（傷マスク等）が DX12 ブリッジ＋FG 上で動くかは未確認
+
 ## エンジン（旧：sa-fg-v04-bc031）
 
 ### リポジトリ
