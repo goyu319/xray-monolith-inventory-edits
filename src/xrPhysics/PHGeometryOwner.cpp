@@ -527,3 +527,8 @@ bool CPHGeometryOwner::try_append_Boxes_prebuild(const std::vector<Fobb>& boxes,
     for(auto* g:staged)m_geoms.push_back(g);
     return true;
 }
+
+void CPHGeometryOwner::SetMaterial(LPCSTR m)
+{
+	SetMaterial(GMLibrary().GetMaterialIdx(m));
+}

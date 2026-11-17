@@ -172,8 +172,6 @@ public:
 	void r_dsgraph_render_lods(bool _setup_zb, bool _clear);
 	void r_dsgraph_render_sorted(bool render_hud = true);
 	void r_dsgraph_render_sorted_hud();
-	void r_dsgraph_extract_native_ui();
-	void r_dsgraph_render_native_ui(bool renderHudUi);
 	void r_dsgraph_render_emissive(bool clear = true, bool renderHUD = false);
 	void r_dsgraph_render_wmarks();
 	void r_dsgraph_render_distort();
