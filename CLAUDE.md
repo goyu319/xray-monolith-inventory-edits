@@ -53,7 +53,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
 - **2026-11-18 からこのブランチがメイン**（ユーザーの決定）。普段はこれを使う。エンジンの追加機能や修正は、基本的にこのブランチだけに入れる
   - `goyu-v051`（Painter なし版）は予備として残す。わざわざ同期しなくてよい。戻すときはその成果物で bin を上書きし、Painter v13 / v13_gfy_v6 を MO2 で無効にする（BloodEngine が無いと V13 は動かない）
 - 元：ユーザーが渡した BloodEngine_f14n_source.zip（demonized 3470feeb 上のパッチ）。`git apply --3way` で当て、R3 は除外。衝突 156 か所を解決（DLSS/FG/PiP/LuaJIT 割り当ては自前を残す。xr_alloc に Painter 用の互換シムを追加）。`goyu-v051` の中身はすべて含む
-- ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）。成果物名は `GOYU-Engine-v051-SquaredAway-DX12`（goyu-v051 と同じ名前なので取り違えに注意）
+- ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）。成果物名は `GOYU-Engine-v051-DX12-DLSS5-SA-POTZ`（goyu-v051 の `GOYU-Engine-v051-SquaredAway-DX12` と区別するため 2026-11-18 に変更）
   - 1〜4回目：重複宣言、include 不足、RecreateSkeleton の移植、weapon_grip_kinematics.h の追加で修正
   - 5回目：Actions 44280594040 で**ビルド成功**、ゲーム内で動作確認済み（2026-11-18）
 - MOD 側：Painter v13（本体）＋ Painter v13_gfy_v6（GFY V6 用モデルパック、meshes\painter と設定だけ）。旧「Painter of the Zone OVERHAUL」は無効

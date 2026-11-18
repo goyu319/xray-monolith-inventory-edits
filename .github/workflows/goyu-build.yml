@@ -1,4 +1,4 @@
-name: GOYU-v051-Build
+name: GOYU-v051-Painter-Build
 
 # GOYU engine: upstream v0.5.1-dev (DLSS 0.71 + DX12 frame generation + bodycam)
 # with the Squared Away inventory hooks and the GOYU freelook / texture fixes.
@@ -113,7 +113,7 @@ jobs:
     # Download this artifact for one ZIP with bin/ and db/ at its root.
     - uses: actions/upload-artifact@v4.6.0
       with:
-        name: GOYU-Engine-v051-SquaredAway-DX12
+        name: GOYU-Engine-v051-DX12-DLSS5-SA-POTZ
         path: ./package/
         if-no-files-found: error
         retention-days: 14
