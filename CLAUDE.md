@@ -54,7 +54,9 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
 - ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）
   - 1回目：重複宣言（r__dsgraph native_ui）と PHGeometryOwner の GMLibrary → 修正
   - 2回目：xrRender_R4 は通った。xrGame で script_game_object.cpp の include 不足 → 修正
-  - 3回目：Actions 44120327457（結果未確認）。次はリンクエラーの可能性
+  - 3回目：RecreateSkeleton（本家 2026.11 の物理骨格の作り直し）が無い → 移植
+  - 4回目：Weapon.cpp に weapon_grip_kinematics.h の include が入っていなかった → 追加
+  - 5回目：Actions 44280594040 で**ビルド成功**（2026-11-18）。ゲーム内は未確認
 - 通ったら：今の exe を退避 → 成果物を上書き。Painter V13 本体（v13.zip）と GFY V6 モデルパック（31GB）が必要。旧「Painter of the Zone OVERHAUL」は無効に
 - 不安点：Painter の描画（傷マスク等）が DX12 ブリッジ＋FG 上で動くかは未確認
 
