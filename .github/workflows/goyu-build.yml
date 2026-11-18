@@ -110,10 +110,14 @@ jobs:
           if (!(Test-Path -LiteralPath (Join-Path ./package $file) -PathType Leaf)) { throw "Missing required file: $file" }
         }
         @{ commit = $env:GITHUB_SHA; base = "v0.5.1-dev" } | ConvertTo-Json | Set-Content ./package/build-manifest.json -Encoding utf8
+    - name: Build date (JST)
+      run: |
+        $jst = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, "Tokyo Standard Time")
+        "BUILD_DATE=$($jst.ToString('yyyy-MM-dd'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     # Download this artifact for one ZIP with bin/ and db/ at its root.
     - uses: actions/upload-artifact@v4.6.0
       with:
-        name: GOYU-Engine-v051-DX12-DLSS5-SA-POTZ
+        name: GOYU-Engine-v051-DX12-DLSS5-SA-POTZ-${{ env.BUILD_DATE }}
         path: ./package/
         if-no-files-found: error
         retention-days: 14
