@@ -2453,6 +2453,29 @@ void CCharacterPhysicsSupport::in_ChangeVisual()
 	}
 }
 
+void CCharacterPhysicsSupport::RecreateSkeleton()
+{
+	if (!m_physics_skeleton && !m_pPhysicsShell) return;
+
+	if (m_pPhysicsShell)
+	{
+		VERIFY(m_eType!=etStalker);
+		if (m_physics_skeleton)
+		{
+			m_EntityAlife.processing_deactivate();
+			m_physics_skeleton->Deactivate();
+			xr_delete(m_physics_skeleton);
+		}
+		if (m_EntityAlife.Visual())
+			CreateSkeleton(m_physics_skeleton);
+		if (m_pPhysicsShell)
+			m_pPhysicsShell->Deactivate();
+		xr_delete(m_pPhysicsShell);
+		if (m_EntityAlife.Visual())
+			ActivateShell(NULL);
+	}
+}
+
 bool CCharacterPhysicsSupport::CanRemoveObject()
 {
 	if (m_eType == etActor)

@@ -218,6 +218,7 @@ public:
 	void in_Hit(SHit& H, bool is_killing = false);
 	void in_NetSave(NET_Packet& P);
 	void in_ChangeVisual();
+	void RecreateSkeleton(); // upstream 2026.11: rebuild the physics shell after bone visibility changes
 	void in_Die(bool hit = true);
 	void on_create_anim_mov_ctrl();
 	void on_destroy_anim_mov_ctrl();
