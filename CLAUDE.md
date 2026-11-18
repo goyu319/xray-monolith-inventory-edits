@@ -48,17 +48,19 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
 - **MO2 の構成（2026-11-06）**：本家パックの 3（Compat Patch remerged 0.71）、4（core v0.5.1）、6（Scope Effects Guard v0.5.1）、Add-on（RC7、Glossy、Better Beef、Anti-Lag、Viper 2）を有効。GSquared.Away.FG.UI.Scope.Patch、GSA031、GDLSS FSR3 Compatibility Patch、旧 G6、旧 3/4/5 は無効。変更前は `modlist.txt.before_v051`
 - **旧ブランチ**：`sa-fg-v04-bc031` / `freelook-keep-view`（Fomok ベース、AnomalyDX11AVX.exe）。下の記録はその時代のもの
 
-## 作業中：`goyu-v051-painter`（2026-11-18〜、BloodEngine / Painter V13 のマージ）
+## メインエンジン：`goyu-v051-painter`（2026-11-18〜、BloodEngine / Painter V13 入り）
 
-- 元：ユーザーが渡した BloodEngine_f14n_source.zip（demonized 3470feeb 上のパッチ）。`git apply --3way` で当て、R3 は除外。衝突 156 か所を解決（DLSS/FG/PiP/LuaJIT 割り当ては自前を残す。xr_alloc に Painter 用の互換シムを追加）
-- ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）
-  - 1回目：重複宣言（r__dsgraph native_ui）と PHGeometryOwner の GMLibrary → 修正
-  - 2回目：xrRender_R4 は通った。xrGame で script_game_object.cpp の include 不足 → 修正
-  - 3回目：RecreateSkeleton（本家 2026.11 の物理骨格の作り直し）が無い → 移植
-  - 4回目：Weapon.cpp に weapon_grip_kinematics.h の include が入っていなかった → 追加
-  - 5回目：Actions 44280594040 で**ビルド成功**（2026-11-18）。ゲーム内は未確認
-- 通ったら：今の exe を退避 → 成果物を上書き。Painter V13 本体（v13.zip）と GFY V6 モデルパック（31GB）が必要。旧「Painter of the Zone OVERHAUL」は無効に
-- 不安点：Painter の描画（傷マスク等）が DX12 ブリッジ＋FG 上で動くかは未確認
+- **2026-11-18 からこのブランチがメイン**（ユーザーの決定）。普段はこれを使う。エンジンの追加機能や修正は、基本的にこのブランチだけに入れる
+  - `goyu-v051`（Painter なし版）は予備として残す。わざわざ同期しなくてよい。戻すときはその成果物で bin を上書きし、Painter v13 / v13_gfy_v6 を MO2 で無効にする（BloodEngine が無いと V13 は動かない）
+- 元：ユーザーが渡した BloodEngine_f14n_source.zip（demonized 3470feeb 上のパッチ）。`git apply --3way` で当て、R3 は除外。衝突 156 か所を解決（DLSS/FG/PiP/LuaJIT 割り当ては自前を残す。xr_alloc に Painter 用の互換シムを追加）。`goyu-v051` の中身はすべて含む
+- ビルド：`gh workflow run goyu-build.yml --ref goyu-v051-painter`（push では動かない）。成果物名は `GOYU-Engine-v051-SquaredAway-DX12`（goyu-v051 と同じ名前なので取り違えに注意）
+  - 1〜4回目：重複宣言、include 不足、RecreateSkeleton の移植、weapon_grip_kinematics.h の追加で修正
+  - 5回目：Actions 44280594040 で**ビルド成功**、ゲーム内で動作確認済み（2026-11-18）
+- MOD 側：Painter v13（本体）＋ Painter v13_gfy_v6（GFY V6 用モデルパック、meshes\painter と設定だけ）。旧「Painter of the Zone OVERHAUL」は無効
+  - V13 本体には Painter と無関係なシェーダー（SSS 21 系の ssfx_*、BloodEngine 用 DLSS、Glossy の deffer_impl_flat など19個）が入っていて、SSS 23 や Compat Patch 0.721 と食い違って起動時に落ちる。MO2 で Hide 済み（`.mohidden`）
+  - 生きている NPC に傷が付かなかった：Painter は `grok_bo.script` から防具貫通の結果（`set_painter_armor_penetrated`）を受け取る。GAMMA Sin Resistance Removal の grok_bo が優先されてその処理が無かった。Sin 版に貫通結果を渡す数行を足したものを GOYU All-in-One に置いた（ダメージ計算は不変）
+  - ヘッドショットの大きいスタッター：血のテクスチャの先読み上限（MCM → Performance → Texture preload budget、初期 256MB）から溢れた分をその場で読むため。1024MB を勧めた
+  - 未確認：傷の中が空洞で地面が見えることがある（ショットガンで断面ごと消えた仕様か、内側の描画が出ていないのか未判別）
 
 ## エンジン（旧：sa-fg-v04-bc031）
 
