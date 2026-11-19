@@ -235,6 +235,7 @@ extern float legs_fwd_offset;
 extern float legs_spine_offset_y;
 extern BOOL legs_in_demo_record;
 extern BOOL legs_in_low_crouch;
+extern BOOL g_actor_heavy_breath;
 extern BOOL legs_attach_to_camera;
 extern BOOL legs_render_attachments_shadow;
 
@@ -3146,6 +3147,7 @@ void CCC_RegisterCommands()
     CMD4(CCC_Float, "g_legs_spine_offset_y", &legs_spine_offset_y, -1.0f, 1.0f);
     CMD4(CCC_Integer, "g_legs_in_demo_record", &legs_in_demo_record, 0, 1);
     CMD4(CCC_Integer, "g_legs_in_low_crouch", &legs_in_low_crouch, 0, 1);
+    CMD4(CCC_Integer, "g_actor_heavy_breath", &g_actor_heavy_breath, 0, 1);
     CMD4(CCC_Integer, "g_legs_attach_to_camera", &legs_attach_to_camera, 0, 1);
     CMD4(CCC_Integer, "g_legs_render_attachments_shadow", &legs_render_attachments_shadow, 0, 1);
 

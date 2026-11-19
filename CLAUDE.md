@@ -61,6 +61,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
   - V13 本体には Painter と無関係なシェーダー（SSS 21 系の ssfx_*、BloodEngine 用 DLSS、Glossy の deffer_impl_flat など19個）が入っていて、SSS 23 や Compat Patch 0.721 と食い違って起動時に落ちる。MO2 で Hide 済み（`.mohidden`）
   - 生きている NPC に傷が付かなかった：Painter は `grok_bo.script` から防具貫通の結果（`set_painter_armor_penetrated`）を受け取る。GAMMA Sin Resistance Removal の grok_bo が優先されてその処理が無かった。Sin 版に貫通結果を渡す数行を足したものを GOYU All-in-One に置いた（ダメージ計算は不変）
   - ヘッドショットの大きいスタッター：血のテクスチャの先読み上限（MCM → Performance → Texture preload budget、初期 256MB）から溢れた分をその場で読むため。1024MB を勧めた
+  - 2026-11-19：エンジンの息切れ音（`CActor::shedule_Update` の `m_HeavyBreathSnd`、Limping 時にループ）をオン・オフするコンソール変数 `g_actor_heavy_breath`（既定 1）を追加。Dynamic Realistic Breath の音が鳴っている間だけ、GOYU All-in-One のスクリプトが 0 にする
   - 未確認：傷の中が空洞で地面が見えることがある（ショットガンで断面ごと消えた仕様か、内側の描画が出ていないのか未判別）
 
 ## エンジン（旧：sa-fg-v04-bc031）

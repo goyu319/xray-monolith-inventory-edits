@@ -1818,6 +1818,9 @@ void CActor::set_state_box(u32 mstate)
 		character_physics_support()->movement()->ActivateBox(0, true);
 }
 
+// GOYU: lets scripts (Dynamic Realistic Breath) mute the engine's limping breath while they own the breathing audio
+BOOL g_actor_heavy_breath = TRUE;
+
 void CActor::shedule_Update(u32 DT)
 {
 	PROF_EVENT("CActor shedule_Update");
@@ -1987,7 +1990,7 @@ void CActor::shedule_Update(u32 DT)
 	// Звук тяжелого дыхания при усталости и хромании (Heavy breathing sound when tired or limping)
 	if (this == Level().CurrentControlEntity() && !g_dedicated_server)
 	{
-		if (conditions().IsLimping() && g_Alive() && !psActorFlags.test(AF_GODMODE_RT))
+		if (g_actor_heavy_breath && conditions().IsLimping() && g_Alive() && !psActorFlags.test(AF_GODMODE_RT))
 		{
 			if (!m_HeavyBreathSnd._feedback())
 			{
