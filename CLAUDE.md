@@ -62,6 +62,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
   - 生きている NPC に傷が付かなかった：Painter は `grok_bo.script` から防具貫通の結果（`set_painter_armor_penetrated`）を受け取る。GAMMA Sin Resistance Removal の grok_bo が優先されてその処理が無かった。Sin 版に貫通結果を渡す数行を足したものを GOYU All-in-One に置いた（ダメージ計算は不変）
   - ヘッドショットの大きいスタッター：血のテクスチャの先読み上限（MCM → Performance → Texture preload budget、初期 256MB）から溢れた分をその場で読むため。1024MB を勧めた
   - 2026-11-19：エンジンの息切れ音（`CActor::shedule_Update` の `m_HeavyBreathSnd`、Limping 時にループ）をオン・オフするコンソール変数 `g_actor_heavy_breath`（既定 1）を追加。Dynamic Realistic Breath の音が鳴っている間だけ、GOYU All-in-One のスクリプトが 0 にする
+  - 2026-11-21：本家（smoke）v0.7.1-dev から A-Life の修正2件を cherry-pick。`d43429664`：`alife_schedule_registry.h` の `use_time_limit` が `true` のままで、2回目以降の更新で常に時間切れになり、オフラインの部隊とスマートテレインが一切更新されなかった（拠点で NPC が棒立ち、湧かない、届け物タスクの相手が見つからない）。`false` に戻し、Smart tail QoS も既定オフ。`fbc658c27`：`CALifeUpdateManager::set_process_time` が graph() にマイクロ秒のまま渡していたのを秒に直す
   - 未確認：傷の中が空洞で地面が見えることがある（ショットガンで断面ごと消えた仕様か、内側の描画が出ていないのか未判別）
 
 ## エンジン（旧：sa-fg-v04-bc031）
