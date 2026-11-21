@@ -774,6 +774,9 @@ float stalker_movement_manager_base::speed(const EMovementDirection& movement_di
 
 	// native17 (v2.24 Order::gait): the lowered jog moves at the free-state run speed, the sprint at the panic run speed -
 	// the clips' own speeds (the native action sets the speed scale to 1 for them)
+	extern int g_goyu_painter_anim;
+	if (!g_goyu_painter_anim)
+		return (m_velocities->velocity(mental_state(), body_state(), movement_type(), movement_direction));
 	if (u32 const gait = object().painter_gait_effective())
 		if (movement_type() == eMovementTypeRun && body_state() == eBodyStateStand)
 			return (m_velocities->velocity(gait == 2 ? eMentalStatePanic : eMentalStateFree, eBodyStateStand, eMovementTypeRun,

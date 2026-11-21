@@ -139,11 +139,14 @@ static inline float select_speed(float const distance, float const speed, float 
 void CSightManager::Exec_Look(float time_delta)
 {
 	START_PROFILE("Sight Manager")
+		extern int g_goyu_painter_look;
+		if (g_goyu_painter_look) {
 		if (g_painter_lean_test) m_object->set_painter_lean(float(g_painter_lean_test) / 100.f);
 		if (g_painter_shoulder_test >= 0) m_object->set_painter_shoulder(g_painter_shoulder_test);
 		m_object->painter_lean_update(time_delta); // procedural lean target -> current, consumed by the spine bone callback
 		if (g_painter_fire_log)
 			m_object->painter_fire_log();
+		}
 		SBoneRotation& body = object().movement().m_body;
 		SBoneRotation& head = object().movement().m_head;
 
@@ -173,9 +176,13 @@ void CSightManager::Exec_Look(float time_delta)
 		extern float g_painter_look_head_rate_deg;
 		extern float g_painter_look_body_rate_deg;
 		extern float g_painter_look_dead_zone_deg;
+		bool head_in_dead_zone = false;
+		if (g_goyu_painter_look)
+		{
 		body_speed = _min(body_speed, deg2rad(g_painter_look_body_rate_deg));
 		head_speed = _min(head_speed, deg2rad(g_painter_look_head_rate_deg));
-		bool head_in_dead_zone = false;
+		}
+		if (g_goyu_painter_look)
 		{
 			const u32 sight_type = u32(current_action().sight_type());
 			const bool on_enemy = sight_type == SightManager::eSightTypeObject || sight_type == SightManager::eSightTypeFireObject;

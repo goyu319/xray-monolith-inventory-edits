@@ -9,6 +9,7 @@
 #include "pch_script.h"
 #include "painter_ai/EngineAttainedPose.h"         // after the precompiled header: anything above it is skipped
 #include "stalker_animation_manager.h"
+extern int g_goyu_painter_anim; // console_commands.cpp
 #include "ai/stalker/ai_stalker.h"
 #include "game_object_space.h"
 #include "script_callback_ex.h"
@@ -186,7 +187,8 @@ IC void CStalkerAnimationManager::play_head()
 
 IC void CStalkerAnimationManager::play_torso()
 {
-	bool const unchanged = torso().animation(painter_mirrored_torso(assign_torso_animation()));
+	MotionID const torso_clip = assign_torso_animation();
+	bool const unchanged = torso().animation(g_goyu_painter_anim ? painter_mirrored_torso(torso_clip) : torso_clip);
 	torso().play(m_skeleton_animated, torso_play_callback, false, false);
 	painter_update_grip(!unchanged);
 	painter_update_torso_spine();
@@ -210,6 +212,7 @@ void CStalkerAnimationManager::play_legs()
 	// cycle (and, while moving, the torso cycle) by the same factor so the stride length stays the clip's own.
 	// Written every frame (at scale 1 this equals what PlayCycle set), so a scale change in either direction takes
 	// effect on the running cycle; the torso rate returns to the clip's own when the NPC stops moving.
+	if (g_goyu_painter_anim)
 	{
 		const float scale = object().painter_speed_scale();
 		if (CBlend* blend = legs().blend())

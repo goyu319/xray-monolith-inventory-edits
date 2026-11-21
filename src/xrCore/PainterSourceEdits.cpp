@@ -46,6 +46,18 @@ std::mutex g_lock;
 volatile bool g_loaded = false;
 std::vector<FileEdits> g_files;
 thread_local int g_inside = 0;
+std::mutex g_log_lock;
+std::vector<std::string> g_logged; // files already reported (shaders are opened many times)
+
+bool first_report(const char* fname)
+{
+	std::lock_guard<std::mutex> guard(g_log_lock);
+	for (const std::string& f : g_logged)
+		if (f == fname)
+			return false;
+	g_logged.push_back(fname);
+	return true;
+}
 
 bool is_ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
@@ -274,7 +286,8 @@ bool apply_edits(std::string& src, const FileEdits& fe, const char* fname)
 			{
 				if (!ntext.empty() && view.text.find(ntext) != std::string::npos)
 					continue; // this version already has the change
-				Msg("! [painter edits] %s: edit %u (replace) does not match, file used as it is", fname, u32(k + 1));
+				if (first_report(fname))
+					Msg("! [painter edits] %s: edit %u (replace) does not match, file used as it is", fname, u32(k + 1));
 				return false;
 			}
 			const size_t start = view.pos[at];
@@ -295,7 +308,8 @@ bool apply_edits(std::string& src, const FileEdits& fe, const char* fname)
 		{
 			if (at == std::string::npos)
 			{
-				Msg("! [painter edits] %s: edit %u (after) does not match, file used as it is", fname, u32(k + 1));
+				if (first_report(fname))
+					Msg("! [painter edits] %s: edit %u (after) does not match, file used as it is", fname, u32(k + 1));
 				return false;
 			}
 			if (!ntext.empty() && view.text.compare(at + nmatch.size(), ntext.size(), ntext) == 0)
@@ -315,7 +329,8 @@ bool apply_edits(std::string& src, const FileEdits& fe, const char* fname)
 		}
 	}
 
-	Msg("[painter edits] %s: %d edit(s) applied (%s)", fname, applied, fe.source.c_str());
+	if (first_report(fname))
+		Msg("[painter edits] %s: %d edit(s) applied (%s)", fname, applied, fe.source.c_str());
 	return true;
 }
 } // namespace

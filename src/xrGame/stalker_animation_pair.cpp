@@ -47,7 +47,8 @@ void CStalkerAnimationPair::synchronize(IKinematicsAnimated* skeleton_animated,
 	// its frame 0 at every legs loop (replacement legs cycles no longer match every stock torso cycle).
 	CMotion* const torso_motion = skeleton_animated->LL_GetMotion(animation(), 0);
 	CMotion* const legs_motion = skeleton_animated->LL_GetMotion(stalker_animation.animation(), 0);
-	if (torso_motion && legs_motion && _abs(int(torso_motion->get_count()) - int(legs_motion->get_count())) > 1)
+	extern int g_goyu_painter_anim;
+	if (g_goyu_painter_anim && torso_motion && legs_motion && _abs(int(torso_motion->get_count()) - int(legs_motion->get_count())) > 1)
 		return;
 
 	blend()->timeCurrent = stalker_animation.blend()->timeCurrent;

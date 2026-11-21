@@ -84,6 +84,11 @@ extern int g_painter_lean_test;
 extern int g_painter_shoulder_test;
 extern int g_painter_fire_log;
 extern int g_painter_spine_comp;
+// GOYU: switches to find which Painter (BloodEngine) engine change breaks NPC behaviour. 1 = Painter as merged.
+int g_goyu_painter_planner = 1; // native combat action/evaluator in the stalker planner (read when an NPC is set up)
+int g_goyu_painter_look = 1;    // look/turn rate caps, head dead zone, lean update
+int g_goyu_painter_grip = 1;    // weapon placement: hidden-grip early return, left-shoulder mirror
+int g_goyu_painter_anim = 1;    // torso/legs sync guard, mirrored torso, clip speed scaling, gait/speed scale
 extern int g_painter_lh_ik;
 extern int g_painter_lh_ik_test;
 
@@ -3676,6 +3681,10 @@ void CCC_RegisterCommands()
 	CMD4(CCC_Integer, "painter_look_log", &g_painter_look_log, 0, 1); // [painter_look] per NPC per second: sight target + head pitch
 	CMD4(CCC_Integer, "painter_pose_log", &g_painter_pose_log, 0, 1); // [painter_pose] per NPC per second: rendered-skeleton sanity
 	CMD4(CCC_Integer, "painter_lean_test", &g_painter_lean_test, -100, 100); // force every stalker's lean target to N/100 (diagnostics)
+	CMD4(CCC_Integer, "goyu_painter_planner", &g_goyu_painter_planner, 0, 1);
+	CMD4(CCC_Integer, "goyu_painter_look", &g_goyu_painter_look, 0, 1);
+	CMD4(CCC_Integer, "goyu_painter_grip", &g_goyu_painter_grip, 0, 1);
+	CMD4(CCC_Integer, "goyu_painter_anim", &g_goyu_painter_anim, 0, 1);
 	CMD4(CCC_Integer, "painter_spine_comp", &g_painter_spine_comp, 0, 1); // rotate the upper body onto its torso clip's authored spine (1)
 	CMD4(CCC_Integer, "painter_fire_log", &g_painter_fire_log, 0, 1); // [painter_fire] native fire checks per stalker with an enemy, 1 Hz
 	CMD4(CCC_Integer, "painter_shoulder_test", &g_painter_shoulder_test, -1, 2); // force every stalker's shoulder mode: 0 right, 1 left, 2 auto; -1 off

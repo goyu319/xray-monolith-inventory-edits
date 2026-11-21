@@ -108,7 +108,9 @@ void CStalkerPlanner::setup(CAI_Stalker* object)
 	clear();
 	add_evaluators();
 	add_actions();
-	painter::combat::engine::register_actor(*this, *object);
+	extern int g_goyu_painter_planner;
+	if (g_goyu_painter_planner)
+		painter::combat::engine::register_actor(*this, *object);
 
 	CWorldState target;
 	target.add_condition(CWorldProperty(eWorldPropertyPuzzleSolved, true));
@@ -177,7 +179,8 @@ void CStalkerPlanner::update(u32 time_delta)
 
 	const bool record_brain = ai().script_engine().lua_recording() && CPU::qpc_freq;
 	CStalkerBrainProfileScope profile_scope(this, record_brain);
-	if (!painter_forced_update())
+	extern int g_goyu_painter_planner;
+	if (!g_goyu_painter_planner || !painter_forced_update())
 		inherited::update();
 
 #ifdef GOAP_DEBUG
