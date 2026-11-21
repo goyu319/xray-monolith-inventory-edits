@@ -90,6 +90,9 @@ u32 lvInterpSteps = 0;
 
 #ifdef SPAWN_ANTIFREEZE
 BOOL spawn_antifreeze = TRUE;
+// GOYU: Painter (BloodEngine) native spawn stream - holds ordinary spawn/event packets across frames. 0 = stock
+// spawn processing (read when a level is created, i.e. on the next load).
+BOOL painter_spawn_stream = TRUE;
 BOOL spawn_antifreeze_debug = FALSE;
 static HANDLE prefetch_thread_signal;
 
@@ -253,13 +256,14 @@ CLevel::CLevel() :
     static std::atomic<std::uint64_t> next_world{0};
     m_painter_world_cookie=painter_lifetime::allocate(next_world);
     R_ASSERT2(m_painter_world_cookie,"Native world cookie exhausted");
-    m_painter_spawn_stream=xr_new<painter_stream::NativeStream>(*this);
+    m_painter_spawn_stream=painter_spawn_stream?xr_new<painter_stream::NativeStream>(*this):nullptr;
+    Msg("[GOYU] painter_spawn_stream=%d", int(painter_spawn_stream));
     painter::combat::engine::level_created(); // native combat AI: a new level epoch before the level's scripts run
     painter::combat::engine::initialize_combat_runtime(); // native combat AI: registers its frame tick (stays for the next map)
     g_bDebugEvents = Core.ParamsData.test(ECoreParams::debug_ge);
     game_events = xr_new<NET_Queue_Event>();
     game_events->painter_capture_context=m_painter_spawn_stream;
-    game_events->painter_capture=&painter_stream::NativeStream::Capture;
+    game_events->painter_capture=m_painter_spawn_stream?&painter_stream::NativeStream::Capture:nullptr;
 
     eChangeRP = Engine.Event.Handler_Attach("LEVEL:ChangeRP", this);
     eDemoPlay = Engine.Event.Handler_Attach("LEVEL:PlayDEMO", this);

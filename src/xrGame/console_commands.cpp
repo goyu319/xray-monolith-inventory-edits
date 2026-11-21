@@ -218,6 +218,7 @@ extern BOOL alifeObjectHangingLampIgnoreMatchConfiguration;
 extern BOOL duplicate_story_id_crash;
 
 extern BOOL spawn_antifreeze;
+extern BOOL painter_spawn_stream;
 extern BOOL spawn_antifreeze_debug;
 extern int spawn_time_log;
 
@@ -3543,6 +3544,7 @@ void CCC_RegisterCommands()
 	CMD4(CCC_Integer, "scheduler_log", &SchedulerLog, 0, 1);
 
 	CMD4(CCC_Integer, "spawn_antifreeze", &spawn_antifreeze, 0, 1);
+	CMD4(CCC_Integer, "painter_spawn_stream", &painter_spawn_stream, 0, 1);
 	CMD4(CCC_Integer, "spawn_antifreeze_debug", &spawn_antifreeze_debug, 0, 1);
 	CMD4(CCC_Integer, "spawn_time_log", &spawn_time_log, 0, 1000);
 
