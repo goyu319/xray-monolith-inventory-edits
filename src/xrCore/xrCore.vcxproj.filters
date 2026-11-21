@@ -231,6 +231,9 @@
     <ClCompile Include="ShaderSourceCRC.cpp">
       <Filter>shared memory/string library</Filter>
     </ClCompile>
+    <ClCompile Include="PainterSourceEdits.cpp">
+      <Filter>shared memory/string library</Filter>
+    </ClCompile>
     <ClCompile Include="xr_shared.cpp">
       <Filter>shared memory/string library</Filter>
     </ClCompile>
@@ -607,6 +610,9 @@
       <Filter>Threading</Filter>
     </ClInclude>
     <ClInclude Include="ShaderSourceCRC.h">
+      <Filter>shared memory/string library</Filter>
+    </ClInclude>
+    <ClInclude Include="PainterSourceEdits.h">
       <Filter>shared memory/string library</Filter>
     </ClInclude>
     <ClInclude Include="..\3rd party\stackwalker\include\StackWalker.h">

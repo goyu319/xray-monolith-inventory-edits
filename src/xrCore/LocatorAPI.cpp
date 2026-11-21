@@ -3,6 +3,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "PainterSourceEdits.h"
 #pragma hdrstop
 
 #pragma warning(disable:4995)
@@ -1532,7 +1533,17 @@ CStreamReader* CLocatorAPI::rs_open(LPCSTR path, LPCSTR _fname)
 
 IReader* CLocatorAPI::r_open(LPCSTR path, LPCSTR _fname)
 {
-	return (r_open_impl<IReader>(path, _fname));
+	IReader* R = r_open_impl<IReader>(path, _fname);
+	if (!R)
+		return R;
+
+	// Painter V13 source edits for shader and script sources (see PainterSourceEdits.cpp)
+	string_path fname;
+	xr_strcpy(fname, _fname);
+	xr_strlwr(fname);
+	if (path && path[0])
+		update_path(fname, path, fname);
+	return painter_source_edits_apply(R, fname);
 }
 
 void CLocatorAPI::r_close(IReader*& fs)

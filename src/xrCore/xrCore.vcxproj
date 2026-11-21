@@ -558,6 +558,7 @@
     <ClCompile Include="crc32.cpp" />
     <ClCompile Include="dump_string.cpp" />
     <ClCompile Include="ShaderSourceCRC.cpp" />
+    <ClCompile Include="PainterSourceEdits.cpp" />
     <ClCompile Include="FileSystem.cpp" />
     <ClCompile Include="FileSystem_borland.cpp" />
     <ClCompile Include="file_stream_reader.cpp" />
@@ -729,6 +730,7 @@
     <ClInclude Include="rt_miniacc.h" />
     <ClInclude Include="ScopeLock.hpp" />
     <ClInclude Include="ShaderSourceCRC.h" />
+    <ClInclude Include="PainterSourceEdits.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="stream_reader.h" />
     <ClInclude Include="stream_reader_inline.h" />

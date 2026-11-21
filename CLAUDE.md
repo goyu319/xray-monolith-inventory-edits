@@ -63,6 +63,8 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
   - ヘッドショットの大きいスタッター：血のテクスチャの先読み上限（MCM → Performance → Texture preload budget、初期 256MB）から溢れた分をその場で読むため。1024MB を勧めた
   - 2026-11-19：エンジンの息切れ音（`CActor::shedule_Update` の `m_HeavyBreathSnd`、Limping 時にループ）をオン・オフするコンソール変数 `g_actor_heavy_breath`（既定 1）を追加。Dynamic Realistic Breath の音が鳴っている間だけ、GOYU All-in-One のスクリプトが 0 にする
   - 2026-11-21：本家（smoke）v0.7.1-dev から A-Life の修正2件を cherry-pick。`d43429664`：`alife_schedule_registry.h` の `use_time_limit` が `true` のままで、2回目以降の更新で常に時間切れになり、オフラインの部隊とスマートテレインが一切更新されなかった（拠点で NPC が棒立ち、湧かない、届け物タスクの相手が見つからない）。`false` に戻し、Smart tail QoS も既定オフ。`fbc658c27`：`CALifeUpdateManager::set_process_time` が graph() にマイクロ秒のまま渡していたのを秒に直す（Painter 版 Actions 44867654930）。切り分け用に Painter なしの `goyu-v051` にも同じ2件を入れた（`aa5f31aa1`、Actions 44877130573）
+  - 2026-11-21：Painter V13 の 11/19 更新に対応。新しい V13 は他 MOD のシェーダー・スクリプトのコピーを持たず、`configs\painter_source_edits\*.txt` の小さな編集（`@file` / `@replace`〜`@with`〜`@end` / `@after`〜`@insert`〜`@end` / `@prepend`〜`@end`、空白と改行を無視して照合）をエンジンが読み込み時に当てる方式になった。11/19 版のエンジンのソースは未公開なので、書式から自前で実装（`src/xrCore/PainterSourceEdits.cpp`、`CLocatorAPI::r_open` の後でシェーダーとスクリプトにだけ適用。合わない編集があればそのファイルは元のまま、ログに `[painter edits]`）。名前に `upscaler` を含む編集ファイルは BloodEngine 自身の DX11 DLSS 用なので読まない
+    - 編集ファイル `painter_v13.txt` はインストーラーが入れる「BloodEngine Upscaler and Edit Files」MOD にあるが、この MOD（と「BloodEngine Bodycam PiP Support Files」）は BloodEngine の exe 用の DLSS シェーダーや axr_main などを含み最上位に置かれるので無効のまま。`painter_v13.txt` だけ GOYU All-in-One の同じ場所に複製する。Painter を更新したら複製し直す
   - 未確認：傷の中が空洞で地面が見えることがある（ショットガンで断面ごと消えた仕様か、内側の描画が出ていないのか未判別）
 
 ## エンジン（旧：sa-fg-v04-bc031）
