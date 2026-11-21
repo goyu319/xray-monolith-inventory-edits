@@ -725,6 +725,18 @@ bool CLevel::PainterDispatchSpawn(const NET_Event& E)
 			goto spawn;
 		}
 
+		// smoke 45eea30a2: gone from the server while its spawn waited: its destroy event found no client object, so this
+		// one would never be destroyed, and its net export breaks the server when the ID goes to another object.
+		if (Server)
+		{
+			const CSE_Abstract* entity = Server->ID_to_entity(obj_id);
+			if (!entity || entity->s_name != section)
+			{
+				if (spawn_antifreeze_debug) Msg("![ProcessSpawnEvents] server entity gone or replaced, do not spawn, section %s, obj_id %d", section.c_str(), obj_id);
+				return false;
+			}
+		}
+
         // Preserve the original prefetch-time ALife membership and online
         // filter independently of whether an additional lifetime witness exists.
         if(E.painter_prefetched&&E.painter_had_alife_object){

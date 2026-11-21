@@ -1,40 +1,47 @@
 # ===========================================================================
-#  1-click installer: GAMMA v0.6-dev (DX12 + frame gen + bodycam + PiP
+#  1-click installer: GAMMA v0.7.2-dev (DX12 + frame gen + bodycam + PiP
 #  scopes + DLSS/FSR)
 #
 #  PLAIN TEXT SCRIPT. Read it in Notepad first if you like. It:
 #     1. finds your GAMMA folder and checks everything BEFORE changing anything
 #     2. shows what it will do and asks once
 #     3. copies the engine (DX11 + DX12) and verifies every copy by SHA-256.
-#        Every file of yours it replaces is MOVED into GAMMA\.slopray\backup
+#        Every file of yours it replaces is MOVED into <game folder>\.slopray\backup
 #        first (never deleted, never overwritten). The first backup of a file
 #        is kept forever, so updates never lose your real original.
 #     4. unpacks the MO2 mods + the add-ons your mod list needs
 #     5. ticks + orders them in your active MO2 profile and unticks
-#        old/conflicting versions
+#        old/conflicting versions. Screen Space Shaders 24 found: switches
+#        back to SSS 23.5 (the uninstaller brings SSS24 back)
 #     6. adds "Anomaly (DX12 + Frame Gen)" to MO2's launch dropdown
 #     7. RTX 20/30/40 only: installs OptiScaler (STEP 6) with its built-in
 #        frame gen unlock, so DLSS 2x/3x/4x shows up in the game menu
-#     8. first install only: sets MSAA off, VSync off, upscaler on (DLSS on
+#     8. every run: MSAA off (the upscaler needs it). first install only: VSync off, upscaler on (DLSS on
 #        RTX, FSR otherwise), frame gen on for RTX 40/50
 #     9. moves the shader cache aside (not deleted)
 #    10. puts "UNINSTALL - Slop-Ray Engine.bat" in your GAMMA folder
-#  Everything it does is written to GAMMA\.slopray\record.json, so the
+#  Everything it does is written to <game folder>\.slopray\record.json, so the
 #  uninstaller can put your files back. If it fails or is stopped part-way,
 #  it undoes what it did (or offers to on the next run).
 #  Never touches the internet, never writes outside your STALKER folder.
 #  Safe to run again.
 #     -DryRun     show what would happen, change nothing
 #     -Dlss5      also install DLSS 5 / Neural Rendering (STEP 6, RTX only)
-#     -GamePath "D:\Games\S.T.A.L.K.E.R. GAMMA"   skip auto-detection
+#     -OptiScaler 0.1.38   OptiScaler F5 version (STEP 6). Default 0.1.35, the one
+#                 played since v0.5; 0.1.38 adds DLSS 5 "Model resolution", untested
+#     -GamePath "D:\Games\S.T.A.L.K.E.R. GAMMA"   skip auto-detection (the folder
+#                 with Anomaly + GAMMA in it, or either of those two)
+#     -AskPath    don't search, ask for the folder (INSTALL - choose folder.bat)
 #     -Yes        don't ask, just do it
 #     -GpuName "NVIDIA GeForce RTX 3060"   testing only: pretend this GPU
 # ===========================================================================
 [CmdletBinding()]
 param(
     [string]$GamePath,
+    [switch]$AskPath,
     [switch]$DryRun,
     [switch]$Dlss5,
+    [ValidateSet('0.1.35', '0.1.38')][string]$OptiScaler = '0.1.35',
     [switch]$Yes,
     [string]$GpuName
 )
@@ -42,7 +49,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $pack = Split-Path -Parent $MyInvocation.MyCommand.Path
 Import-Module "$pack\SlopRay.psm1" -Force -DisableNameChecking
-$PackVersion = 'v0.6-dev'
+$PackVersion = 'v0.7.2-dev'
+$OptiDefault = '0.1.35'      # the F5 version in STEP 6 itself; others are "STEP 6\F5 <version>"
 $fail = 0
 $todo = New-Object System.Collections.Generic.List[string]
 $utf8 = New-Object System.Text.UTF8Encoding($false)   # MO2 files have no BOM
@@ -79,6 +87,8 @@ function Confirm-Go ($q) {
 Say ""
 Say "==================================================================="
 Say "  GAMMA $PackVersion installer (DX12 + Frame Gen + DLSS/FSR)"
+# which pack build this is (players run old zips); the release notes list the same hash
+Say "  install.ps1 $((Get-Item -LiteralPath $MyInvocation.MyCommand.Path).LastWriteTime.ToString('yyyy-MM-dd'))  SHA-256 $((Get-Sha $MyInvocation.MyCommand.Path).Substring(0, 12))"
 if ($DryRun) { Say "  *** DRY RUN - nothing will be changed ***" }
 Say "==================================================================="
 
@@ -95,30 +105,33 @@ if ($busy) {
     }
 } else { Good "closed" }
 
-# --- 1b. CPU: the DX12 exe is built for AVX2 -----------------------------
-Head "Checking CPU (DX12 exe needs AVX2)"
-$avx2 = $null
+# --- 1b. CPU: both exes (DX12 and DX11-AVX) are built for AVX ---------------
+Head "Checking CPU (the engine needs AVX)"
+$avx = $null
 try {
     Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint f);' -Name K -Namespace GammaCpu -ErrorAction Stop
-    $avx2 = [GammaCpu.K]::IsProcessorFeaturePresent(40)   # PF_AVX2_INSTRUCTIONS_AVAILABLE
+    $avx = [GammaCpu.K]::IsProcessorFeaturePresent(39)   # PF_AVX_INSTRUCTIONS_AVAILABLE
 } catch { }
-if ($avx2 -eq $true) { Good "AVX2 supported" }
-elseif ($avx2 -eq $false) {
-    Warn "your CPU has NO AVX2. 'Anomaly (DX12 + Frame Gen)' will crash at start."
-    Warn "use the normal DX11 entry instead (no frame gen). See README: HARD REQUIREMENT."
-    $todo.Add("Your CPU has no AVX2: launch the normal DX11 entry, NOT 'Anomaly (DX12 + Frame Gen)'")
-} else { Warn "could not check AVX2 - see README: HARD REQUIREMENT" }
+if ($avx -eq $true) { Good "AVX supported" }
+elseif ($avx -eq $false) {
+    Warn "your CPU has NO AVX: neither Slop-Ray exe (DX12 + Frame Gen, DX11-AVX) will run on it."
+    Warn "only G.A.M.M.A.'s own non-AVX DX11 entry works on this CPU. See README: HARD REQUIREMENT."
+    $todo.Add("Your CPU has no AVX: Slop-Ray will not run on it. Use G.A.M.M.A.'s own non-AVX DX11 entry in MO2")
+} else { Warn "could not check AVX - see README: HARD REQUIREMENT" }
 
 # --- 2. find the game ----------------------------------------------------
 Head "Finding your STALKER GAMMA folder"
-try { $root = Find-GammaRoot $GamePath $pack } catch { Bad $_.Exception.Message; Pause-End 1 }
-$root    = $root.TrimEnd('\')
-$anomaly = "$root\Anomaly"
-$gamma   = "$root\GAMMA"
+try { $inst = Select-GammaInstall $GamePath $pack -Ask:$AskPath -NoPrompt:$Yes } catch { Bad $_.Exception.Message; Pause-End 1 }
+$root    = $inst.Home          # where .slopray and the uninstaller go
+$anomaly = $inst.Anomaly
+$gamma   = $inst.Mo2           # the G.A.M.M.A. MO2 folder
 $modsDir = "$gamma\mods"
-Good "found: $root"
+if ($inst.Split) {
+    Good "found Anomaly:           $anomaly"
+    Good "found G.A.M.M.A. (MO2):  $gamma"
+} else { Good "found: $root" }
 
-try { $sr = Open-SlopRay $root "$pack\catalogue.json" } catch { Bad $_.Exception.Message; Pause-End 1 }
+try { $sr = Open-SlopRay $inst "$pack\catalogue.json" } catch { Bad $_.Exception.Message; Pause-End 1 }
 if ($sr.WasNew) { Good "no earlier Slop-Ray record (first install with this installer)" }
 else { Good "Slop-Ray record found (last state: $($sr.Record.state))" }
 
@@ -139,8 +152,43 @@ if (-not $sr.WasNew -and $sr.Record.state -eq 'uninstalling') {
     Pause-End 1
 }
 
+# --- 2b. pack check ---------------------------------------------------------
+# pack-manifest.json (written when the pack is built) lists every pack file and its SHA-256.
+# A cut-off or damaged download is caught here, before anything else is read from the pack
+# (a cut-off zip would otherwise stop the installer with a confusing error) and before
+# anything is changed. (catalogue.json cannot do this: it only holds the hashes of PAST releases.)
+Head "Checking the pack files"
+$manifestFile = "$pack\pack-manifest.json"
+if (-not (Test-Path -LiteralPath $manifestFile)) {
+    Warn "this pack has no pack-manifest.json, so its files were not checked against a list."
+} else {
+    $manifest = (Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json).files.PSObject.Properties
+    $packBad = @()
+    foreach ($e in ($manifest | Sort-Object Name)) {
+        $f = "$pack\$($e.Name.Replace('/', [string][char]92))"
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { $packBad += "$($e.Name) (missing)" }
+        elseif ((Get-Sha $f) -ne $e.Value) { $packBad += "$($e.Name) (damaged)" }
+    }
+    if ($packBad.Count) {
+        Bad "this pack is incomplete or damaged: $($packBad.Count) of $(@($manifest).Count) files are missing or different. Re-download the full pack and run me again. Nothing was changed."
+        foreach ($n in ($packBad | Select-Object -First 5)) { Say "     $n" }
+        if ($packBad.Count -gt 5) { Say "     ... and $($packBad.Count - 5) more" }
+        if ($packBad | Where-Object { $_ -like '* (missing)' }) {
+            Say "  Missing files are often skipped by Windows when the folder path is too long (a 'Destination Path Too Long' box while extracting)."
+            Say "  Extract the zip to a short folder, for example C:\SlopRay, and run the installer from there."
+        }
+        Pause-End 1
+    }
+    Good "Pack check: every file is there and matches its checksum ($(@($manifest).Count) files)"
+}
+
 # --- 3. what gets copied -------------------------------------------------
 # Nothing is written in this part: it only builds the list of changes.
+# A path that is not safe (a link or junction inside the game folder) stops
+# the installer here, before anything is changed.
+function Get-PlanPath ($rel) {
+    try { Resolve-Rel $sr $rel } catch { Bad "$($_.Exception.Message). Nothing was changed."; Pause-End 1 }
+}
 $place = New-Object System.Collections.Generic.List[object]   # @{ Rel; Src; Set }
 function Add-Set ($label, $sourceDir, $destRel, $skip = @()) {
     if (-not (Test-Path -LiteralPath $sourceDir)) { Bad "$label is missing from this pack"; return }
@@ -166,7 +214,7 @@ else     { Bad "STEP 7 folder missing from this pack" }
 # an engine change needs a fresh shader cache
 $engineChange = $false
 foreach ($p in $place) {
-    $d = "$root\$($p.Rel)"
+    $d = Get-PlanPath $p.Rel
     if ($p.Rel -match '\.(exe|db0)$' -and (-not (Test-Path -LiteralPath $d) -or (Get-Sha $d) -ne (Get-Sha $p.Src))) { $engineChange = $true }
 }
 Good "$($place.Count) engine files to copy$(if ($engineChange) { '' } else { ' (engine already this version)' })"
@@ -179,6 +227,18 @@ if (-not $gpu) {
 $rtx       = $gpu -match 'NVIDIA.*RTX'
 $rtxFg     = $gpu -match 'RTX\s*(40|50)\d\d'          # DLSS frame gen without any unlock
 $needsUnlk = $gpu -match 'RTX\s*(20|30|40)\d\d'       # unlock: 20/30 get FG, 40 gets 3x/4x
+
+# HAGS (Hardware-accelerated GPU scheduling) should be on for the DX12 exe. Read only: the
+# installer never changes Windows settings, it tells you where the switch is.
+if ($place | Where-Object { $_.Rel -like '*\AnomalyDX12.exe' }) {
+    $hags = Get-HwSchMode
+    if ($hags -eq 2) { Good "GPU scheduling (HAGS): on" }
+    else {
+        $hagsMsg = "Hardware-accelerated GPU scheduling (HAGS) is $(if ($null -eq $hags) { 'off or not available' } else { 'off' }). The DX12 exe is meant to run with it on. Turn it on in Windows: Settings > System > Display > Graphics > Default graphics settings > Hardware-accelerated GPU scheduling, then restart Windows."
+        Warn $hagsMsg
+        $todo.Add($hagsMsg)
+    }
+}
 
 # OptiScaler (STEP 6, janblade's F5 build). Its built-in unlock ([MFGUnlock]
 # RTX40/RTX2030 = detect) only switches on for the GPU family that needs it.
@@ -203,42 +263,35 @@ if (-not $doOpti) {
         Warn "No frame gen unlock: on RTX 20/30 the game menu will show no DLSS frame gen."
         $ok = $false
     }
+    # STEP 6 holds the default F5 version; another version is a folder "F5 <version>" inside
+    # it with only the files that differ (dxgi.dll, its ini, ...). -OptiScaler picks it.
+    $s6v = $null
+    if ($ok -and $OptiScaler -ne $OptiDefault) {
+        $s6v = Get-ChildItem -LiteralPath $s6.FullName -Directory | Where-Object { $_.Name -eq "F5 $OptiScaler" } | Select-Object -First 1
+        if (-not $s6v) { Bad "OptiScaler $OptiScaler is not in this pack (STEP 6\F5 $OptiScaler missing)"; $ok = $false }
+    }
     if ($ok) {
-        # licences stay in the pack, not in the game folder
-        $skip = @('README.md', 'TROUBLESHOOTING.md', 'LICENSE', 'Licenses\*')
+        # licences stay in the pack, not in the game folder; the version folders are overlays
+        $skip = @('README.md', 'TROUBLESHOOTING.md', 'LICENSE', 'Licenses\*', 'F5 *\*')
         if (-not $Dlss5) { $skip += 'nvngx_dlssnr.dll' }   # 276 MB NR model, DLSS 5 only
         if ($Dlss5) { $skip += 'OptiScaler.ini'; $optiIni = "$($s6.FullName)\OptiScaler.ini" }   # edited copy added below
         Add-Set "OptiScaler" $s6.FullName "Anomaly\bin" $skip
+        if ($s6v) {
+            foreach ($p in $place) {
+                if ($p.Set -ne 'OptiScaler') { continue }
+                $o = "$($s6v.FullName)\$($p.Rel.Substring('Anomaly\bin\'.Length))"
+                if (Test-Path -LiteralPath $o -PathType Leaf) { $p.Src = $o }
+            }
+            if ($optiIni -and (Test-Path -LiteralPath "$($s6v.FullName)\OptiScaler.ini")) { $optiIni = "$($s6v.FullName)\OptiScaler.ini" }
+        }
+        Good "OptiScaler F5 $OptiScaler$(if ($OptiScaler -eq $OptiDefault) { ' (default)' })"
         if ($needsUnlk) { Good "frame gen unlock will be ready: pick DLSS 2x/3x/4x in Settings > Video > Basic" }
-        $optiNote = "OptiScaler: installed in Anomaly\bin (INS opens its menu in game)" + $(if ($Dlss5) { ", DLSS 5 on" } else { "" })
+        $optiNote = "OptiScaler F5 $($OptiScaler): installed in Anomaly\bin (INS opens its menu in game)" + $(if ($Dlss5) { ", DLSS 5 on" } else { "" })
     }
 }
 
 # --- 5. MO2 profile ------------------------------------------------------
-# selected_profile is stored by Qt as @ByteArray(...) with \xHH escapes for
-# non-ASCII bytes (e.g. a Greek letter becomes \xce\x94).
-function Decode-QtValue ($v) {
-    $v = $v.Trim()
-    if ($v -match '^@ByteArray\((.*)\)$') { $v = $Matches[1] }
-    $bytes = New-Object System.Collections.Generic.List[byte]
-    $i = 0
-    while ($i -lt $v.Length) {
-        $c = $v[$i]
-        if ($c -eq '\' -and $i + 1 -lt $v.Length) {
-            $n = $v[$i + 1]
-            if ($n -eq 'x') {
-                $hex = ''
-                $j = $i + 2
-                while ($j -lt $v.Length -and $hex.Length -lt 2 -and "$($v[$j])" -match '^[0-9a-fA-F]$') { $hex += $v[$j]; $j++ }
-                if ($hex.Length -gt 0) { $bytes.Add([Convert]::ToByte($hex, 16)); $i = $j; continue }
-            }
-            if ($n -eq '\' -or $n -eq '"') { $bytes.Add([byte][char]$n); $i += 2; continue }
-        }
-        foreach ($b in $utf8.GetBytes("$c")) { $bytes.Add($b) }
-        $i++
-    }
-    $utf8.GetString($bytes.ToArray())
-}
+# (Decode-QtValue for the Qt-encoded selected_profile lives in SlopRay.psm1)
 
 $ini = "$gamma\ModOrganizer.ini"
 $modlist = $null
@@ -342,13 +395,13 @@ function Install-GlossyAddon ($name) {
     $src = Find-GlossyShader
     if (-not $src) {
         Warn "Glossy Puddles is in your list but its shaders\r3\deffer_impl_flat.ps was not found - add-on skipped"
-        $todo.Add("Glossy Puddles: install the matching zip from STEP 3\Glossy Puddles - manual install only, by hand")
+        $todo.Add("Glossy Puddles: install the matching zip from STEP 3\Glossy (manual only), by hand")
         return
     }
     $patched = Add-GlossyDlss ([IO.File]::ReadAllText($src.Path))
     if (-not $patched) {
         Warn "Glossy Puddles: unknown shader layout in '$($src.Mod)' - add-on skipped"
-        $todo.Add("Glossy Puddles: install the matching zip from STEP 3\Glossy Puddles - manual install only, by hand")
+        $todo.Add("Glossy Puddles: install the matching zip from STEP 3\Glossy (manual only), by hand")
         return
     }
     # built again on every run, so a Glossy update on your side is picked up
@@ -362,6 +415,11 @@ function Install-GlossyAddon ($name) {
 # --- 6. unpack mods ------------------------------------------------------
 # modlist edits collected below: tick = force "+", drop = remove line (true) or untick (false)
 $tickNames = @{}; $dropNames = @{}
+# Texture Residency is off by default from v0.7.1. Once per install (the record remembers it) the
+# master switch goes to 0 and pack mod 7 (menu + class rules) is left unticked; after that a
+# re-run keeps whatever the player chose.
+$texPattern = '7 - Tex Residency Classes*'
+$texResMigrate = -not ($sr.Record -and $sr.Record.texResOff)
 Head "MO2 mods to unpack"
 $installed = New-Object System.Collections.Generic.List[string]
 $modPlan = New-Object System.Collections.Generic.List[object]
@@ -390,6 +448,27 @@ else {
     # its deffer_impl_flat.ps is identical (brodrigz 0.721), and it ships its own ssfx_*.
     $rc7 = (Is-Enabled "*Atmospherics*RC7*") -or (Is-Enabled "*Atmospherics*RC8*") -or
            (Is-EnabledByFile 'gamedata\shaders\r3\pbr_brdf_character.h')
+    # RC7 and RC8 together fight over the same shaders. Only a warning: both stay ticked, which
+    # one to keep is the player's call (the same add-on serves either).
+    $rc7Names = @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } |
+                  Where-Object { $_ -like '*Atmospherics*RC7*' -and -not (Is-PackMod $_) })
+    $rc8Names = @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } |
+                  Where-Object { $_ -like '*Atmospherics*RC8*' -and -not (Is-PackMod $_) })
+    if ($rc7Names.Count -and $rc8Names.Count) {
+        $bothMsg = "Atmospherics is ticked in both RC7 and RC8 versions: '$($rc7Names -join "', '")' and '$($rc8Names -join "', '")'. They overwrite each other's shaders. Nothing was unticked; in MO2 keep only the one you want."
+        Warn $bothMsg
+        $todo.Add($bothMsg)
+    }
+    # an Atmospherics mod that is neither RC7 nor RC8 (by name or file) gets the stock add-on
+    if (-not $rc7) {
+        $oddAtmos = @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } |
+                      Where-Object { $_ -like '*Atmospherics*' -and -not (Is-PackMod $_) })
+        if ($oddAtmos.Count) {
+            $oddMsg = "'$($oddAtmos -join "', '")' is not recognised as RC7 or RC8, so the stock Atmospherics add-on will be used. If you use RC7 or RC8, check that this is the right version. Nothing was unticked."
+            Warn $oddMsg
+            $todo.Add($oddMsg)
+        }
+    }
     $addons = [ordered]@{
         # SSS 23 ssfx_il/ssfx_sss_ext + grass fallback + DLSS history fix. ONLY without RC7:
         # RC7 ships its own for every IL/SSR option ("IL Atmospherics", "SSR - Atmospherics"),
@@ -467,6 +546,141 @@ $legacy3dss = (Test-Path -LiteralPath "$gamma\3DSS_backup" -PathType Container) 
               -not ($sr.Record -and $sr.Record.legacy3dss)
 if ($legacy3dss) { Warn "found GAMMA\3DSS_backup (from v0.5.0-dev): the uninstaller can put it back" }
 
+# --- 6c. SSS24 setup -> SSS 23.5 (SSS revert) ------------------------------
+# The engine runs SSS 23.5, not Screen Space Shaders 24 (its shaders need SSS24's
+# own exe). A player who followed the SSS24 install is switched back: SSS24 and
+# demonized's modded-exes gamedata mod unticked, SSS 23 ticked, GAMMA's patch files
+# that the SSS24 guide deleted from Anomaly\gamedata put back, SSS24's loose
+# Streamline DLLs moved into the backup. The uninstaller undoes all of it.
+# SSS24 is found by content (folder names are whatever the player typed):
+# screenspace_materials.h is SSS24-only, its ImGui menu script marks the SSS24 mod itself.
+$sss23Name   = '190- Screen Space Shaders 23 - Ascii1457'
+# how SSS declares SSFX_ScreenSpaceReflections: 23.5 itself, and before 23.5. Atmospherics
+# and Glossy Puddles add "float hemi" (built for 23.5) and match neither.
+$ssr235      = 'float4 gloss, inout float4 color, float HudMask, inout float2 noise'
+$ssrOld      = 'float gloss, inout float3 color'
+$patchSrc    = "$gamma\.Grok's Modpack Installer\G.A.M.M.A\modpack_patches\gamedata"
+$sssRevert   = $null
+if ($modlist) {
+    $tickedMods = @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } | Where-Object { -not (Is-PackMod $_) })
+    $sss24Mods  = @($tickedMods | Where-Object { Test-Path -LiteralPath "$modsDir\$_\gamedata\shaders\r3\screenspace_materials.h" })
+    if ($sss24Mods.Count) {
+        Head "Screen Space Shaders 24 (switching back to SSS 23.5)"
+        $main   = @($sss24Mods | Where-Object { Test-Path -LiteralPath "$modsDir\$_\gamedata\scripts\demonized_sss_imgui.script" })
+        $others = @($sss24Mods | Where-Object { $main -notcontains $_ })
+        $ssr    = "$modsDir\$sss23Name\gamedata\shaders\r3\screenspace_reflections.h"
+        if ($others.Count) {
+            Bad "these mods use SSS24 shaders and break on SSS 23.5: $($others -join ', '). Untick them (or install their SSS 23.5 version), then run again."
+        }
+        if (-not (Test-Path -LiteralPath "$modsDir\$sss23Name" -PathType Container)) {
+            Bad "SSS24 found, but GAMMA's '$sss23Name' mod is missing. It is needed: reinstall it with the GAMMA launcher, then run again."
+        } elseif (-not ((Test-Path -LiteralPath $ssr) -and (Select-String -LiteralPath $ssr -Pattern $ssr235 -SimpleMatch -Quiet))) {
+            Bad "'$sss23Name' is not 23.5 (the version this engine needs). Update it with the GAMMA launcher, then run again."
+        }
+        if (-not (Test-Path -LiteralPath $patchSrc -PathType Container)) {
+            Bad "SSS24 found, but GAMMA's own patch files are missing ($patchSrc). Run the GAMMA launcher's update, then run again."
+        }
+        if ($main.Count -and $fail -eq 0) {
+            # only files that are missing, or that are ours from an earlier run; never a file of yours
+            $restore = @(Get-ChildItem -LiteralPath $patchSrc -Recurse -File | ForEach-Object {
+                $rel = 'Anomaly\gamedata\' + $_.FullName.Substring($patchSrc.Length + 1)
+                $e = $(if ($sr.Record) { $sr.Record.files[$rel] } else { $null })
+                if (-not (Test-Path -LiteralPath (Get-PlanPath $rel)) -or ($e -and $e.baseline -eq 'absent')) { @{ Rel = $rel; Src = $_.FullName } }
+            })
+            $slDlls = @(Get-ChildItem -LiteralPath "$anomaly\bin" -Filter 'sl.*.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { "Anomaly\bin\$($_.Name)" })
+            foreach ($n in $main) { $dropNames[$n] = $false }
+            $tickNames[$sss23Name] = $true
+            $sssRevert = @{ Mods = $main; Restore = $restore; Dlls = $slDlls }
+            Good "SSS24 found: $($main -join ', ')"
+            Say  "  will untick it, tick '$sss23Name', restore $($restore.Count) GAMMA patch files, move $($slDlls.Count) loose Streamline DLLs to the backup"
+        }
+    }
+}
+
+# --- 6d. other modded-exes gamedata: only ours may be active ----------------
+# A ticked mod with its own 00_modded_exes_gamedata.db0 (e.g. demonized's MT-TEST
+# from the SSS24 guide) wins over ours in MO2 and does not match this exe.
+$foreignDb0 = @()
+if ($modlist) {
+    foreach ($n in @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } | Where-Object { -not (Is-PackMod $_) })) {
+        $db = "$modsDir\$n\db\mods\00_modded_exes_gamedata.db0"
+        if ((Test-Path -LiteralPath $db) -and -not $sr.Cat.Contains((Get-Sha $db))) { $foreignDb0 += $n; $dropNames[$n] = $false }
+    }
+    if ($foreignDb0.Count) {
+        Head "Other modded exes gamedata (must not override this engine's)"
+        foreach ($n in $foreignDb0) { Warn "unticking '$n': its 00_modded_exes_gamedata.db0 is for a different exe" }
+    }
+}
+
+# --- 6e. SSS 23.5 must be ticked, and no older SSS above it -----------------
+# Without SSS 23.5 the shaders miss the motion vectors DLSS needs; an older SSS
+# that wins over it fails to compile (ssfx_ssr.ps X3017). Found by content.
+# An SSS24 setup was handled in 6c (SSS 23 gets ticked there).
+if ($modlist -and -not $sss24Mods.Count) {
+    Head "Screen Space Shaders 23.5"
+    $order = @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) } | Where-Object { -not (Is-PackMod $_) })
+    $first235 = -1; $oldAbove = @()
+    for ($i = 0; $i -lt $order.Count; $i++) {       # first line = highest priority
+        $h = "$modsDir\$($order[$i])\gamedata\shaders\r3\screenspace_reflections.h"
+        if (-not (Test-Path -LiteralPath $h)) { continue }
+        if (Select-String -LiteralPath $h -Pattern $ssr235 -SimpleMatch -Quiet) { $first235 = $i; break }
+        if (Select-String -LiteralPath $h -Pattern $ssrOld -SimpleMatch -Quiet) { $oldAbove += $order[$i] }
+    }
+    if ($first235 -lt 0) {
+        Bad "no SSS 23.5 ticked in MO2. This engine needs it: tick '$sss23Name' (or reinstall it with the GAMMA launcher), then run again."
+    } elseif ($oldAbove.Count) {
+        Bad "an older Screen Space Shaders wins over SSS 23.5 and fails to compile: $($oldAbove -join ', '). Untick it, then run again."
+    } else { Good "SSS 23.5: ok ('$($order[$first235])')" }
+}
+
+# --- 6f. things that break the pack but are yours to decide (warnings only) --
+# Seen in player reports: old bodycam/PiP mods shipping svp_* shaders
+# (svp_hooks_inside.h), NVG mods other than Beef's / Better Beef's (Real_NVGs_TEST:
+# shader_param_5), and loose shader files in Anomaly\gamedata that win over every
+# MO2 mod. Nothing is unticked or deleted here.
+Head "Other mods and loose files that can break the pack"
+$preflight = New-Object System.Collections.Generic.List[string]
+if ($modlist) {
+    foreach ($n in @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) })) {
+        if (Is-PackMod $n) { continue }
+        $r3 = "$modsDir\$n\gamedata\shaders\r3"
+        if (-not (Test-Path -LiteralPath $r3 -PathType Container)) { continue }
+        $svp = @(Get-ChildItem -LiteralPath $r3 -Filter 'svp_*' -File -ErrorAction SilentlyContinue | ForEach-Object Name)
+        if ($svp.Count) { $preflight.Add("'$n' ships old bodycam/PiP shaders ($(($svp | Select-Object -First 3) -join ', ')). If the game shows a shader error, untick it.") }
+        if ((Test-Path -LiteralPath "$r3\nightvision_gen_1.ps") -and $n -notlike "*Beef's NVG*") {
+            $preflight.Add("'$n' replaces the night vision shaders. Only Beef's / Better Beef's NVGs are supported with the pack; if NVGs crash or look wrong, untick it.")
+        }
+    }
+}
+$loose = @(Get-ChildItem -LiteralPath "$anomaly\gamedata\shaders" -Recurse -File -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -like 'svp_*' -or $_.Name -like 'scope_*' })
+# Model Drop: items_model_drop_physc_mre.ltx and items_model_drop_physc_newfddaanim.ltx
+# define the same sections; ticked together in two mods = DLTX duplicate-section FATAL
+# at start (Bisanch, v0.6). If one of the two is G.A.M.M.A.'s own "453- Items Model Drop"
+# it is unticked (recorded: the uninstaller ticks it again); otherwise only a warning.
+if ($modlist) {
+    $owners = @{}
+    foreach ($n in @($lines | Where-Object { $_.StartsWith('+') } | ForEach-Object { $_.Substring(1) })) {
+        foreach ($f in 'items_model_drop_physc_mre.ltx', 'items_model_drop_physc_newfddaanim.ltx') {
+            if (-not $owners[$f] -and (Test-Path -LiteralPath "$modsDir\$n\gamedata\configs\items\items\$f")) { $owners[$f] = $n }
+        }
+    }
+    $a = $owners['items_model_drop_physc_mre.ltx']; $b = $owners['items_model_drop_physc_newfddaanim.ltx']
+    if ($a -and $b -and $a -ne $b) {
+        $kute = @($a, $b) | Where-Object { $_ -like '453- Items Model Drop*' } | Select-Object -First 1
+        if ($kute) {
+            Warn "'$a' and '$b' both define the Model Drop sections (DLTX FATAL at start). Unticking G.A.M.M.A.'s '$kute'; the uninstaller ticks it again."
+            $dropNames[$kute] = $false
+        } else {
+            $preflight.Add("'$a' and '$b' both define the Model Drop sections (items_model_drop_physc_mre / _newfddaanim): the game stops at start with a DLTX duplicate. Untick one of them.")
+        }
+    }
+}
+if ($loose.Count) {
+    $preflight.Add("$($loose.Count) loose shader file(s) in Anomaly\gamedata\shaders (e.g. $($loose[0].Name)), left by an old bodycam/PiP install. MO2 shows them as 'unmanaged' and they win over the pack: move them out of the Anomaly folder if you get shader errors.")
+}
+if ($preflight.Count) { foreach ($w in $preflight) { Warn $w } } else { Good "none found" }
+
 # --- 7. tick + order in MO2 ---------------------------------------------
 # modlist.txt: FIRST line = HIGHEST priority (= bottom of MO2's left pane).
 $conflicts = @(
@@ -479,6 +693,7 @@ $conflicts = @(
     'Bodycam-GAMMA-Patch*', 'Bodycam-Grass-Optimisation*',
     '3 - DLSS-FSR3 Compat Patch remerged (*',               # v0.5.0/v0.5.1 mod 3 (0.71); current one is skipped above
     'Add-on - Glossy Puddles Overhaul users (*',            # manual Glossy zips; the installer builds its own
+    'Add-on - Glossy (*',                                   # the same zips, short names from v0.7.1 (path length)
     'Native Upscaling Binaries Compatibility Patch*',       # brodrigz 0.72+ raw patch: reverts our shaders
     '1 - Bodycam-GAMMA-Patch-1.1.0', '2 - Bodycam-Grass-Optimisation-4.1.0'
 )
@@ -505,7 +720,12 @@ function Build-Modlist {
         $rest += $l
     }
     $top = @()
-    for ($i = $installed.Count - 1; $i -ge 0; $i--) { $top += "+$($installed[$i])" }
+    $was = Get-ModlistState $lines
+    for ($i = $installed.Count - 1; $i -ge 0; $i--) {
+        $n = $installed[$i]; $mark = '+'
+        if ($n -like $texPattern) { $mark = $(if ($texResMigrate -or $was[$n] -ne '+') { '-' } else { '+' }) }
+        $top += "$mark$n"
+    }
     return , (@($head) + $top + $rest)
 }
 $newLines = $null; $removedLines = @()
@@ -554,25 +774,53 @@ if (-not (Test-Path -LiteralPath $ini)) {
 # --- 9. video settings ---------------------------------------------------
 # frame gen on by default only where it is native (RTX 40/50); RTX 20/30 can pick it
 # in the menu through the unlock, but it may cost FPS there, so they opt in.
-# Set on the first install only: a re-run never undoes your own choices.
+# Set on the first install only: a re-run never undoes your own choices
+# (except MSAA, which must stay off and is checked on every run, below).
 $want = [ordered]@{
     'r3_msaa'            = 'st_opt_off'
     'rs_v_sync'          = 'off'
     'r_upscaler'         = $(if ($rtx) { 'dlss' } else { 'fsr3' })
     'r_frame_generation' = $(if ($rtxFg) { 'dlss' } else { 'off' })
+    'r__tex_res_budget_target' = '0'     # Texture Residency off by default (v0.7.1)
+    'r__upscaler_camera_mv'    = '0'     # camera-MV fill off: it made the still image wobble (v0.7.1)
+    'spawn_time_log'           = '0'     # per-spawn timing log off: a diagnostic, not for play (v0.7.1)
 }
 $ltx = "$anomaly\appdata\user.ltx"
 $ltxRel = 'Anomaly\appdata\user.ltx'
 $ltxSet = [ordered]@{}
 if (Test-Path -LiteralPath $ltx) {
+    $ltxNow = [IO.File]::ReadAllLines($ltx)
     foreach ($k in $want.Keys) {
+        # MSAA is not a preference (the upscaler and the night vision shaders break with it):
+        # it is put back off on every run. The other settings are set once.
         $e = $(if ($sr.Record) { $sr.Record.keys["$ltxRel|$k"] } else { $null })
+        if ($k -eq 'r3_msaa') {
+            $cur = $ltxNow | Where-Object { $_ -match '^r3_msaa\s' } | Select-Object -First 1
+            # also when it is already off but not recorded yet, so the uninstaller knows the original line
+            if ("$cur".Trim() -ne "r3_msaa $($want[$k])" -or -not ($e -and $null -ne $e.written)) { $ltxSet[$k] = $want[$k] }
+            continue
+        }
         if ($e -and $null -ne $e.written) { continue }
         $ltxSet[$k] = $want[$k]
     }
 } else {
     Warn "no user.ltx yet (game never launched) - engine defaults apply"
     $todo.Add("In game: Settings > Video: MSAA off, VSync off, upscaler DLSS (RTX) or FSR")
+}
+
+# what the player is told about Texture Residency: shown before the install and again at the end
+$texNote = @()
+$texPackName = $installed | Where-Object { $_ -like $texPattern } | Select-Object -First 1
+$texWas = $null
+if ($ltxSet.Contains('r__tex_res_budget_target') -and $ltxNow) {
+    $texWas = ($ltxNow | Where-Object { $_ -match '^r__tex_res_budget_target\s+(\S+)\s*$' } | Select-Object -First 1) -replace '^r__tex_res_budget_target\s+', ''
+}
+if ($texResMigrate -or $ltxSet.Contains('r__tex_res_budget_target')) {
+    $texNote += "Texture Residency is OFF by default: r__tex_res_budget_target $(if ($texWas -and $texWas.Trim() -ne '0') { "was $($texWas.Trim()), now 0" } else { '0' })."
+    if ($texPackName) {
+        $texNote += "'$texPackName' is $(if ($modlist -and (Get-ModlistState $lines)[$texPackName] -eq '+') { 'now unticked' } else { 'left unticked' }) in MO2."
+    }
+    $texNote += "To opt in: tick '$(if ($texPackName) { $texPackName } else { '7 - Tex Residency Classes' })' in MO2, then MCM > Texture Residency (VRAM) > Manage VRAM on (or type r__tex_res_budget_target 80 in the console)."
 }
 
 # --- 10. checks: space, shader cache -------------------------------------
@@ -594,20 +842,28 @@ try { $free = (New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($root))).Availabl
 Head "What I will do"
 $replaceN = 0; $newN = 0; $sameN = 0
 foreach ($p in $place) {
-    $d = "$root\$($p.Rel)"
+    $d = Get-PlanPath $p.Rel
     if (-not (Test-Path -LiteralPath $d)) { $newN++ } elseif ((Get-Sha $d) -eq (Get-Sha $p.Src)) { $sameN++ } else { $replaceN++ }
 }
-Say "  game folder : $root"
-Say "  engine files: $newN new, $replaceN replaced (yours are moved to GAMMA\.slopray\backup first), $sameN already up to date"
+if ($inst.Split) { Say "  game folders: Anomaly $anomaly, G.A.M.M.A. (MO2) $gamma" }
+else { Say "  game folder : $root" }
+Say "  engine files: $newN new, $replaceN replaced (yours are moved to $root\.slopray\backup first), $sameN already up to date"
 Say "  MO2 mods    : $($installed -join ', ')"
 if ($leftovers.Count) { Say "  removing old Slop-Ray mods: $($leftovers -join ', ')" }
 if ($modlist) {
     Say "  MO2 profile : $(Split-Path (Split-Path $modlist -Parent) -Leaf) - ticks the mods above at the bottom"
     if ($unticked.Count) { Say "                unticks: $($unticked -join ', ')" }
 }
+if ($sssRevert) {
+    Say "  SSS24 found : switching back to SSS 23.5 (uninstall brings SSS24 back)"
+    Say "                untick $(($sssRevert.Mods | ForEach-Object { "'$_'" }) -join ', '), tick '$sss23Name'"
+    Say "                restore $($sssRevert.Restore.Count) GAMMA patch files, move $($sssRevert.Dlls.Count) loose Streamline DLLs to the backup"
+}
+if ($foreignDb0.Count) { Say "  modded exes : unticks $(($foreignDb0 | ForEach-Object { "'$_'" }) -join ', ') (db0 for a different exe)" }
 if ($iniNew) { Say "  MO2 launch  : adds '$exeTitle'" }
 if ($ltxSet.Count) { Say "  user.ltx    : $(($ltxSet.Keys | ForEach-Object { "$_ $($ltxSet[$_])" }) -join ', ')" }
 if ($moveCache) { Say "  shader cache: moved aside (the game rebuilds it on first launch)" }
+foreach ($t in $texNote) { Say "  $t" }
 if ($optiNote) { Say "  $optiNote" }
 Say "  disk space  : needs about $([math]::Ceiling($need / 1MB)) MB$(if ($free) { ", $([math]::Floor($free / 1MB)) MB free" })"
 if ($free -and $free -lt $need) { Bad "not enough free space on $([IO.Path]::GetPathRoot($root)) - free some and run again"; Pause-End 1 }
@@ -657,6 +913,18 @@ try {
         Put 'Anomaly\bin\OptiScaler.ini' $stIni
         Good "DLSS 5 switched on in OptiScaler.ini"
     }
+    if ($sssRevert) {
+        Head "Switching SSS24 back to SSS 23.5"
+        $moved = 0
+        foreach ($d in $sssRevert.Dlls) {
+            $a = Remove-ForeignFile $sr $d
+            if ($a -eq 'moved') { $moved++ } elseif ($a -eq 'kept') { Warn "left in place (a different copy is already in the backup): $d" }
+        }
+        Good "$moved loose Streamline DLLs moved to $($sr.Dir)\backup\Anomaly\bin"
+        $script:counts = @{}
+        foreach ($p in $sssRevert.Restore) { Put $p.Rel $p.Src }
+        Good "$($sssRevert.Restore.Count) GAMMA patch files put back in Anomaly\gamedata"
+    }
     if ($doOpti -and (Test-Path -LiteralPath "$anomaly\bin\OptiScaler\nvfp4")) {
         # left behind by the 0.7.x packs; F5 no longer uses it (F5 DOES use nvngx.dll_dlssnr.dll)
         [void](Remove-OwnedTree $sr 'Anomaly\bin\OptiScaler\nvfp4' -RemoveTop)
@@ -696,7 +964,7 @@ try {
         $newLines = Build-Modlist
         foreach ($u in $unticked) { Say "  unticked old/conflicting: $u" }
         foreach ($r in $removedLines) { Say "  removed from list: $r" }
-        $mlRel = $modlist.Substring($root.Length + 1)
+        $mlRel = Get-Rel $sr $modlist
         if (-not $sr.Record.modlist[$mlRel]) { $sr.Record.modlist[$mlRel] = @{} }
         $rec = $sr.Record.modlist[$mlRel]
         $before = Get-ModlistState $lines
@@ -712,7 +980,7 @@ try {
             $rec[$n].written = $after[$n]
         }
         Set-TextFile $sr $mlRel ((@($newLines) -join "`r`n") + "`r`n")
-        Good "$($installed.Count) mods ticked at the bottom of MO2's left pane"
+        Good "$(@($newLines | Where-Object { $_ -match '^\+' -and $installed.Contains($_.Substring(1)) }).Count) mods ticked at the bottom of MO2's left pane"
     }
 
     Head "MO2 launch entry '$exeTitle'"
@@ -772,27 +1040,47 @@ try {
     foreach ($f in 'SlopRay.psm1', 'uninstall.ps1', 'cleanup_backups.ps1', 'catalogue.json', 'UNINSTALL - Slop-Ray Engine.bat', 'CLEAN UP BACKUPS - Slop-Ray Engine.bat') {
         if (Test-Path -LiteralPath "$pack\$f") { Copy-Item -LiteralPath "$pack\$f" "$tool\$f" -Force }
     }
-    foreach ($b in 'UNINSTALL - Slop-Ray Engine.bat', 'CLEAN UP BACKUPS - Slop-Ray Engine.bat') {
-        if (Test-Path -LiteralPath "$pack\$b") { Put $b "$pack\$b" -Keep }
+    # a game on a drive root (C:\GAMMA): Windows lets a normal user make folders there, not files.
+    # The same two .bat files are in .slopray\tool, so the root copies are skipped then.
+    $rootTest = "$root\.sr-write-test"
+    $rootWritable = try { [IO.File]::WriteAllText($rootTest, ''); [IO.File]::Delete($rootTest); $true } catch { $false }
+    if ($rootWritable) {
+        foreach ($b in 'UNINSTALL - Slop-Ray Engine.bat', 'CLEAN UP BACKUPS - Slop-Ray Engine.bat') {
+            if (Test-Path -LiteralPath "$pack\$b") { Put $b "$pack\$b" -Keep }
+        }
+        Good "'UNINSTALL - Slop-Ray Engine.bat' is in $root"
+    } else {
+        Good "'UNINSTALL - Slop-Ray Engine.bat' is in $tool (Windows does not allow new files in $root)"
     }
-    Good "'UNINSTALL - Slop-Ray Engine.bat' is in $root"
 
     Head "Checking the install"
-    $bad = 0
-    foreach ($rel in @($sr.Record.files.Keys)) {
-        $e = $sr.Record.files[$rel]
-        if (-not $e.installedHash) { continue }
-        $p = "$root\$rel"
-        if (-not (Test-Path -LiteralPath $p) -or (Get-Sha $p) -ne $e.installedHash) { $bad++; Warn "not as installed: $rel" }
+    # only what THIS run placed: a file from an earlier run that this one skipped
+    # (DLSS 5 last time, or OptiScaler not needed on this GPU) is not this run's job
+    function Get-VerifyProblems {
+        foreach ($rel in @($sr.Run.Placed.Keys)) {
+            $want = $sr.Record.files[$rel].installedHash
+            $p = Resolve-Rel $sr $rel
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { "$rel is missing"; continue }
+            $got = Get-Sha $p
+            if ($got -ne $want) { "$rel is different (expected $($want.Substring(0,12)), found $($got.Substring(0,12)))" }
+        }
     }
-    if ($bad) { throw "$bad installed file(s) did not verify" }
-    Good "every installed file matches its SHA-256"
+    $problems = @(Get-VerifyProblems)
+    if ($problems.Count) { Start-Sleep -Seconds 2; $problems = @(Get-VerifyProblems) }   # one more look: antivirus scans settle
+    if ($problems.Count) {
+        foreach ($p in $problems) { Warn $p }
+        Say "  Something changed these files right after they were copied. Usually an antivirus"
+        Say "  (quarantining OptiScaler's dxgi.dll is common) or a game / MO2 still running."
+        throw "$($problems.Count) installed file(s) did not verify"
+    }
+    Good "every file placed in this run matches its SHA-256 ($($sr.Run.Placed.Count) files)"
 
     # the previous moved-aside cache (from an older engine) is not kept: only
     # the one from before the first install and the newest
     $old = $sr.Record.shaderCache.stale
     if ($sr.Record.shaderCache.stalePending) { $sr.Record.shaderCache.stale = $sr.Record.shaderCache.stalePending; $sr.Record.shaderCache.Remove('stalePending') }
     if ($legacy3dss) { $sr.Record.legacy3dss = @{ backup = 'GAMMA\3DSS_backup'; mod = $(if ($tdss) { $tdss.Name } else { '' }) } }
+    $sr.Record.texResOff = $true
     Complete-Run $sr 'installed'
     if ($old -and $old -ne $sr.Record.shaderCache.stale -and $old.StartsWith("$($sr.Dir)\runs\") -and (Test-Path -LiteralPath $old)) {
         # a shader cache we moved inside our own .slopray\runs folder: regenerated data
@@ -830,6 +1118,8 @@ if ($optiNote) { Say "  $optiNote" }
 $addOns = @($installed | Where-Object { $_ -like 'Add-on - *' })
 Say "  add-ons: $(if ($addOns.Count) { $addOns -join ', ' } else { 'none needed' })"
 Say "  MO2 mods ticked by installer: $(if ($modlist) { 'yes' } else { 'NO (tick them by hand, see below)' })"
+if ($sssRevert) { Say "  SSS24 found: switched back to SSS 23.5 ($($sssRevert.Mods -join ', ') unticked). The uninstaller brings SSS24 back." }
+foreach ($t in $texNote) { Say "  $t" }
 Say "  your replaced files: $($sr.Dir)\backup (kept until you remove them)"
 foreach ($n in $sr.Notes) { Warn $n }
 if ($sr.Notes.Count) { Say "  recovery folder: $($sr.Dir)\recovery" }
@@ -845,6 +1135,6 @@ Say "  $k. NVIDIA App: Smooth Motion OFF for Anomaly (else DX12 crashes)."; $k++
 Say "  $k. MO2 dropdown: pick 'Anomaly (DX12 + Frame Gen)' > Run."
 Say "     First launch rebuilds shaders, looks frozen a few minutes. Wait."
 Say ""
-Say "  Optional: Texture Residency (if you stutter use this mod in MCM/ Texture)"
+Say "  Optional: Texture Residency is off by default. If you stutter: tick '7 - Tex Residency Classes' in MO2, then MCM > Texture Residency (VRAM) > Manage VRAM on."
 Say ""
 Pause-End $(if ($fail -gt 0) { 1 } else { 0 })

@@ -493,7 +493,7 @@ void CHUDManager::OnScreenResolutionChanged()
 	xr_delete(pWpnScopeXml);
 	xr_delete(g_uiSpotXml);
 
-	pUIGame->UnLoad();
+	pUIGame->UnLoadKeepingScriptWindows();
 
 	Level().MapManager().ReloadSpots();
 
