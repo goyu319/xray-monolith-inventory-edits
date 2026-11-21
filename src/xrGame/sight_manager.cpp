@@ -16,6 +16,7 @@
 #include "stalker_animation_manager.h"
 #include "detail_path_manager.h"
 #include "weapon.h"
+#include "painter_ai/EngineCombatAdapter.h"
 #include "../Include/xrRender/Kinematics.h"
 #include "../Include/xrRender/KinematicsAnimated.h"
 #include "../xrEngine/SkeletonMotions.h"
@@ -177,12 +178,16 @@ void CSightManager::Exec_Look(float time_delta)
 		extern float g_painter_look_body_rate_deg;
 		extern float g_painter_look_dead_zone_deg;
 		bool head_in_dead_zone = false;
-		if (g_goyu_painter_look)
+		// GOYU: the look-rate caps and the head dead zone are tuning for Painter's own combat AI. Applied to every NPC
+		// (also with that AI off) they left scripted, non-combat NPCs standing still: bases froze and companions did not
+		// draw weapons or follow. Only for an NPC the Painter combat AI is driving now.
+		const bool painter_look = g_goyu_painter_look && painter::combat::engine::owns(*m_object);
+		if (painter_look)
 		{
 		body_speed = _min(body_speed, deg2rad(g_painter_look_body_rate_deg));
 		head_speed = _min(head_speed, deg2rad(g_painter_look_head_rate_deg));
 		}
-		if (g_goyu_painter_look)
+		if (painter_look)
 		{
 			const u32 sight_type = u32(current_action().sight_type());
 			const bool on_enemy = sight_type == SightManager::eSightTypeObject || sight_type == SightManager::eSightTypeFireObject;

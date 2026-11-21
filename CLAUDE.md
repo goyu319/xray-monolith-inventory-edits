@@ -68,6 +68,7 @@ S.T.A.L.K.E.R. Anomaly + GAMMA 環境の作業メモ（エンジン開発部分�
     - GOYU の複製からは `deffer_grass.vs` の編集を削除済み（2026-11-21）。GOYU の DLSS core 版の deffer_grass.vs は自前のインスタンシング（DT_INST）と wave_prev を持っていて、当てると wave_prev の二重定義と #if の不一致でシェーダーのコンパイルエラーになった。複製し直すときもこの削除を引き継ぐ
   - 2026-11-21：NPC・コンパニオンの棒立ち調査。Painter 版エンジン＋Painter の MOD 無効でも再現、Painter なしエンジンでは出ない → エンジン側。MCM の Physical wounds オフ、`painter_lh_ik 0` / `painter_spine_comp 0` では直らない。容疑：BloodEngine のスポーン分割配信（`painter_stream::NativeStream`、通常のスポーン・イベントのパケットを複数フレームにまたがって保留する。ログに AMP の `REJECT child` / `parent not found` が多い）。切り分け用にコンソール変数 `painter_spawn_stream`（既定 1、0 で従来の処理。レベル生成時＝ロード時に読む）を追加
     - `painter_spawn_stream 0` でロードしても直らなかった（ログで 0 を確認）。次の切り分け用にコンソール変数を追加（既定はすべて 1＝Painter のまま）：`goyu_painter_planner`（行動計画への Painter 戦闘 AI の登録。NPC の生成時に読むのでロードし直す）、`goyu_painter_look`（視線・旋回速度の上限、頭の不感帯、体の傾き）、`goyu_painter_grip`（武器の位置：グリップ骨が非表示なら更新しない処理、左肩構え）、`goyu_painter_anim`（上半身と脚の同期、左肩構えの上半身、移動速度の倍率）。`[painter edits]` のログはファイルごとに1回だけにした
+    - **原因判明（2026-11-21）**：`goyu_painter_look`。Painter の戦闘 AI 用の視線調整（体の旋回 120°/秒・頭 150°/秒の上限、頭の不感帯 2°、`painter_look_*_deg`）が、戦闘 AI がオフでも全 NPC にかかっていた。不感帯は敵を見ているときは効かないので戦闘は正常で、スクリプトで動く非戦闘時（拠点・コンパニオン）だけ止まっていた。`sight_manager.cpp` で、Painter の戦闘 AI がその NPC を動かしているとき（`painter::combat::engine::owns`）だけかけるように修正。他の3つ（planner / grip / anim）は無関係と確認
   - 未確認：傷の中が空洞で地面が見えることがある（ショットガンで断面ごと消えた仕様か、内側の描画が出ていないのか未判別）
 
 ## エンジン（旧：sa-fg-v04-bc031）
