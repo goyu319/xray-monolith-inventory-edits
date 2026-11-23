@@ -723,6 +723,10 @@ void CScriptGameObject::set_bone_visible(u16 bone_id, bool bVisibility, bool bRe
 	const auto refresh_physics = [painter_vis_holder]()
 	{
 		// upstream 2026.11: the physics shell follows the visible bones
+		// GOYU: off by default (goyu_bone_hide_rebuild 0). Rebuilding the ragdoll when a script hides a bone made a
+		// mutant carcass jump up while it was butchered (GAMMA hides the looted parts). Stock X-Ray never rebuilt here.
+		extern int g_goyu_bone_hide_rebuild;
+		if (!g_goyu_bone_hide_rebuild) return;
 		if (!painter_vis_holder) return;
 		CCharacterPhysicsSupport* phys = painter_vis_holder->character_physics_support();
 		if (phys)
