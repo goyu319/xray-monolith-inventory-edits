@@ -119,15 +119,9 @@ void disable_bone_calculation(IKinematics& K, bool v)
 void imotion_position::state_start()
 {
 	VERIFY(shell);
-	inherited::state_start();
-
 	IKinematics* K = shell->PKinematics();
-	saved_visual_callback = K->GetUpdateCallback();
-	K->SetUpdateCallback(0);
 	IKinematicsAnimated* KA = smart_cast<IKinematicsAnimated*>(shell->PKinematics());
 	VERIFY(KA);
-	KA->SetUpdateTracksCalback(&update_callback);
-	update_callback.motion = this;
 	struct get_controled_blend :
 		public IterateBlendsCallback,
 		private xray::noncopyable
@@ -148,15 +142,35 @@ void imotion_position::state_start()
 	} get_blend(anim_callback);
 
 	KA->LL_IterateBlends(get_blend);
-#ifdef DEBUG
-	if(!get_blend.blend)
+	if (!get_blend.blend)
 	{
-		Msg( "bad animation params : %p", anim_callback );
-		KA->LL_DumpBlends_dbg();
-		NODEFAULT;
+		// QUARK (port): PlayCycle gave the death motion no blend on partition 0 (a motion of another partition, an
+		// fx, a full blend pool). Stock code read a null blend here (a crash in release). No death animation: the
+		// body drops as a ragdoll. A blend left on another partition must not call back into this object later.
+		struct unhook : public IterateBlendsCallback, private xray::noncopyable
+		{
+			const void* param;
+			explicit unhook(const void* p): param(p) {}
+			virtual void operator ()(CBlend& B)
+			{
+				if (B.CallbackParam == param)
+				{
+					B.Callback = 0;
+					B.CallbackParam = 0;
+				}
+			}
+		} clear_callbacks(this);
+		KA->LL_IterateBlends(clear_callbacks);
+		Msg("! death animation did not start on partition 0, ragdoll instead");
+		flags.set(fl_use_death_motion, FALSE);
+		return;
 	}
-#endif
-	VERIFY(get_blend.blend);
+
+	inherited::state_start();
+	saved_visual_callback = K->GetUpdateCallback();
+	K->SetUpdateCallback(0);
+	KA->SetUpdateTracksCalback(&update_callback);
+	update_callback.motion = this;
 	const CBlend& B = *get_blend.blend;
 
 	blend = get_blend.blend;

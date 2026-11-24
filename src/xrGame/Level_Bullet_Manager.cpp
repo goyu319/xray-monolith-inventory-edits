@@ -995,6 +995,32 @@ bool CBulletManager::trajectory_check_error(
 	return (false);
 }
 
+// QUARK (port): CBulletOnUpdate is always defined by callbacks_gameobject and only forwards to bullet_on_update,
+// which usually has no listeners. Ask axr_main once a frame and skip the per-bullet table and Lua call when nobody
+// listens. Older gamedata without axr_main.callback_has_listeners keeps calling it.
+static bool goyu_bullet_update_hook_active()
+{
+	static u32 frame = u32(-1);
+	static bool active = true;
+	if (frame == Device.dwFrame)
+		return active;
+	frame = Device.dwFrame;
+	active = true;
+	::luabind::functor<bool> has_listeners;
+	if (ai().script_engine().functor("axr_main.callback_has_listeners", has_listeners))
+	{
+		try
+		{
+			active = has_listeners("bullet_on_update");
+		}
+		catch (...)
+		{
+			active = true;
+		}
+	}
+	return active;
+}
+
 static bool try_update_bullet(SBullet& bullet, Fvector const& gravity, float const air_resistance, float const time)
 {
 	Fvector const new_position = trajectory_position(bullet.start_position, bullet.start_velocity, gravity,
@@ -1026,7 +1052,7 @@ static bool try_update_bullet(SBullet& bullet, Fvector const& gravity, float con
 
 	// demonized: bullet on update callback
 	::luabind::functor<void> funct;
-	if (ai().script_engine().functor("_G.CBulletOnUpdate", funct)) {
+	if (goyu_bullet_update_hook_active() && ai().script_engine().functor("_G.CBulletOnUpdate", funct)) {
 		::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
 		populateBulletTable(
 			table,

@@ -231,18 +231,21 @@ void CHitMemoryManager::update()
 	START_PROFILE("Memory Manager/hits::update")
 		clear_delayed_objects();
 
-		VERIFY(m_hits);
-		const u32 old_memory_count = m_hits->size();
-		m_hits->erase(
-			std::remove_if(
-				m_hits->begin(),
-				m_hits->end(),
-				CRemoveOfflinePredicate()
-			),
-			m_hits->end()
-		);
-		if (m_hits->size() != old_memory_count)
-			m_object_indices.clear();
+		// QUARK (port): no hit storage (not set up yet, or released) is an empty memory, not a crash
+		if (m_hits)
+		{
+			const u32 old_memory_count = m_hits->size();
+			m_hits->erase(
+				std::remove_if(
+					m_hits->begin(),
+					m_hits->end(),
+					CRemoveOfflinePredicate()
+				),
+				m_hits->end()
+			);
+			if (m_hits->size() != old_memory_count)
+				m_object_indices.clear();
+		}
 
 #ifdef USE_SELECTED_HIT
 	xr_delete					(m_selected_hit);

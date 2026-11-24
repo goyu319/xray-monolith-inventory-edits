@@ -138,6 +138,15 @@ void CGamePersistent::RegisterModel(IRenderVisual* V)
 				if (*(bd.game_mtl_name))
 				{
 					bd.game_mtl_idx = GMLib.GetMaterialIdx(*bd.game_mtl_name);
+					if (bd.game_mtl_idx >= GMLib.CountMaterial())
+					{
+						// QUARK (port): GetMaterialIdx checks the name only in DEBUG; past the list it returned the end
+						// index and GetMaterialByIdx read beyond the material vector (a crash on model load)
+						Msg("! model bone [%s]: game material [%s] not found, default_object used",
+						    bd.name.c_str(), bd.game_mtl_name.c_str());
+						bd.game_mtl_idx = def_idx;
+						continue;
+					}
 					R_ASSERT2(GMLib.GetMaterialByIdx(bd.game_mtl_idx)->Flags.is(SGameMtl::flDynamic),
 					          "Required dynamic game material");
 				}
