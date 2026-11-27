@@ -238,6 +238,13 @@ void COLLIDER::ray_query(const MODEL* m_def, const Fvector& r_start, const Fvect
 
 	const_cast<MODEL*>(m_def)->syncronize();
 
+	// A model that was never built (level not loaded yet) has no tree.
+	if (!m_def->tree || !m_def->tree->GetTree())
+	{
+		r_clear();
+		return;
+	}
+
 	// Get nodes
 	const AABBNoLeafTree* T = (const AABBNoLeafTree*)m_def->tree->GetTree();
 	const AABBNoLeafNode* N = T->GetNodes();

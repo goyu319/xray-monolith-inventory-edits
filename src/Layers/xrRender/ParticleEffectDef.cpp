@@ -134,6 +134,13 @@ void CPEDef::ExecuteCollision(PAPI::Particle* particles, u32 p_cnt, float dt, CP
                               CollisionCallback cb)
 {
 	pVector pt, n;
+#ifndef _EDITOR
+	// Particles run on a worker thread. While a level is being destroyed or the next one is still loading,
+	// g_pGameLevel can be a level whose static collision model is not built yet; a ray pick there crashed
+	// in CDB::COLLIDER::ray_query. Skip collision until the level is ready.
+	if (!g_pGameLevel || !g_pGameLevel->bReady)
+		return;
+#endif
 	// Must traverse list in reverse order so Remove will work
 	for (int i = p_cnt - 1; i >= 0; i--)
 	{
