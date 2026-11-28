@@ -87,7 +87,6 @@ void CHitMemoryManager::reinit()
 	m_object_indices.clear();
 	m_last_hit_object_id = ALife::_OBJECT_ID(-1);
 	m_last_hit_time = 0;
-	m_physical_hits.clear();
 }
 
 void CHitMemoryManager::reload(LPCSTR section)
@@ -130,12 +129,8 @@ void CHitMemoryManager::add(float amount, const Fvector& vLocalDir, const CObjec
 
 	Fvector direction;
 	m_object->XFORM().transform_dir(direction, vLocalDir);
-	// Unlike the shared hit-memory table, this receives no zero-damage sound
-	// surrogate. Keep original own-hit direction/time before later sound or
-	// teammate writes can replace the shared row.
+
 	const CEntityAlive* entity_alive = smart_cast<const CEntityAlive*>(who);
-	m_physical_hits.add(amount, Device.dwTimeGlobal, who, who ? who->ID() : u16(-1),
-		-direction.x, 0.f, -direction.z, entity_alive && m_object->tfGetRelationType(entity_alive) == ALife::eRelationTypeEnemy);
 	if (!entity_alive || (m_object->tfGetRelationType(entity_alive) == ALife::eRelationTypeFriend))
 		return;
 
@@ -274,7 +269,6 @@ void CHitMemoryManager::enable(const CObject* object, bool enable)
 
 void CHitMemoryManager::remove_links(CObject* object)
 {
-	m_physical_hits.forget_source(object);
 	if (m_last_hit_object_id == object->ID())
 	{
 		m_last_hit_object_id = ALife::_OBJECT_ID(-1);

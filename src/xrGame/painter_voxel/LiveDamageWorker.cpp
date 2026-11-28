@@ -1,5 +1,7 @@
 // body_hit_outcomes_v1
 #include "LiveDamageWorker.h"
+#include "../../Include/xrRender/PainterFireSpread.h"
+#include "../../Include/xrRender/PainterBurnRender.h"
 #include "MeleeImpact.h" // melee (value 3): knife / blade / blunt events, the body's dents
 #include "third_party/meshoptimizer/meshoptimizer.h" // low-poly wound display (LowPolyDisplay.h)
 #include "CompressedAsset.h"
@@ -162,12 +164,16 @@ Grid gridBytes(const std::vector<std::uint8_t>&bytes){
  }
  Cursor c{bytes};c.magic("VXBASE01");auto nx=c.take<std::uint32_t>(),ny=c.take<std::uint32_t>(),nz=c.take<std::uint32_t>();need(nx&&ny&&nz&&nx<=1024&&ny<=2048&&nz<=1024&&std::uint64_t(nx)*ny*nz<=134217728,"asset_grid_limit");Grid g;g.size={int(nx),int(ny),int(nz)};g.origin={c.take<double>(),c.take<double>(),c.take<double>()};g.pitch=c.take<double>();need(std::isfinite(g.pitch)&&g.pitch>=.0005&&g.pitch<=.01,"asset_grid_pitch");auto count=(std::size_t(nx)*ny*nz+7)/8;need(bytes.size()-c.at==count,"asset_grid_bytes");g.base=std::make_shared<const std::vector<std::uint8_t>>(bytes.begin()+c.at,bytes.end());return g;}
 struct March {bool found{};Vec entry;Cell cell;};
-March firstSolid(const Grid&g,Vec origin,Vec direction){direction=unit(direction);double enter=0,leave=1e6;
+inline bool retainedBoneCell(const Grid& g,Cell c){
+    const auto bit=Grid::local(c);
+    return (g.boneStrikeWord(Grid::tileKey(c),bit/64)&(std::uint64_t(1)<<(bit%64)))!=0;
+}
+March firstSolid(const Grid&g,Vec origin,Vec direction,bool skipRetained=false){direction=unit(direction);double enter=0,leave=1e6;
  for(int a=0;a<3;++a){double low=g.origin[a],high=low+g.size[a]*g.pitch;if(std::abs(direction[a])<1e-14){if(origin[a]<low||origin[a]>=high)return {};continue;}double t0=(low-origin[a])/direction[a],t1=(high-origin[a])/direction[a];if(t0>t1)std::swap(t0,t1);enter=std::max(enter,t0);leave=std::min(leave,t1);}
  if(enter>=leave)return {};double t=enter;Vec p=origin+direction*(t+g.pitch*1e-7);Cell c;std::array<int,3> step{};std::array<double,3> next{},delta{};
  for(int a=0;a<3;++a){(&c.x)[a]=std::clamp(int(std::floor((p[a]-g.origin[a])/g.pitch)),0,g.size[a]-1);step[a]=direction[a]>0?1:-1;if(std::abs(direction[a])<1e-14){next[a]=delta[a]=1e100;}else{double plane=g.origin[a]+(c[a]+(step[a]>0?1:0))*g.pitch;next[a]=(plane-origin[a])/direction[a];delta[a]=g.pitch/std::abs(direction[a]);}}
  const int maxsteps=g.size.x+g.size.y+g.size.z+6;
- for(int n=0;n<maxsteps&&g.valid(c)&&t<leave;++n){if(g.solidBase(c)&&!g.removed(c))return {true,origin+direction*t,c};double target=std::min({next[0],next[1],next[2]});if(target>=leave)return {};for(int a=0;a<3;++a)if(next[a]<=target+1e-11){(&c.x)[a]+=step[a];next[a]+=delta[a];}t=target;}
+ for(int n=0;n<maxsteps&&g.valid(c)&&t<leave;++n){if(g.solidBase(c)&&!g.removed(c)&&(!skipRetained||!retainedBoneCell(g,c)))return {true,origin+direction*t,c};double target=std::min({next[0],next[1],next[2]});if(target>=leave)return {};for(int a=0;a<3;++a)if(next[a]<=target+1e-11){(&c.x)[a]+=step[a];next[a]+=delta[a];}t=target;}
  return {};
 }
 // The removal mask can have two diagonally touching removed cells
@@ -257,6 +263,7 @@ core::HitResult eraseRay(Grid&g,Vec origin,Vec direction,double radius,double de
 // exactly penetration metres from the first surviving material along the ray.
 // If penetration < radius, a shallow half ellipsoid keeps the requested entry
 // radius while shortening the cap. Voxel faces add only sampling-sized error.
+#include "GrenadeFloor.h"
 struct Tunnel {
  Vec entry,direction;double radius,penetration,cap;double inlet=0;
  // Slab (R18 explosion blades): an oriented box, |n.q|<=slab_h and |s.q|<=slab_w across the channel axis, instead
@@ -398,7 +405,12 @@ struct Tunnel {
   lower=1+burst_amp*lowRamp*lowRamp*least;
   return 1+burst_amp*ramp*ramp*best;
  }
+ const GrenadeFloor* grenadeFloor=nullptr;
  bool contains(Vec p)const {
+  if(grenadeFloor){const Vec q=p-entry;if(!grenadeFloor->keepsCut(q,dot(q,direction)))return false;}
+  return insideEnvelope(p);
+ }
+ bool insideEnvelope(Vec p)const {
   Vec q=p-entry;double t=dot(q,direction);
   if(t< -inlet||t>penetration)return false;
   if(slab)return ragged.active?ragged.contains(dot(q,slab_n),dot(q,slab_s),t):std::abs(dot(q,slab_n))<=slab_h&&std::abs(dot(q,slab_s))<=slab_w;
@@ -434,6 +446,10 @@ struct Tunnel {
  // the analytic vertex); t is linear; radiusAt is nondecreasing in t; the
  // edge multiplier is bounded per angular sector over both depth tables.
  int classifySegment(Vec p0,Vec step,int n)const {
+  const int result=envelopeSegment(p0,step,n);
+  return grenadeFloor ? std::min(0,result) : result;
+ }
+ int envelopeSegment(Vec p0,Vec step,int n)const {
   const Vec q0=p0-entry;const double t0=dot(q0,direction),dt=dot(step,direction),t1=t0+dt*(n-1);
   const double tlo=std::min(t0,t1),thi=std::max(t0,t1),tEps=1e-9;
   if(thi< -inlet-tEps||tlo>penetration+tEps)return -1;
@@ -470,6 +486,10 @@ struct Tunnel {
  // The containing sphere bounds radial distance and angular sweep; ambiguous
  // boundary boxes retain the exact segment/point path.
  int classifyBox(Vec center,Vec half)const {
+  const int result=envelopeBox(center,half);
+  return grenadeFloor ? std::min(0,result) : result;
+ }
+ int envelopeBox(Vec center,Vec half)const {
   const Vec q=center-entry;const double tc=dot(q,direction);
   const double te=std::abs(direction.x)*half.x+std::abs(direction.y)*half.y+std::abs(direction.z)*half.z+1e-9;
   const double tlo=tc-te,thi=tc+te;
@@ -514,6 +534,8 @@ struct Tunnel {
  // analytic cut. A missed witness fails closed at the existing manifold gate.
  // This never expands the radius or penetration to repair ambiguous cells.
  bool intersectsCell(const Grid&g,Cell c)const {
+  // A topological edge repair may only erase a cell admitted by the original bore.
+  if(grenadeFloor && !insideEnvelope(g.center(c)))return false;
   Vec lo=g.origin+Vec{double(c.x),double(c.y),double(c.z)}*g.pitch;
   Vec hi=lo+Vec{g.pitch,g.pitch,g.pitch};
   if(slab&&ragged.active)return raggedIntersects(lo,hi);
@@ -546,12 +568,12 @@ struct Tunnel {
 // limb edge) still cuts what its radius overlaps: when the axis misses, rings of parallel rays at 0.35/0.7/1.0 radius
 // (12 angles) find the first tissue; the entry is that contact projected on the axis (it may lie in air; the tunnel's inlet
 // covers it). Axis hits are returned unchanged.
-March firstSolidCylinder(const Grid&g,Vec origin,Vec direction,double radius){
- direction=unit(direction);auto axis=firstSolid(g,origin,direction);if(axis.found||radius<=0)return axis;
+March firstSolidCylinder(const Grid&g,Vec origin,Vec direction,double radius,bool skipRetained=false){
+ direction=unit(direction);auto axis=firstSolid(g,origin,direction,skipRetained);if(axis.found||radius<=0)return axis;
  const Vec ref=std::abs(direction.x)<.8?Vec{1,0,0}:Vec{0,1,0};const Vec u=unit(cross(direction,ref)),v=cross(direction,u);
  double best=std::numeric_limits<double>::infinity();March out;
  for(double f:{.35,.7,1.})for(int k=0;k<12;++k){const double a=6.283185307179586*k/12;const Vec off=(u*std::cos(a)+v*std::sin(a))*(radius*f);
-  auto m=firstSolid(g,origin+off,direction);if(!m.found)continue;const double t=dot(m.entry-(origin+off),direction);if(t<best){best=t;out=m;}}
+  auto m=firstSolid(g,origin+off,direction,skipRetained);if(!m.found)continue;const double t=dot(m.entry-(origin+off),direction);if(t<best){best=t;out=m;}}
  if(!std::isfinite(best))return axis;
  out.entry=origin+direction*best;return out;
 }
@@ -592,6 +614,7 @@ ResolvedTunnel resolvedTunnel(const Tunnel&cut,std::uint64_t seed,std::size_t re
 }
 struct TunnelExit {bool reached{};Vec point;};
 struct SlabSpec {Vec normal,side;double half_thickness,half_width;std::uint64_t seed{};}; // R18 explosion blades (rest space)
+#include "GrenadeSupport.h"
 struct TunnelColumn {Cell first;int end;};
 // Traverse a conservative cylinder one column at a time. An oblique High
 // quality cut must not pay for its mostly empty axis-aligned bounding cube.
@@ -632,7 +655,7 @@ std::vector<TunnelColumn> tunnelColumns(const Grid&g,const Tunnel&cut,Cell low,C
  }
  return out;
 }
-core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double penetration,std::size_t* edgeContactCells=nullptr,const core::BodyBVH* envelope=nullptr,double exitMult=1,TunnelExit* exit=nullptr,std::uint64_t edgeSeed=0,double cavitation=0,double burst=0,const painter_detail::TissueField* countField=nullptr,ResolvedTunnel* resolved=nullptr,bool* resolvedWritten=nullptr,double exitAt=-1,const March* knownMarch=nullptr,double variation=1.,const SlabSpec* slab=nullptr){
+core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double penetration,std::size_t* edgeContactCells=nullptr,const core::BodyBVH* envelope=nullptr,double exitMult=1,TunnelExit* exit=nullptr,std::uint64_t edgeSeed=0,double cavitation=0,double burst=0,const painter_detail::TissueField* countField=nullptr,ResolvedTunnel* resolved=nullptr,bool* resolvedWritten=nullptr,double exitAt=-1,const March* knownMarch=nullptr,double variation=1.,const SlabSpec* slab=nullptr,const GrenadeBite* grenade=nullptr,bool collectDirty=true,std::shared_ptr<GrenadeStockCut::Bits>* stockRaster=nullptr){
  if(resolvedWritten)*resolvedWritten=false;
  need(std::isfinite(radius)&&radius>=.0005&&radius<=.08&&std::isfinite(penetration)&&penetration>0&&penetration<=.5,"tunnel_size_limits");
 #ifdef GFY_RX_PROF
@@ -665,6 +688,34 @@ core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double
  // This extends the inlet only: radius and the distal penetration tip stay fixed.
  cut.inlet=std::max(0.,dot(march.entry-origin,direction));
  if(!slab)cut.setForensics(cavitation,burst,edgeSeed?edgeSeed:0x5EED1234ull);
+ GrenadeFloor floor;
+ if(grenade){
+  const auto* sourceField=grenade->display;
+  const double inv=sourceField&&sourceField->available?1./sourceField->pitch:0.;
+  auto sourceIndex=[&](double coordinate,double origin){
+   const double delta=coordinate-origin, value=delta*inv;
+   const double low=std::floor(value),frac=value-low;
+   // Near a boundary, reproduce the source sampler's original division exactly.
+   const double error=(1.+std::abs(value))*8.9e-16;
+   return int(frac<=error||1.-frac<=error?std::floor(delta/sourceField->pitch):low);
+  };
+  auto material=[&](Vec p)->unsigned{
+   if(inv)return sourceField->at(sourceIndex(p.x,sourceField->origin[0]),sourceIndex(p.y,sourceField->origin[1]),sourceIndex(p.z,sourceField->origin[2]))&127u;
+   Cell c{};for(int k=0;k<3;++k)(&c.x)[k]=int(std::floor((p[k]-g.origin[k])/g.pitch));
+   return g.valid(c) && g.solidBase(c) ? g.renderMaterial(c)&63u : 0u;
+  };
+  auto overlap=[&](Vec p,Vec axis,double r,double depth){
+   for(double fraction:{.15,.40}){
+    const Vec probe=p+axis*(fraction*std::min(r,depth));
+    Cell c{};for(int k=0;k<3;++k)(&c.x)[k]=int(std::floor((probe[k]-g.origin[k])/g.pitch));
+    if(g.valid(c)&&g.ownerCuttable(c)&&g.removed(c))return true;
+   }
+   return false;
+  };
+  floor.prepare(march.entry,direction,radius,penetration,g.pitch,*grenade,material,overlap);
+  if(grenade->capture)*grenade->capture=cut;
+  cut.grenadeFloor=&floor;
+ }
  result.cutter=march.entry+direction*(penetration*.5);result.surface=length(march.entry-origin);
  Vec begin=march.entry-direction*cut.inlet,end=march.entry+direction*penetration;Cell low,high;
  const double boundRadius=cut.maxRadius();
@@ -681,7 +732,7 @@ core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double
  // above, and keep the column backend for owned grids or scratch refusal.
  if(!std::getenv("GFY_RX_NO_TILE_NATIVE")){
   auto plan=painter_detail::planTileTunnel(g,cut,low,high,countField,
-   [&](std::size_t n,std::size_t grain,auto&&body){core::parallelChunks(n,grain,body);});
+   [&](std::size_t n,std::size_t grain,auto&&body){core::parallelChunks(n,grain,body);},64u<<20,stockRaster!=nullptr);
   tx("plan");
   if(plan.supported){
 #ifdef GFY_RX_VERIFY
@@ -707,6 +758,16 @@ core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double
     need(referenceBoundary==planned,"tile_verify_boundary");}
 #endif
    if(!plan.freshSolid)return result;
+   if(stockRaster&&!plan.envelopeBits.empty()){
+    auto captured=std::make_shared<GrenadeStockCut::Bits>();
+    captured->reserve(plan.envelopeBits.size());
+    for(std::size_t k=0;k<plan.envelopeBits.size();++k){
+     const auto& bits=plan.envelopeBits[k];
+     if(std::any_of(bits.removed.begin(),bits.removed.end(),[](std::uint64_t word){return word!=0;}))
+      captured->emplace_back(plan.key(k),bits);
+    }
+    *stockRaster=std::move(captured);
+   }
    result.freshMask=plan.freshMask;result.freshSolid=plan.freshSolid;result.freshBySlot=plan.freshBySlot;
    const auto mutationStart=core::Clock::now();
    // Allocate/journal every destination before any mask assignment. References
@@ -728,7 +789,10 @@ core::HitResult eraseTunnel(Grid&g,Vec origin,Vec direction,double radius,double
     [&](Cell c){return cut.intersectsCell(g,c);},touched,&extraSolid,!g.ownership);tx("edge_contacts");
    if(edgeContactCells)*edgeContactCells=extras;
    result.freshMask+=extras;result.freshSolid+=extraSolid;
-   result.dirty=core::expandDirtyTiles(touched);tx("dirty");
+   // The private replay publishes a sparse difference after all strokes.
+   // Its per-stroke halo is never consumed.
+   if(collectDirty)result.dirty=core::expandDirtyTiles(touched);
+   tx("dirty");
    if(resolved){*resolved=resolvedTunnel(cut,edgeSeed,extras);if(resolvedWritten)*resolvedWritten=true;} // R24: slabs are recorded too
    return result;
   }
@@ -1208,6 +1272,105 @@ bool Identity::operator==(const Identity&b)const noexcept{return spawn_cookie==b
 #include "CranialDamageMeasure.h"
 #include "HeadFracture.h"
 #include "SeamTear.h" // seam (value 3): lined-up hits split bodies
+// Called after all mouths of an ordinary round, before the fracture partition.
+// A pellet which finds only a retained interior bone on its pickup rays can
+// damage that bone and graze real tissue. Its cut must not punch a new inlet
+// through the already open channel's air or the surrounding garment.
+template<class Journal>
+bool restrictOpenChannelToTissue(Grid& g,const Journal& before,core::HitResult& removal){
+    std::size_t tissue=0,air=0;
+    for(const auto& entry:before){
+        const auto key=entry.first;
+        if(!g.findTile(key))continue;
+        auto& now=g.writeTile(key);
+        for(unsigned word=0;word<8;++word){
+            const auto previous=entry.second.first?entry.second.second.removed[word]:0ull;
+            for(auto changed=now.removed[word]&~previous;changed;changed&=changed-1){
+                const auto bit=core::lowestBit(changed);
+                const Cell c{key.x*8+int(word),key.y*8+int(bit/8),key.z*8+int(bit%8)};
+                if(g.solidBase(c)){++tissue;continue;}
+                now.removed[word]&=~(std::uint64_t(1)<<bit);
+                ++air;
+            }
+        }
+    }
+    if(air)removal.freshMask=tissue;
+    return air!=0;
+}
+template<class Table,class Journal>
+std::size_t keepTunnelBone(Grid& g,const Table* table,const Journal& before,
+    core::HitResult& removal,Vec origin,Vec direction,double radius,double strength){
+    if (!g.boneShot.id || !removal.freshSolid || before.empty() || !(strength>0.0)) return 0;
+    if (!table && !g.material_slots) return 0;
+    const double bore=std::max(g.pitch*.5,radius*(1.-strength));
+    const double bore2=bore*bore;
+    const auto ray=unit(direction);
+    std::unordered_map<Cell,unsigned char,core::CellHash> candidates;
+    std::size_t freshBone=0;
+    for(const auto& entry:before){
+        const Cell k=entry.first;
+        const auto* current=g.findTile(k);
+        if(!current) continue;
+        const SeverState::TileMaterial* m=nullptr;
+        if(table){
+            const auto it=table->find(k);
+            if(it==table->end()) continue;
+            m=&it->second;
+        }
+        for(unsigned w=0;w<8;++w){
+            auto changed=current->removed[w]&~(entry.second.first?entry.second.second.removed[w]:0ull);
+            if(m) changed&=m->bone[w];
+            while(changed){
+                const unsigned b=core::lowestBit(changed);
+                changed&=changed-1;
+                Cell c{k.x*8+int(w),k.y*8+int(b/8),k.z*8+int(b%8)};
+                if(!m && (!g.valid(c)||g.renderMaterial(c)!=2)) continue;
+                if(g.ownership && !g.ownership->pureTile(c) && !g.ownership->body(c)) continue;
+                ++freshBone;
+                if(g.bonePreviouslyHit(c)) continue;
+                Vec delta=g.center(c)-origin;
+                const auto radial=delta-ray*dot(delta,ray);
+                if(dot(radial,radial)>=bore2) candidates.emplace(c,0);
+            }
+        }
+    }
+    if(candidates.empty()) return 0;
+    // Keep only bone with a surviving attachment. A disconnected chip still goes with the cut.
+    constexpr int off[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    std::vector<Cell> attached;
+    attached.reserve(candidates.size());
+    for(auto& item:candidates){
+        const auto c=item.first;
+        for(const auto& d:off){
+            Cell n{c.x+d[0],c.y+d[1],c.z+d[2]};
+            if(g.valid(n) && !g.removed(n) && g.solidBase(n)){
+                attached.push_back(c);
+                item.second=1;
+                break;
+            }
+        }
+    }
+    for(std::size_t i=0;i<attached.size();++i){
+        const auto c=attached[i];
+        for(const auto& d:off){
+            auto it=candidates.find(Cell{c.x+d[0],c.y+d[1],c.z+d[2]});
+            if(it!=candidates.end() && !it->second){
+                it->second=1;
+                attached.push_back(it->first);
+            }
+        }
+    }
+    if(attached.empty()) return 0;
+    for(const Cell c:attached){
+        const auto b=Grid::local(c);
+        g.writeTile(Grid::tileKey(c)).removed[b/64]&=~(std::uint64_t(1)<<(b%64));
+        g.noteBoneStrike(c);
+    }
+    removal.freshMask-=attached.size();
+    removal.freshSolid-=attached.size();
+    removal.freshBySlot[2]=freshBone-attached.size();
+    return attached.size();
+}
 #include "BulletBurst.h" // bulletburst (value 3): bullet bursts and surface blowouts on the body
 // T1 (2026-10-29): the torn end of a sever for the release log (ImpactResult::torn_end; one line per sever, pieces included)
 inline void noteTornEnd(ImpactResult&r,const DamageTearVerdict&v){r.torn_end_ms=v.tissueMs;r.torn_end_triangles=v.tissueTriangles;
@@ -1255,11 +1418,34 @@ std::vector<std::uint8_t> gearBodyBindings(const Asset&asset,std::vector<std::ui
 std::vector<std::uint8_t> gearBodyCoatRoots(const Asset&asset,std::vector<std::uint8_t> roots);
 void gearBodyTrace(const Asset&asset,const Impact&event,const Mapping&mapping,PoseCache&cache,ImpactResult&result);
 template<class Frames> void gearBodyFlesh(const Asset&asset,SeparationPiece&piece,const Frames&frames);
+struct BurnBlockers;
 class Asset {
 public:
+ mutable std::once_flag burn_faces_once;
+ mutable std::shared_ptr<const painter_burn::SourceFaces> burn_faces;
+ const std::shared_ptr<const painter_burn::SourceFaces>& burnFaces() const {
+  std::call_once(burn_faces_once,[this]{
+  if(face_children.size()==source.f.size()&&face_indices.size()==source.f.size()&&!face_children.empty()&&source.f.size()<262144){
+    auto faces=std::make_shared<painter_burn::SourceFaces>();faces->byChild.resize(original_children);faces->roles.resize(source.f.size());
+    bool complete=true;
+    for(unsigned i=0;i<face_children.size();++i){auto child=face_children[i];auto ordinal=face_indices[i];
+      if(child>=faces->byChild.size()||ordinal>=600000){complete=false;break;}
+      auto& lookup=faces->byChild[child];if(lookup.size()<=ordinal)lookup.resize(ordinal+1);
+      if(lookup[ordinal]){complete=false;break;}lookup[ordinal]=i+1;
+    }
+    if(complete)burn_faces=std::move(faces);
+  }
+  });
+  return burn_faces;
+ }
+ bool burn_accessory_matches_occlusion{};
+ mutable std::once_flag burn_blocker_once;
+ mutable std::shared_ptr<const BurnBlockers> burn_blockers;
+
  bool record_resolved_cuts{},allow_renderer_rebuild{},analytic_channels{};
  std::shared_ptr<const painter_detail::TissueField> tissue_field;
  std::shared_ptr<const painter_detail::TissueField> closure_field; // render-only (ClosureField.h); analytic walls only
+ std::array<unsigned,3> closure_moved{}; // fieldalign: empty cells put before the baked field's start to line it up (0 = as baked)
  std::shared_ptr<const gear_cells::GearCells> gear_cells; // cutfix: a band of cells around every exterior triangle (GearCells.h), full-body assets
  GearBodyState gear_body; // gearbody: before `source` - when deferred, the source is read in the body and its tree built after the merge
  Source source,envelope,occlusion;Grid base;core::BodyBVH source_tree,envelope_tree;Hash source_hash,rig_hash;std::uint16_t source_child,original_children;
@@ -1299,6 +1485,12 @@ public:
   need(source_child<original_children&&original_children<gfy_packed::max_child_slots,"source_child_profile");
   need(input.accessory_surfaces.empty()||!input.source_children.empty(),"accessory_surface_requires_fullbody");
   accessory_surface_bytes=input.accessory_surfaces;
+  if(!occlusion.f.empty() && input.accessory_surfaces.size()>=56 && !std::memcmp(input.accessory_surfaces.data(),"VXGEOM01",8)
+     && !std::memcmp(input.accessory_surfaces.data()+8,input.source_hash.data(),32)){
+    std::uint32_t bytes=0;std::memcpy(&bytes,input.accessory_surfaces.data()+40,4);
+    burn_accessory_matches_occlusion=bytes==input.occlusion_geometry.size() && bytes<=input.accessory_surfaces.size()-56
+       && !std::memcmp(input.accessory_surfaces.data()+56,input.occlusion_geometry.data(),bytes);
+  }
   need(source.bones==envelope.bones&&source.bones==occlusion.bones,"envelope_rig");
   Cursor c{input.source_shading};c.magic("VXSHAD01");need(c.take<std::uint32_t>()==source.v.size(),"shading_count");
   for(auto&v:source.v){v.normal={c.take<float>(),c.take<float>(),c.take<float>()};v.tangent={c.take<float>(),c.take<float>(),c.take<float>()};v.binormal={c.take<float>(),c.take<float>(),c.take<float>()};}c.done();
@@ -1338,7 +1530,8 @@ public:
   if(base.anatomy&&base.material_slots){
    try{tissue_field=painter_detail::buildTissueField(*base.anatomy,*base.material_slots);}catch(const std::bad_alloc&){if(analytic_channels&&!face_children.empty())throw;tissue_field.reset();}
   }
-  if(gear_body.deferred)gearBodyMerge(*this,input); // gearbody: the gear rows join the source (eyes and out-of-reach gear stay), tree built
+  if(gear_body.deferred)gearBodyMerge(*this,input);
+ // gearbody: the gear rows join the source (eyes and out-of-reach gear stay), tree built
   if(input.damage_pitch){
    need(base.anatomy&&!face_children.empty(),"damage_pitch_requires_fullbody_anatomy");
    need(input.damage_pitch==.002||input.damage_pitch==.001||input.damage_pitch==.0005,"damage_pitch_quality");
@@ -1377,6 +1570,12 @@ public:
    need(tissue_field&&tissue_field->available,"anatomy_cut_tissue_field_required");
    need(!input.render_field.empty(),"anatomy_cut_baked_render_field_required");
    auto baked=gear_body.baked?std::move(gear_body.baked):renderFieldBytes(input.render_field); /* gearbody: read once by the merge */const auto&sb=source_tree.nodes.front().bounds;
+    {std::array<unsigned,3> d{};const double lo[3]={sb.lo[0],sb.lo[1],sb.lo[2]},hi[3]={sb.hi[0],sb.hi[1],sb.hi[2]};
+     if(painter_detail::closureAlignment(*baked,*tissue_field,lo,hi,d)&&(d[0]|d[1]|d[2])){
+      auto parallel=[](std::size_t n,const std::function<void(std::size_t,std::size_t)>&body){
+       core::parallelChunks(n,std::max<std::size_t>(64,n/(core::parallelWidth()*16)),[&](std::size_t first,std::size_t last,std::size_t){body(first,last);});};
+      auto lined=painter_detail::realignClosureField(*baked,d,parallel,std::size_t(128u<<20));
+      if(lined&&lined->available){baked=std::move(lined);closure_moved=d;}}}
     bool fits=std::abs(double(baked->pitch)-double(tissue_field->pitch))<1e-9;
     for(int a=0;a<3&&fits;++a){const double p=double(baked->pitch),o=double(baked->origin[a]),e=o+double(baked->size[a])*p;
      const double shift=(double(tissue_field->origin[a])-o)/p;
@@ -1460,6 +1659,10 @@ std::size_t asset_resident_bytes(const std::shared_ptr<const Asset>&asset)noexce
   for(const auto&s:d.static_child)for(const auto&ch:s.chunks)bytes+=ch.vertices.capacity()*sizeof(gfy_packed::Vertex)+ch.indices.capacity()*2+ch.original_faces.capacity()*4;}
  return bytes;
 }
+// fieldalign: "moved_cells=x,y,z" when the outfit's baked cut field was lined up at preparation, else empty
+std::string field_align_note(const std::shared_ptr<const Asset>&asset)noexcept{
+ try{if(!asset)return {};const auto&d=asset->closure_moved;if(!(d[0]|d[1]|d[2]))return {};
+  return "moved_cells="+std::to_string(d[0])+","+std::to_string(d[1])+","+std::to_string(d[2]);}catch(...){return {};}}
 namespace {
 core::JoinResult joinFullBody(const Asset&asset,const Grid&grid,const std::vector<core::Quad>&boundary,WorkerPhaseTimes&times,const core::ExteriorMemo*reuse=nullptr,core::ExteriorMemo*produce=nullptr){
  PhaseTime preparationTime(times.join_ms);
@@ -1546,7 +1749,9 @@ std::shared_ptr<AssetPreparation>prepare_asset_files_async(const AssetInput& met
  },priority);
 }catch(const std::bad_alloc&){fail(outOfMemoryText);return {};}catch(const std::exception&e){fail(e.what());return {};}catch(...){fail("unknown_asset_file_admission_failure");return {};}}
 #include "PieceSeed.h"
+#include "GrenadeReplayJob.h"
 struct DamageSnapshot::Impl {
+ std::shared_ptr<const gfy_packed::SkinOwnershipQuery> burn_owner_query;
  GoreControls gore; // Last accepted cut; inherited by separation and repeat damage.
  std::shared_ptr<const Asset>asset;
  std::shared_ptr<const Grid>grid;
@@ -1559,6 +1764,14 @@ struct DamageSnapshot::Impl {
 DamageSnapshot::DamageSnapshot(std::shared_ptr<const Impl>state):impl_(std::move(state)){}
 const Stamp& DamageSnapshot::stamp()const noexcept{return impl_->stamp;}
 const gfy_packed::Mesh* DamageSnapshot::mesh()const noexcept{return impl_->geometry?&impl_->geometry->mesh:impl_->piece_mesh.get();}
+bool DamageSnapshot::needs_burn_prime()const noexcept {
+ const auto* visible=mesh();
+ if(!visible)return !impl_->piece;
+ if(!visible->mask_volume || !visible->tissue_field || !visible->removal_field)return false;
+ return std::any_of(visible->children.begin(),visible->children.end(),[](const auto& c){
+    return !c.material && !c.indices.empty() && !c.skin_clip;
+ });
+}
 double DamageSnapshot::damage_pitch()const noexcept{return impl_->grid->pitch;}
 std::shared_ptr<const ResolvedCutHistory> DamageSnapshot::resolved_cut_history()const noexcept{return impl_->history;}
 std::size_t DamageSnapshot::sparse_tiles()const noexcept{return impl_->grid->tiles.size();}
@@ -1570,6 +1783,7 @@ DamageSample DamageSnapshot::sample_rest(Point point)const noexcept{
  auto label=g.materialBase(c);return {label,std::uint16_t(label?g.renderMaterial(c):0),g.removed(c)};
 }
 struct Session::Impl {
+ const bool is_piece_owner=false;bool flight_birth_held=false,flight_birth_recovering=false;
  std::shared_ptr<const Asset>asset;Identity owner;fastwound::BoundaryCache boundary_cache;bool boundary_valid=false;
  PoseCache pose_cache; // posed source/occlusion vertices, kept while the bone palette is bit-identical (a corpse never re-skins)
  // Committed per-region wound results (immutable, shared) and a worker-only
@@ -1595,6 +1809,7 @@ struct Session::Impl {
  std::uint64_t spare_grid_serial{},spare_committed_serial{},spare_ready_serial{}; // serial 0: untracked grid
  std::shared_ptr<const std::vector<Cell>> spare_ready_dirty;
  std::deque<std::pair<std::uint64_t,std::shared_ptr<const std::vector<Cell>>>> spare_deltas; // under mutex
+ std::atomic<bool> burn_surface_requested{false};
  std::shared_ptr<const DamageSnapshot>committed,ready_snapshot;
  std::shared_ptr<const channelworker::State>channel_cache,ready_channel_cache;
  std::atomic<bool> analytic_disabled{false}; // sticky per owner after a renderer refusal
@@ -1631,14 +1846,14 @@ struct Session::Impl {
  // committed occupancy first (identical content, see rebuildBoundaryCache).
  bool boundary_rebuild{};
  Impl(std::shared_ptr<const PieceSeed>seed,Identity id,std::shared_ptr<const gfy_packed::Mesh>published,std::uint64_t revision,std::uint64_t generation)
-  :asset(seed->asset),owner(id),piece(seed),piece_published(std::move(published)){
+  :is_piece_owner(true),asset(seed->asset),owner(id),piece(seed),piece_published(std::move(published)){
   piece_ownership=gfy_packed::skin_ownership_query(*piece_published,true);
   lineage=seed->history->owner;submitted=acknowledged=revision;
   if(seed->sever)sever_state=std::make_shared<SeverState>(*seed->sever);
   sever_state->table=asset->tile_material.get();sever_state->masks=asset->station_masks.get();
   {std::uint32_t held=0;for(const auto&t:piece_published->tears)held+=t.block&&t.side<=2?1u:0u;sever_state->decided=held;} // slice 4: the tears this piece holds count toward its 8
   auto state=std::make_shared<DamageSnapshot::Impl>();state->asset=asset;state->grid=seed->grid;state->history=seed->history;state->sever=seed->sever;
-  state->piece=piece;state->piece_mesh=piece_published;state->gore=seed->gore;state->stamp.owner=owner;state->stamp.revision=revision;state->stamp.expected_generation=generation;
+  state->burn_owner_query=piece_ownership;state->piece=piece;state->piece_mesh=piece_published;state->gore=seed->gore;state->stamp.owner=owner;state->stamp.revision=revision;state->stamp.expected_generation=generation;
   committed=std::shared_ptr<const DamageSnapshot>(new DamageSnapshot(std::move(state)));
   // Cuts at birth are drawn by the birth mesh (piece_session::channelPrior).
   auto prior=std::make_shared<channelworker::State>();prior->asset_pin=asset;prior->history=seed->history;prior->tolerance=.009;prior->total_cuts=seed->history->total_cuts;
@@ -1658,7 +1873,31 @@ struct Session::Impl {
 };
 #include "PieceSession_impl.h"
 Session::Session(std::unique_ptr<Impl>impl):impl_(std::move(impl)){}Session::~Session()=default;
-bool Session::piece()const noexcept{return bool(impl_->piece);}
+bool Session::piece()const noexcept{return impl_->is_piece_owner;}
+void Session::hold_flight_birth()noexcept{
+ std::lock_guard<std::mutex> lock(impl_->mutex);impl_->flight_birth_held=true;
+}
+void Session::resume_flight_birth()noexcept{
+ std::lock_guard<std::mutex> lock(impl_->mutex);
+ if(impl_->flight_birth_held){impl_->flight_birth_held=false;impl_->flight_birth_recovering=true;}
+}
+bool Session::finish_flight_birth(std::shared_ptr<const PieceSeed> initial,std::shared_ptr<const PieceSeed> exact,
+ std::shared_ptr<const gfy_packed::Mesh> published,std::uint64_t generation,std::uint64_t revision)noexcept{
+ AllocationScope scope;
+ try{
+  if(!initial||!exact||!published||initial->asset!=exact->asset||initial->root_bone!=exact->root_bone||
+     initial->components!=exact->components||!(initial->parent.owner==exact->parent.owner)||
+     initial->parent.revision!=exact->parent.revision||initial->parent.expected_generation!=exact->parent.expected_generation)return false;
+  auto& i=*impl_; std::lock_guard<std::mutex> lock(i.mutex);
+  if((!i.flight_birth_held&&!i.flight_birth_recovering)||i.piece!=initial||!i.committed||i.committed->stamp().expected_generation!=generation||
+     i.committed->stamp().revision!=revision||i.acknowledged!=revision||i.inflight||i.done||i.failed||i.canceled)return false;
+  Impl canonical(std::move(exact),i.owner,std::move(published),revision,generation);
+  i.piece=std::move(canonical.piece);i.piece_published=std::move(canonical.piece_published);
+  i.piece_ownership=std::move(canonical.piece_ownership);i.lineage=canonical.lineage;
+  i.sever_state=std::move(canonical.sever_state);i.committed=std::move(canonical.committed);
+  i.channel_cache=std::move(canonical.channel_cache);i.flight_birth_held=false;i.flight_birth_recovering=false;return true;
+ }catch(...){return false;}
+}
 bool Session::enqueue(Impact event)noexcept{AllocationScope scope;
  const auto trace=event.hit_trace;const auto sequence=event.sequence;std::size_t pending_count=0;unsigned inflight_state=0;
  auto reject=[&](const char*why){body_hit_outcomes::report("not_queued",why,impl_->owner.spawn_cookie,sequence,trace,0,pending_count,inflight_state);return false;};
@@ -1722,6 +1961,12 @@ float body_blowout_frequency_value()noexcept{return body_blowout_frequency.load(
 static std::atomic<int> body_blowout_chunks{1};
 void set_body_blowout_chunks(int v)noexcept{body_blowout_chunks.store(v?1:0,std::memory_order_relaxed);}
 int body_blowout_chunks_value()noexcept{return body_blowout_chunks.load(std::memory_order_relaxed);}
+// boneresist (2026-11-19): console painter_bone_resist 1 (default) / 0, the Painter menu's Bone resists blowouts; read at
+// every bullet crater (BulletBurst.h keepResistingBone)
+void set_bone_resist(int v)noexcept{bullet_burst::boneResistOn().store(v?1:0,std::memory_order_relaxed);}
+// bonefix2 (2026-11-20): console painter_bone_strength 0..100 (default 70), the Painter menu's Bone strength; read at every
+// bullet crater (BulletBurst.h keepResistingBone)
+void set_bone_strength(int v)noexcept{bullet_burst::boneStrength().store(std::clamp(v,0,100),std::memory_order_relaxed);}
 namespace damage_modes {
 constexpr double holeDepth=.020;
 // ... except a part at most this thick along the shot that the round would cross: holed through as today (two 2 cm craters
@@ -1816,9 +2061,16 @@ bool Session::acknowledge_impl(const Stamp&stamp,bool accepted,std::uint64_t pub
 void Session::cancel()noexcept{auto&i=*impl_;std::lock_guard<std::mutex>lock(i.mutex);
  body_hit_outcomes::batch("discarded","owner_canceled_pending",i.owner.spawn_cookie,i.pending);body_hit_outcomes::batch("discarded","owner_canceled_retry",i.owner.spawn_cookie,i.retry_pending);if(i.done)body_hit_outcomes::output("discarded","owner_canceled_unpublished",i.owner.spawn_cookie,*i.done);i.canceled=true;i.ready_channel_cache.reset();i.ready_sever.reset();i.pending.clear();i.retry_pending.clear();i.done.reset();i.ready_regions.clear();i.ready_exterior_memo.reset();}
 bool Session::pending()const{auto&i=*impl_;std::lock_guard<std::mutex>lock(i.mutex);return !i.canceled&&!i.failed&&(i.inflight||!i.pending.empty()||!i.retry_pending.empty()||bool(i.done));}
+#include "PainterBurnRay_impl.h"
+std::shared_ptr<const DamageSnapshot> Session::published_burn_surface()const {
+ auto& i=*impl_;
+ std::lock_guard<std::mutex> lock(i.mutex);
+ if(i.flight_birth_held||i.canceled||i.failed)return {};
+ return i.committed;
+}
 std::shared_ptr<const DamageSnapshot>Session::capture_damage()const{
  auto&i=*impl_;std::lock_guard<std::mutex>lock(i.mutex);
- if(i.canceled||i.failed||i.inflight||i.done||!i.pending.empty()||!i.retry_pending.empty())return {};
+ if(i.flight_birth_held||i.canceled||i.failed||i.inflight||i.done||!i.pending.empty()||!i.retry_pending.empty())return {};
  return i.committed;
 }
 namespace {
@@ -1953,6 +2205,7 @@ struct Pool::Impl {
  // sequences filled), so a job that runs out of memory can always report its
  // batch without allocating. deferrals: memory deferrals this batch already had.
  struct Work {std::shared_ptr<Session>session;std::vector<Impact>events;Stamp stamp;bool isolated{};bool trace_transferred{};std::shared_ptr<Output>failure;std::uint32_t deferrals{};
+  bool burn_prime{};
   std::shared_ptr<const Output> renderer_source;
   std::shared_ptr<const DamageSnapshot> renderer_snapshot;
  };
@@ -1989,11 +2242,11 @@ struct Pool::Impl {
   // occupancy and published geometry never
   // change on these paths and the owner stays usable.
   {JobMemory memory;
-  try{if(task.renderer_source)runRendererRebuild(task,memory);else runJob(task,memory);}
+  try{if(task.burn_prime)runBurnPrime(task);else if(task.renderer_source)runRendererRebuild(task,memory);else runJob(task,memory);}
   catch(const AdmissionCanceled&){} // canceled owner: nothing is published
-  catch(const MemoryShortage&shortage){if(task.renderer_source)refuseRendererRebuild(task,"low_memory");else memoryShortage(task,memory,shortage.need,false);}
-  catch(const std::bad_alloc&){if(task.renderer_source)refuseRendererRebuild(task,"out_of_memory");else memoryShortage(task,memory,0,true);}
-  catch(...){if(task.renderer_source)refuseRendererRebuild(task,"complete_geometry_rebuild_failed");else{i.tile_state.reset();publishFailure(task,"worker_failure");}}}
+  catch(const MemoryShortage&shortage){if(task.burn_prime)publishFailure(task,"burn_prime_memory");else if(task.renderer_source)refuseRendererRebuild(task,"low_memory");else memoryShortage(task,memory,shortage.need,false);}
+  catch(const std::bad_alloc&){if(task.burn_prime)publishFailure(task,"burn_prime_memory");else if(task.renderer_source)refuseRendererRebuild(task,"out_of_memory");else memoryShortage(task,memory,0,true);}
+  catch(...){if(task.burn_prime)publishFailure(task,"burn_prime_source_refused");else if(task.renderer_source)refuseRendererRebuild(task,"complete_geometry_rebuild_failed");else{i.tile_state.reset();publishFailure(task,"worker_failure");}}}
   {std::lock_guard<std::mutex>lock(i.mutex);if(i.canceled&&!task.trace_transferred)body_hit_outcomes::batch("discarded","owner_canceled_during_worker",i.owner.spawn_cookie,task.events);
    }
   // Owner wake-up (Session::set_ready_hook): after the heavy-join hold above is
@@ -2341,9 +2594,22 @@ struct Pool::Impl {
 #endif
   if(grid.ownership||!(grid.pitch>0)||!std::isfinite(grid.pitch))return out;
   struct E{Cell c;bool uniform;const core::Tile*t;};std::vector<E> ents;ents.reserve(grid.tiles.size());
+  std::vector<core::Tile> corrected;
+  if(grid.visibleFloor)corrected.reserve(grid.visibleFloor->size());
   std::array<int,3> lo{INT32_MAX,INT32_MAX,INT32_MAX},hi{INT32_MIN,INT32_MIN,INT32_MIN};
-  for(const auto&item:grid.tiles){std::uint64_t any=0,all=~std::uint64_t(0);for(auto w:item.second.removed){any|=w;all&=w;}if(!any)continue;
-   ents.push_back({item.first,all==~std::uint64_t(0),&item.second});const int c[3]={item.first.x,item.first.y,item.first.z};
+  for(const auto&item:grid.tiles){
+   const core::Tile* tile=&item.second;
+   if(grid.visibleFloor){
+    const auto floor=grid.visibleFloor->find(item.first);
+    if(floor!=grid.visibleFloor->end()){
+     // Reserve once above; pointers used by the packer remain stable.
+     corrected.push_back(item.second);Grid::applyDisplayTile(corrected.back(),floor->second);
+     tile=&corrected.back();
+    }
+   }
+   std::uint64_t any=0,all=~std::uint64_t(0);
+   for(auto w:tile->removed){any|=w;all&=w;}if(!any)continue;
+   ents.push_back({item.first,all==~std::uint64_t(0),tile});const int c[3]={item.first.x,item.first.y,item.first.z};
    for(int a=0;a<3;++a){lo[a]=std::min(lo[a],c[a]);hi[a]=std::max(hi[a],c[a]);}}
   fMark("traverse");out->pitch=float(grid.pitch);
   if(lo[0]==INT32_MAX){if(limit<(F::pageWidth+F::dataWidth)*4)return out;out->page.assign(F::pageWidth,0);out->data.assign(F::dataWidth,0);out->available=true;return out;}
@@ -2369,6 +2635,9 @@ struct Pool::Impl {
   out->page[3]=fbits(1.f/out->pitch);out->page[7]=3;out->page[11]=F::dataWidth;out->page[12]=F::pageWidth;out->page[13]=F::headerWords;
   out->available=true;return out;
  }
+ static std::shared_ptr<const painter_detail::DamageField> publishedRemovalField(const Grid& grid){
+  return painter_detail::publishBlowoutTags(grid,grid.visibleFloor?singlePassDamageField(grid):painter_detail::buildDamageField(grid));
+ }
  void packAnalyticCandidate(Session::Impl&i,const Grid&grid,
     const std::shared_ptr<const ResolvedCutHistory>&history,
     std::shared_ptr<const channelworker::State>&candidate,
@@ -2384,7 +2653,7 @@ struct Pool::Impl {
    core::parallelChunks(jobs,1,[&](std::size_t first,std::size_t last,std::size_t){for(auto n=first;n<last;++n)work(unsigned(n));});};
   auto prepared=channelworker::prepareChannels(i.channel_cache,history,i.asset,i.owner,weights,executor);
   packMark("prepare_channels");
-  const auto maskStart=core::Clock::now();auto mask=false?singlePassDamageField(grid):painter_detail::buildDamageField(grid);
+  const auto maskStart=core::Clock::now();auto mask=publishedRemovalField(grid);
   need(mask&&mask->available,"analytic_exact_removal_field_unavailable");out->analytic_mask_ms=core::ms(maskStart);
   packMark("damage_field");
   gfy_packed::Mesh mesh;unsigned next=i.asset->original_children;
@@ -2454,7 +2723,8 @@ struct Pool::Impl {
  // children, child indices and skin_clip rule as packAnalyticCandidate's static part.
  void packMaskOnlyCandidate(Session::Impl&i,const Grid&grid,const std::shared_ptr<Output>&out,WorkerPhaseTimes&phases,const std::set<Cell>*dirty){
   PhaseTime whole(phases.pack_ms);
-  const auto maskStart=core::Clock::now();auto mask=painter_detail::buildDamageField(grid);
+  const auto maskStart=core::Clock::now();
+  auto mask=publishedRemovalField(grid);
   need(mask&&mask->available,"mask_only_removal_field_unavailable");out->analytic_mask_ms=core::ms(maskStart);
   gfy_packed::Mesh mesh;unsigned next=i.asset->original_children;
   const gfy_packed::Mesh* prevMesh=nullptr;std::size_t staticTotal=0;
@@ -2479,10 +2749,63 @@ struct Pool::Impl {
    else for(const auto&v:c.vertices)for(int a=0;a<3;++a){lo[a]=std::min(lo[a],double(v.surface[a]));hi[a]=std::max(hi[a],double(v.surface[a]));}
    for(const auto&b:removedTiles){bool overlap=true;for(int a=0;a<3&&overlap;++a)overlap=b[a]<=hi[a]+grid.pitch&&b[3+a]>=lo[a]-grid.pitch;if(overlap)return true;}return false;};
   for(const auto&source:i.asset->fast->static_child)for(std::size_t part=0;part<source.chunks.size();++part){auto child=source.chunks[part];
-   if(part){need(next<gfy_packed::max_child_slots,"analytic_child_capacity");child.child_index=std::uint16_t(next++);}child.skin_clip=removedNear(child);++staticIndex;mesh.children.push_back(std::move(child));}
+   if(part){need(next<gfy_packed::max_child_slots,"analytic_child_capacity");child.child_index=std::uint16_t(next++);}child.skin_clip=(i.burn_surface_requested.load(std::memory_order_relaxed) && !child.material && !child.indices.empty()) || removedNear(child);++staticIndex;mesh.children.push_back(std::move(child));}
   mesh.removal_field=std::move(mask);mesh.tissue_field=i.asset->closure_field;mesh.mask_volume=true;
   out->mesh=std::move(mesh);out->triangles=0;for(const auto&c:out->mesh.children)out->triangles+=c.indices.size()/3;
  }
+// Pool worker. Reserve a publication, never an Impact or a physical damage transaction.
+void runBurnPrime(Work& task) {
+    auto& session=*task.session->impl_;
+    const auto started=core::Clock::now();
+    const auto original=session.committed;
+    need(original && original->needs_burn_prime() && session.asset->fast &&
+         session.asset->fast->valid && session.asset->closure_field &&
+         session.asset->closure_field->available,"burn_prime_source_unavailable");
+    auto result=std::make_shared<Output>();
+    result->stamp=task.stamp;
+    result->burn_surface_prime=true;
+    result->mask_only=1;
+    auto& mesh=result->mesh;
+    if(const auto* current=original->mesh()){
+        // Material enrolment retains cut ownership, removal pages, attachments and existing vertices.
+        mesh=*current;
+        for(auto& child:mesh.children){
+            if(!child.material && !child.indices.empty())child.skin_clip=true;
+            result->triangles+=child.indices.size()/3;
+        }
+        if(original->impl_->geometry)result->mask_only=original->impl_->geometry->mask_only;
+    }else{
+    mesh.removal_field=publishedRemovalField(*original->impl_->grid);
+    need(mesh.removal_field && mesh.removal_field->available &&
+         !mesh.removal_field->mixed && !mesh.removal_field->uniform,
+         "burn_prime_expected_untouched_source");
+    mesh.tissue_field=session.asset->closure_field;
+    mesh.mask_volume=true;
+    unsigned next=session.asset->original_children;
+    for (const auto& source:session.asset->fast->static_child) {
+        for (std::size_t part=0;part<source.chunks.size();++part) {
+            auto child=source.chunks[part];
+            if (part) {
+                need(next<gfy_packed::max_child_slots,"burn_prime_child_capacity");
+                child.child_index=std::uint16_t(next++);
+            }
+            child.skin_clip=!child.material && !child.indices.empty();
+            result->triangles+=child.indices.size()/3;
+            mesh.children.push_back(std::move(child));
+        }
+    }
+    }
+    need(result->triangles!=0,"burn_prime_source_empty");
+    auto state=std::make_shared<DamageSnapshot::Impl>(*original->impl_);
+    state->stamp=task.stamp;
+    state->geometry=result;
+    auto snapshot=std::shared_ptr<const DamageSnapshot>(new DamageSnapshot(std::move(state)));
+    result->worker_ms=core::ms(started);
+    std::lock_guard<std::mutex> lock(session.mutex);
+    if (session.canceled) return;
+    session.ready_snapshot=std::move(snapshot);
+    session.done=std::move(result);
+}
  void runJob(Work&task,JobMemory&memory){auto&i=*task.session->impl_;
   const tear_bake::JobKeep bakeKeep(i.asset?std::shared_ptr<const void>(i.asset->closure_field):nullptr); // speed step: the job's tear bakes may outlive it
   const auto start=core::Clock::now(); // Include cache reconstruction in worker_ms.
@@ -2552,6 +2875,7 @@ struct Pool::Impl {
      grid=std::move(*spare);recycled=true;}
     else if(spare)retire(std::shared_ptr<Grid>(spare.release()));} // stale spare: freed off the worker, as before
    if(!recycled)grid=*i.committed->impl_->grid;
+   else { const auto& committed=*i.committed->impl_->grid;grid.boneStrikes=committed.boneStrikes;grid.visibleFloor=committed.visibleFloor;grid.blowoutTags=committed.blowoutTags;grid.lodAttached=committed.lodAttached; }
    jobMark(recycled?"grid_recycle":"grid_copy");auto boundary_cache=i.boundary_cache;std::set<Cell>dirty;bool changed=false;jobMark("boundary_copy");
    const auto historyBase=i.committed->impl_->history;candidate_channels=i.channel_cache;
    std::vector<ResolvedTunnel>historyCuts;std::uint32_t historyLimits=historyBase?historyBase->limitations:0;
@@ -2559,6 +2883,11 @@ struct Pool::Impl {
    auto remember=[&](ResolvedTunnel&&cut,std::uint64_t sequence,const Mapping&mapping,ResolvedTunnel::Role role){
     cut.sequence=sequence;cut.source_face=mapping.face;cut.source_bary=mapping.bary;cut.role=role;historyCuts.push_back(std::move(cut));};
    PoseCache& poseCache=i.pose_cache; // posed once per distinct palette, kept across jobs
+    const bool ordinaryBatch=std::all_of(task.events.begin(),task.events.begin()+activeEvents,
+       [](const Impact& e){return e.blast&&!e.melee&&!e.blade;});
+   GrenadeReplayJob replayJob;
+   std::vector<DisplayStroke> displayStrokes;
+   Grid::FloorTiles beforeTears;
    std::set<Cell> blastDirty;std::vector<Cell> blastDirtyList;Mapping blastMapping;std::uint64_t blastSequence=0;std::set<std::uint64_t> blastSequences; std::vector<std::pair<Vec,Vec>> blastRays; // headfix item 5: each crater's ray (rest space)
    // Slabs carry their real planes even when there is only one per part.
    // Their tear check may prove an existing cut, never invent another cut.
@@ -2568,7 +2897,7 @@ struct Pool::Impl {
    struct BladeSlot {Vec a,b,dir;unsigned n=0;};std::map<std::uint32_t,BladeSlot> bladeSlots; // grenade blades of this batch (rest space)
    struct TearRequest {std::uint16_t bone;Vec point,push;std::uint64_t sequence,seed;std::size_t result;};std::vector<TearRequest> tearRequests; // R62 BlastSevers.h
    // raggedsever: the killing shots' limb tears of this batch, made after its events (below the event loop)
-   struct KillSever {std::size_t result;std::uint64_t sequence;Mapping mapping;Vec e0,d;double penetration;std::uint16_t hitBone;std::uint64_t leanSeed;};std::vector<KillSever> killSevers;
+   struct KillSever {std::size_t result;std::uint64_t sequence;Mapping mapping;Vec e0,d;double penetration;std::uint16_t hitBone;std::uint64_t leanSeed;Grid::BoneShot boneShot;};std::vector<KillSever> killSevers;
    bool bulletBurstBatch=false; // bulletburst: one body burst or blowout per batch (a shotgun's pellets draw until one fires)
    // melee (value 3): the body's dents for this attempt = the committed mesh's; a blunt blow below adds its own
    i.job_dents_on=mask_only_mode.load(std::memory_order_relaxed)==3;i.job_dents.clear();i.job_slits.clear();bool dentsAdded=false;
@@ -2592,6 +2921,7 @@ struct Pool::Impl {
        catch(...){rayError[e]=std::current_exception();rayReady[e]=1;}}});}}}
     catch(const std::bad_alloc&){rayReady.clear();rayMapping.clear();rayError.clear();}}
    for(std::size_t eventIndex=0;eventIndex<activeEvents;++eventIndex){const auto&eventIn=task.events[eventIndex];
+    DisplayStroke displayStroke;
     // modes: Extreme cuts with a copy whose damage sizes are doubled (damage_modes::doubleSizes); the decisions that are chances
     // or sever thresholds (head event, sever scale, killing-shot round) keep reading eventIn. Bullet holes only: holeMarch,
     // holeCapEnd, holeHold and holeThin are set where the event is cut.
@@ -2660,11 +2990,20 @@ struct Pool::Impl {
      unsigned bulletKind=0;Vec bulletPoint{0,0,0},bulletMouthAt{0,0,0},bulletDir{0,0,1};double bulletStrength=0,bulletMouth=0;bool bulletMouthExit=false; // bulletburst: this shot's burst / blowout
      // Cut in place with an undo journal (was: a full grid copy per event, O(total damage)).
      std::unordered_map<Cell,std::pair<bool,core::Tile>,core::CellHash> journal;
+     const auto priorBlowoutTags=grid.blowoutTags;
+     const auto priorBoneStrikes=grid.boneStrikes;
+     const auto priorBoneShot=grid.boneShot;
      auto priorSever=attemptSever->failed;
      const auto priorHistoryCount=historyCuts.size();const auto priorHistoryLimits=historyLimits;
-     auto rollback=[&]{historyCuts.resize(priorHistoryCount);historyLimits=priorHistoryLimits;attemptSever->failed.swap(priorSever);for(auto& e:journal){if(e.second.first)grid.tiles[e.first]=e.second.second;else grid.tiles.erase(e.first);}grid.journal=nullptr;};
+     auto rollback=[&]{grid.boneStrikes=priorBoneStrikes;grid.boneShot=priorBoneShot;grid.blowoutTags=priorBlowoutTags;historyCuts.resize(priorHistoryCount);historyLimits=priorHistoryLimits;attemptSever->failed.swap(priorSever);for(auto& e:journal){if(e.second.first)grid.tiles[e.first]=e.second.second;else grid.tiles.erase(e.first);}grid.journal=nullptr;};
      const char* nothingWhy=nullptr; // nothinghits: why a bullet removed nothing (passed_through_hole, no_anatomy_in_cut, crater_bottom_not_reached)
      try {Grid& candidate=grid;candidate.journal=&journal;evMark("copy");
+      const bool roundBone=!eventIn.blast&&!eventIn.explosion_world&&!eventIn.explosion_cookie&&!event.blast&&!event.melee&&!event.blade&&!slabEvent&&event.penetration_m>0.&&
+          bullet_burst::boneResistOn().load(std::memory_order_relaxed);
+      const bool boneInOpenChannel=roundBone && candidate.boneStrikes && march.found &&
+       retainedBoneCell(candidate,march.cell) &&
+       !firstSolidCylinder(candidate,origin,mapping.direction,event.radius,true).found;
+      candidate.boneShot=roundBone ? Grid::BoneShot{event.shot_id?event.shot_id:event.sequence,!event.shot_id,event.shot_id?0:task.stamp.owner.spawn_cookie} : Grid::BoneShot{};
       // Replays of the same accepted shot keep the same connected irregular
       // edge. Legacy sphere/profile probes retain their original footprint.
       // Per-shot seed from the engine (bullet, sequence, bone, entity): two NPCs' first hits must not share an edge shape
@@ -2720,7 +3059,25 @@ struct Pool::Impl {
        if(modesLog)std::cerr<<"modes_hole seq="<<event.sequence<<" thin="<<holeThin<<" surface_mm="<<surf*1e3<<" start_mm="<<here*1e3<<" thick_mm="<<(thick<1e8?thick*1e3:-1.)
         <<" entry_mm="<<entryPenetration*1e3<<" cut_end_below_surface_mm="<<(holeThin?-1.:((holeHold?holeCapEnd:here+entryPenetration)-surf)*1e3)<<" hold="<<holeHold
         <<" exit_crater_mm="<<(closedExit?craterDepth*1e3:-1.)<<std::endl;}
-      removal=event.penetration_m>0 ? eraseTunnel(candidate,origin,mapping.direction,event.radius,entryPenetration,&result.edge_contact_cells,&i.asset->envelope_tree,event.exit_diameter_mult,&exit,edgeSeed,chewed?std::min(event.cavitation,.4):event.cavitation,chewed?0.:event.burst,i.asset->tissue_field.get(),recordPrimary?&primaryRecord:nullptr,&primaryWritten,-1,marchReuse,event.gore.wound_variation_mult,slabEvent?&slabSpec:nullptr) : eraseRay(candidate,origin,mapping.direction,event.radius,event.depth,&result.edge_contact_cells);evMark("erase");
+      // The mask renderer displays the committed cells on both retained and separated bodies.
+      // Analytical mesh modes keep their original representable channel.
+      const bool cutGrenade=event.blast && !event.melee && !event.blade && !slabEvent &&
+          !event.tear_request && event.penetration_m>0 && mask_only_mode_value()>=2 &&
+          !i.mask_only_off && (!i.piece || (i.piece_published && i.piece_published->mask_piece));
+      GrenadeBite bite;
+      if(cutGrenade){
+       bite.blast=core::quantMix(event.explosion_world^core::quantMix(event.explosion_cookie));
+       bite.seed=core::quantMix(bite.blast^(event.ammo_seed?event.ammo_seed:event.sequence));
+       bite.capture=nullptr;
+       bite.display=i.asset->closure_field.get();
+
+       for(const auto& segment:i.asset->sever_segments)
+        if(segment.bone==event.hit_bone){bite.limbAxis=segment.axis;break;}
+       displayStroke={origin,mapping.direction,event.radius,entryPenetration,event.exit_diameter_mult,
+                      chewed?std::min(event.cavitation,.4):event.cavitation,chewed?0.:event.burst,
+                      event.gore.wound_variation_mult,edgeSeed,bite};
+      }
+      removal=event.penetration_m>0 ? eraseTunnel(candidate,origin,mapping.direction,event.radius,entryPenetration,&result.edge_contact_cells,&i.asset->envelope_tree,event.exit_diameter_mult,&exit,edgeSeed,chewed?std::min(event.cavitation,.4):event.cavitation,chewed?0.:event.burst,i.asset->tissue_field.get(),recordPrimary?&primaryRecord:nullptr,&primaryWritten,-1,marchReuse,event.gore.wound_variation_mult,slabEvent?&slabSpec:nullptr,nullptr) : eraseRay(candidate,origin,mapping.direction,event.radius,event.depth,&result.edge_contact_cells);evMark("erase");
       if(removal.freshSolid==0&&event.penetration_m>0&&!slabEvent&&!meleeEdge&&!event.melee&&!event.blast&&!holesMode&&!holeHold&&!closedExit&&
          !std::getenv("GFY_NO_CORE_CONTACT")){
        const Vec hd=unit(mapping.direction);const auto crossings=i.asset->envelope_tree.crossingDistances(origin,hd);
@@ -2838,6 +3195,13 @@ struct Pool::Impl {
         for(unsigned s=0;s<64;++s)removal.freshBySlot[s]+=ventRemoval.freshBySlot[s];result.edge_contact_cells+=ventEdge;
         ventRadiusOut=ventRadius*ventExitMult*(1+std::min(1.5,ventBurst*1.2));}
       }evMark("vent");
+      if(roundBone){
+       if(boneInOpenChannel && restrictOpenChannelToTissue(candidate,journal,removal) && historyBase)
+        historyLimits|=resolved_cut_edge_repairs;
+       const auto s=std::clamp(bullet_burst::boneStrength().load(std::memory_order_relaxed)*.01,0.,.95);
+       if(keepTunnelBone(candidate,attemptSever->table,journal,removal,origin,mapping.direction,event.radius,s)&&historyBase)
+        historyLimits|=resolved_cut_edge_repairs;
+      }
       if(holesMode&&modesLog&&event.penetration_m>0){ // modes test read-out (GFY_MODES_LOG, offline probes): the removal near this shot
        // measured on the grid itself. Every removed tissue cell on the axis and 32 parallel rays (0.5, 1 and 1.5 x the radius; the
        // hole and its widest swell) out to 0.6 m: its TRUE depth = the distance from its centre to the nearest cell outside the
@@ -2888,7 +3252,7 @@ struct Pool::Impl {
          :head_burst::Round{eventIn.round_class,eventIn.radius,eventIn.penetration_m,eventIn.burst,eventIn.cavitation,headSize}; // headfix: the round sizes the burst
         auto hf=head_fracture::fracture(candidate,i.asset->sever_segments,*attemptSever,i.asset->cranial_measure,tearCuts,i.asset->tissue_field.get(),
          march.entry,unit(mapping.direction),headSeed,event.hit_bone,kind,i.asset->closure_field.get(),&headRound,
-         event.melee!=0||dmode==2); // headsize: a bullet in Normal: a section of the head, the body event's size; Extreme and a crushing blow: the large head events, as before
+         event.melee!=0||dmode==2,!event.melee&&!event.blast&&!eventIn.blast&&!eventIn.explosion_world&&!eventIn.explosion_cookie); // headsize: a bullet in Normal: a section of the head, the body event's size; Extreme and a crushing blow: the large head events, as before
         tearCuts.clear();GFY_HEAD_FRACTURE_REPORT(hf,kind);
         if(!hf.records.empty()){
          for(auto&rr:hf.records){if(historyRoom())remember(std::move(rr),event.sequence,mapping,ResolvedTunnel::Role::tear);else historyLimits|=resolved_cut_capacity;}
@@ -2918,24 +3282,29 @@ struct Pool::Impl {
         if(neckHit())head_burst::clipAbove(plan,neckFloor,Vec{0,1,0}); // headsize: a neck hit's event stays above the neck's base joint
         // a living body never separates: its burst is blown out; so is a corpse burst too small for its fragments to come off
         const bool pieces=kind==bullet_burst::burst&&!event.living_hit&&plan.rf>=bullet_burst::piecesMinRf&&body_blowout_chunks_value()!=0; // nochunks: the menu's switch
-        std::size_t bbErased=0,bbCells=0,bbEdge=0;double bbMs=0,bbLabel=0,bbErase=0,bbRepair=0;const char*bbRefusal=nullptr;bool bbDone=false;
-        if(pieces){auto bb=head_burst::burst(candidate,i.asset->sever_segments,*attemptSever,plan);
+        std::size_t bbErased=0,bbCells=0,bbEdge=0,bbBone=0;double bbMs=0,bbLabel=0,bbErase=0,bbRepair=0;const char*bbRefusal=nullptr;bool bbDone=false;
+        if(pieces){plan.bulletBodySurface=candidate.lodAttached;auto bb=candidate.captureBulletCut([&]{return head_burst::burst(candidate,i.asset->sever_segments,*attemptSever,plan);});
          if(!bb.records.empty()){for(auto&rr:bb.records){if(historyRoom())remember(std::move(rr),event.sequence,mapping,ResolvedTunnel::Role::tear);else historyLimits|=resolved_cut_capacity;}}
          if(bb.edgeCells)historyLimits|=resolved_cut_edge_repairs;
          removal.dirty.insert(bb.dirty.begin(),bb.dirty.end());removal.freshSolid+=bb.cells;removal.freshMask+=bb.mask;
          for(unsigned s=0;s<64;++s)removal.freshBySlot[s]+=bb.bySlot[s];
          bbErased=bb.erased;bbCells=bb.cells;bbEdge=bb.edgeCells;bbMs=bb.ms;bbLabel=bb.labelMs;bbErase=bb.eraseMs;bbRepair=bb.repairMs;bbRefusal=bb.refusal;bbDone=bb.done;bulletSplit=bb.done;}
-        else{auto cr=bullet_burst::crater(candidate,i.asset->sever_segments,*attemptSever,plan);
+        else{Vec bbLimbAxis{0,1,0};
+         for(const auto& seg:i.asset->sever_segments)if(seg.bone==event.hit_bone){bbLimbAxis=seg.axis;break;}
+         auto cr=candidate.captureBulletCut([&]{return bullet_burst::crater(candidate,i.asset->sever_segments,*attemptSever,plan,
+             {&i.asset->source_tree,i.asset->closure_field.get(),
+               i.asset->gear_body.merged_faces?i.asset->gear_body.body_faces:unsigned(i.asset->source.f.size()),
+               outward*-1.,bbLimbAxis});});
          if(cr.edgeCells)historyLimits|=resolved_cut_edge_repairs;
          removal.dirty.insert(cr.dirty.begin(),cr.dirty.end());removal.freshSolid+=cr.cells;removal.freshMask+=cr.mask;
          for(unsigned s=0;s<64;++s)removal.freshBySlot[s]+=cr.bySlot[s];
-         bbErased=cr.erased;bbCells=cr.cells;bbEdge=cr.edgeCells;bbMs=cr.ms;bbLabel=cr.labelMs;bbErase=cr.eraseMs;bbRepair=cr.repairMs;bbRefusal=cr.refusal;bbDone=cr.done;}
+         bbErased=cr.erased;bbCells=cr.cells;bbEdge=cr.edgeCells;bbBone=cr.boneKept;bbMs=cr.ms;bbLabel=cr.labelMs;bbErase=cr.eraseMs;bbRepair=cr.repairMs;bbRefusal=cr.refusal;bbDone=cr.done;}
         if(bbDone){bulletKind=pieces?2u:(kind==bullet_burst::burst?3u:1u);bulletPoint=plan.B-outward*plan.rf;bulletStrength=plan.sigma;
          bulletMouth=std::min(.08,plan.rf);bulletMouthExit=atExit;bulletMouthAt=mouth;bulletDir=d;}
         if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_TEAR_SELECT_LOG"))std::cerr<<"bullet_burst seq="<<event.sequence<<" kind="<<bullet_burst::name(kind)<<" pieces="<<pieces
          <<" living="<<event.living_hit<<" killing="<<event.killing_hit<<" bone="<<event.hit_bone<<" class="<<head_burst::roundClass(bbRound)<<" strength="<<plan.sigma<<" rf_mm="<<plan.rf*1000
          <<" near="<<plan.nNear<<" groups="<<plan.groups<<" through="<<through<<" at="<<(atExit?"exit":"entry")<<" mouth=("<<mouth.x<<","<<mouth.y<<","<<mouth.z<<") blast=("<<plan.B.x<<","<<plan.B.y<<","<<plan.B.z
-         <<") erased="<<bbErased<<" cells="<<bbCells<<" edge_cells="<<bbEdge<<" plan_ms="<<planMs<<" label_ms="<<bbLabel<<" erase_ms="<<bbErase<<" repair_ms="<<bbRepair<<" ms="<<bbMs<<" done="<<bbDone<<" refusal="<<(bbRefusal?bbRefusal:"")<<std::endl;}}
+         <<") erased="<<bbErased<<" cells="<<bbCells<<" edge_cells="<<bbEdge<<" bone_kept="<<bbBone<<" plan_ms="<<planMs<<" label_ms="<<bbLabel<<" erase_ms="<<bbErase<<" repair_ms="<<bbRepair<<" ms="<<bbMs<<" done="<<bbDone<<" refusal="<<(bbRefusal?bbRefusal:"")<<std::endl;}}
       // Damage-threshold severing: the stations this cut touched are re-measured; a failed one tears (same journal).
       // Damage-driven dismemberment: a failed station tears through its wounds and remaining tissue (DamageTear.h).
       if(event.blast&&removal.freshSolid>0){blastDirtyList.insert(blastDirtyList.end(),removal.dirty.begin(),removal.dirty.end());blastMapping=mapping;blastSequence=event.sequence;blastSequences.insert(event.sequence);blastRays.push_back({mapping.entry,unit(mapping.direction)});
@@ -2971,7 +3340,7 @@ struct Pool::Impl {
          killSeverRound(eventIn)&&(eventIn.blast||(eventIn.explosion_world==0&&eventIn.explosion_cookie==0))&&!i.asset->sever_segments.empty()&&!damage_modes::noSever(dmode)&&!std::getenv("GFY_NO_KILL_SEVER")){ // fragwound: a fragment has no killing-shot tear
        // raggedsever: the tear is made after the batch's events, through the damage (below the event loop); 0 = today's cut, here
        // (a melee blow keeps today's: its own blade cut below reads this tear's result)
-       if(kill_sever_ragged_value()&&!event.melee)killSevers.push_back({out->impacts.size(),event.sequence,mapping,march.entry,unit(mapping.direction),event.penetration_m,event.hit_bone,edgeSeed?edgeSeed:event.sequence});
+       if(kill_sever_ragged_value()&&!event.melee)killSevers.push_back({out->impacts.size(),event.sequence,mapping,march.entry,unit(mapping.direction),event.penetration_m,event.hit_bone,edgeSeed?edgeSeed:event.sequence,candidate.boneShot});
        else{
        const Vec d=unit(mapping.direction),e0=march.entry;const SeverSegment*seg=nullptr;const SeverStation*st=nullptr;double best=1e30;bool torn=false;
        std::size_t stationTotal=0;for(const auto&s:i.asset->sever_segments)stationTotal+=s.stations.size();
@@ -3104,6 +3473,10 @@ struct Pool::Impl {
       grid.journal=nullptr;}
      catch(const RecoverableImpactError&e){rollback();attemptSever->invalidate();result.rejection=e.what();out->impacts.push_back(std::move(result));continue;}
      catch(...){rollback();throw;}
+     if(displayStroke.radius>0){
+      displayStrokes.push_back(displayStroke);
+      if(ordinaryBatch)replayJob.append(displayStroke,i.asset,i.committed->impl_->grid,activeEvents);
+     }
      result.cutter=point(removal.cutter);result.removed_mask_cells=removal.freshMask;result.removed_solid_cells=removal.freshSolid;result.removed=removal.freshSolid>0||holeHold; // modes: a hit held at the cap still bleeds
      for(unsigned s=0;s<64;++s)result.removed_m3_by_slot[s]=double(removal.freshBySlot[s])*grid.pitch*grid.pitch*grid.pitch;
      if(!result.removed){
@@ -3154,10 +3527,14 @@ struct Pool::Impl {
       for(int a=0;a<3;++a){sl.centre[a]=float(sc[a]);sl.side[a]=float(ss[a]);sl.normal[a]=float(sn[a]);}
       sl.half_side=float(hs);sl.half_normal=float(hn);sl.half_depth=float(.5*event.penetration_m+.008);
       melee::addSlit(i.job_slits,sl);}
+     
      evMark("surfaces");changed=changed||(holeHold?removal.freshSolid>0:result.removed);if(dirty.empty())dirty.swap(removal.dirty);else dirty.merge(removal.dirty);evMark("dirty_merge");
     }out->impacts.push_back(std::move(result));
    }
+   replayJob.close();
    jobMark("events");
+   if(!displayStrokes.empty())for(const auto& k:dirty)
+    if(const auto* tile=grid.findTile(k))beforeTears.emplace(k,*tile);
    for(const auto&ks:killSevers){if(ks.result>=out->impacts.size())continue;auto&result=out->impacts[ks.result];
     if(result.sequence!=ks.sequence||!result.removed||!result.rejection.empty()||result.sever)continue;
     const Vec d=ks.d,e0=ks.e0;const SeverSegment*seg=nullptr;const SeverStation*st=nullptr;double best=1e30;bool torn=false;std::size_t segBase=0;
@@ -3182,12 +3559,18 @@ struct Pool::Impl {
      {const Vec kbTo=(kbPath+st->center)*.5-kbPlan.B;kbPlan.B=kbPlan.B+kbTo;for(unsigned q=0;q<kbPlan.S;++q)kbPlan.site[q]=kbPlan.site[q]+kbTo;
       kbPlan.entry=kbPlan.entry+kbTo;kbPlan.exit=kbPlan.exit+kbTo;}
      std::unordered_map<Cell,std::pair<bool,core::Tile>,core::CellHash> kbJournal;auto kbPriorSever=attemptSever->failed;const auto kbPriorLimits=historyLimits;
+     const auto oldContacts=grid.boneStrikes;
+     grid.boneShot=ks.boneShot;
      bullet_burst::Crater kbCr;bool kbOk=true;grid.journal=&kbJournal;
-     try{kbCr=bullet_burst::crater(grid,i.asset->sever_segments,*attemptSever,kbPlan);}
+     try{kbCr=grid.captureBulletCut([&]{return bullet_burst::crater(grid,i.asset->sever_segments,*attemptSever,kbPlan,
+        {&i.asset->source_tree,i.asset->closure_field.get(),
+         i.asset->gear_body.merged_faces?i.asset->gear_body.body_faces:unsigned(i.asset->source.f.size()),
+         d*-1.,seg->axis});});}
      catch(const RecoverableImpactError&){kbOk=false;}
      catch(...){grid.journal=nullptr;throw;}
      grid.journal=nullptr;
-     if(!kbOk){historyLimits=kbPriorLimits;attemptSever->failed.swap(kbPriorSever);
+     grid.boneShot={};
+     if(!kbOk){grid.boneStrikes=oldContacts;historyLimits=kbPriorLimits;attemptSever->failed.swap(kbPriorSever);
       for(auto&e:kbJournal){if(e.second.first)grid.tiles[e.first]=e.second.second;else grid.tiles.erase(e.first);}attemptSever->invalidate();}
      else if(kbCr.done&&kbCr.cells){if(kbCr.edgeCells)historyLimits|=resolved_cut_edge_repairs;
       dirty.insert(kbCr.dirty.begin(),kbCr.dirty.end());changed=true;result.removed_mask_cells+=kbCr.mask;result.removed_solid_cells+=kbCr.cells;
@@ -3233,6 +3616,7 @@ struct Pool::Impl {
     if(verdict.tear&&(verdict.remainingPixels||verdict.woundPixels)){result.sever=true;result.sever_dangling=false;result.sever_bone=verdict.bone;
      result.sever_point=point(verdict.point);result.sever_axis=point(verdict.axis);result.sever_remaining_tissue=verdict.remainingTissue;
      result.sever_remaining_bone=verdict.remainingBone;result.sever_cells=verdict.cells;noteTornEnd(result,verdict);}}
+   grid.boneShot={};
    if(!killSevers.empty())jobMark("kill_severs");
    // One sever check for the explosion's craters: tear every station they failed (weakest first, up to 12), each
    // reported on one of the batch's crater results.
@@ -3440,6 +3824,43 @@ struct Pool::Impl {
        if(!report)for(auto it=out->impacts.rbegin();it!=out->impacts.rend();++it)if(it->removed){report=&*it;break;}
        if(report){auto&r=*report;r.sever=true;r.sever_dangling=false;r.sever_bone=so.bone;r.sever_point=point(verdict.point);r.sever_axis=point(verdict.axis);
         r.sever_remaining_tissue=so.rt;r.sever_remaining_bone=so.rb;r.sever_cells=verdict.cells;noteTornEnd(r,verdict);}}}}}
+   if(changed&&(grid.visibleFloor||!displayStrokes.empty())){
+    const Grid& previous=*i.committed->impl_->grid;
+    auto next=std::make_shared<Grid::FloorTiles>();
+    if(previous.visibleFloor)*next=*previous.visibleFloor;
+    // Do not age relief in a halo-only brick on a later hit.
+    for(const Cell& k:dirty){
+     if(!next->count(k))continue;
+     const auto* now=grid.findTile(k);const auto* was=previous.findTile(k);
+     if(now&&(!was||now->removed!=was->removed))next->erase(k);
+    }
+    if(ordinaryBatch&&!displayStrokes.empty())try{
+     auto replay=replayJob.result(previous,*i.asset,displayStrokes);
+     const auto& display=replay->grid;
+     for(const auto& p:beforeTears){
+      const Cell& k=p.first;const auto* visible=display.findTile(k);
+      const auto* previousPhysical=previous.findTile(k);
+      const auto* oldFloor=previous.visibleFloor&&previous.visibleFloor->count(k)?&previous.visibleFloor->at(k):nullptr;
+      const auto* finalTile=grid.findTile(k);
+      bool torn=false;for(unsigned j=0;j<8;++j)if(finalTile&&finalTile->removed[j]!=p.second.removed[j])torn=true;
+      if(torn)continue;
+      core::Tile keep{};bool any=false;
+      for(unsigned j=0;j<8;++j){
+       const auto historic=previousPhysical?previousPhysical->removed[j]:0ull;
+       const auto oldVisible=historic&~(oldFloor?oldFloor->removed[j]:0ull);
+       keep.removed[j]=p.second.removed[j]&~oldVisible&~(visible?visible->removed[j]:0ull);
+       any|=keep.removed[j]!=0;
+      }
+      if(any)(*next)[k]=keep;else next->erase(k);
+     }
+    }catch(const RecoverableImpactError& error){
+     // An out-of-range visual stroke cannot cancel the successful native
+     // separation. Publish the released field for this batch's changed area.
+     for(const auto& p:beforeTears)next->erase(p.first);
+     std::cerr<<"grenade_display_retained_physics reason="<<error.what()<<std::endl;
+    }
+    grid.visibleFloor=next->empty()?nullptr:std::move(next);
+   }
    if(dentsAdded)changed=true; // melee: a dent publishes even when nothing was carved
    jobMark("blast");removalTime.finish();stages.mark("remove");out->no_geometry_change=!changed;
    out->irregular_edges=changed&&usedRough;
@@ -3580,7 +4001,7 @@ struct Pool::Impl {
    state->history=candidate_grid?candidate_history:i.committed->impl_->history;
    state->geometry=out->no_geometry_change?i.committed->impl_->geometry:out;
    state->sever=candidate_grid&&candidate_sever?std::shared_ptr<const SeverState>(candidate_sever):i.committed->impl_->sever;
-   state->piece=i.piece;state->piece_mesh=i.piece_published;
+   state->burn_owner_query=i.piece_ownership;state->piece=i.piece;state->piece_mesh=i.piece_published;
    state->gore=i.committed->impl_->gore;
    int eyeMode=state->gore.eye_remnants_mode;
    if(!out->no_geometry_change)for(const auto& impact:out->impacts)
@@ -3633,8 +4054,43 @@ std::shared_ptr<Session>Pool::attach_piece(std::shared_ptr<const PieceSeed>seed,
  auto s=std::shared_ptr<Session>(new Session(std::make_unique<Session::Impl>(std::move(seed),owner,std::move(published),revision,generation)));p.owners.push_back(s);return s;
 }catch(const std::bad_alloc&){fail(outOfMemoryText);return {};}catch(const std::exception&e){fail(e.what());return {};}catch(...){fail("unknown_piece_attach_failure");return {};}}
 std::shared_ptr<Session>Pool::attach(std::shared_ptr<const Asset>asset,Identity owner)noexcept{AllocationScope scope;try{need(asset&&owner.spawn_cookie&&owner.visual_lineage&&owner.source==asset->source_hash&&owner.exact_rig==asset->rig_hash,"owner_asset_identity");auto&p=*impl_;std::lock_guard<std::mutex>lock(p.mutex);p.owners.erase(std::remove_if(p.owners.begin(),p.owners.end(),[](auto&w){return w.expired();}),p.owners.end());if(p.owners.size()>=p.max_owners){fail("owner_capacity");return {};}auto s=std::shared_ptr<Session>(new Session(std::make_unique<Session::Impl>(std::move(asset),owner)));p.owners.push_back(s);return s;}catch(const std::exception&e){fail(e.what());return {};}catch(...){fail("unknown_attach_failure");return {};}}
+bool Pool::prime_burn_geometry(const std::shared_ptr<Session>& session,
+                               std::uint64_t generation,std::uint64_t sequence) noexcept {
+    AllocationScope scope;
+    try {
+        if (!session || !sequence) return false;
+        auto& i=*session->impl_;
+        auto& pool=*impl_;
+        std::lock_guard<std::mutex> poolLock(pool.mutex);
+        std::lock_guard<std::mutex> ownerLock(i.mutex);
+        if (pool.stop || i.canceled || i.failed || i.flight_birth_held || !i.asset->fast ||
+            !i.asset->fast->valid || !i.asset->closure_field || !i.asset->closure_field->available)
+            return false;
+        i.burn_surface_requested.store(true,std::memory_order_relaxed);
+        if (i.inflight || i.done || !i.pending.empty() || !i.retry_pending.empty() ||
+            !i.committed || !i.committed->needs_burn_prime() || sequence!=i.submitted+1) return false;
+        const auto policy=memory_policy();
+        if (policy.enabled) {
+            const auto memory=query_memory();
+            if (memory.valid && memory.avail_commit<std::max(i.need_commit,policy.dispatch_commit_floor)) return false;
+        }
+        Impl::Work task;
+        task.session=session;
+        task.stamp={i.owner,generation,sequence};
+        task.burn_prime=true;
+        task.failure=std::make_shared<Output>();
+        task.failure->burn_surface_prime=true;
+        task.failure->stamp=task.stamp;
+        pool.work.push_back(std::move(task));
+        i.inflight=true;
+        i.submitted=sequence;
+        i.last_activity=core::Clock::now();
+        pool.wake.notify_one();
+        return true;
+    } catch (...) {return false;}
+}
 bool Pool::dispatch(const std::shared_ptr<Session>&session,std::uint64_t generation)noexcept{AllocationScope scope;try{
- if(!session)return false;auto&i=*session->impl_;auto&p=*impl_;std::lock_guard<std::mutex>poollock(p.mutex);std::lock_guard<std::mutex>lock(i.mutex);if(p.stop||i.canceled||i.failed||i.inflight||i.done||(i.pending.empty()&&i.retry_pending.empty())){
+ if(!session)return false;auto&i=*session->impl_;auto&p=*impl_;std::lock_guard<std::mutex>poollock(p.mutex);std::lock_guard<std::mutex>lock(i.mutex);if(i.flight_birth_held)return false;if(p.stop||i.canceled||i.failed||i.inflight||i.done||(i.pending.empty()&&i.retry_pending.empty())){
  auto trace_wait=[&](const auto&waiting){if(!waiting.empty()){const char*why=p.stop?"pool_stopped":i.canceled?"owner_canceled":i.failed?"owner_failed":i.done?"publication_pending":"worker_inflight";
   if(i.hit_wait.changed(why,waiting.front().sequence,waiting.back().sequence))body_hit_outcomes::report("dispatch_wait",why,i.owner.spawn_cookie,waiting.front().sequence,waiting.front().hit_trace,waiting.back().sequence,waiting.size(),unsigned(i.inflight));}};
  if(i.retry_pending.empty())trace_wait(i.pending);else trace_wait(i.retry_pending);
@@ -3667,7 +4123,7 @@ bool Pool::dispatch(const std::shared_ptr<Session>&session,std::uint64_t generat
  p.work.push_back(std::move(task));body_hit_outcomes::batch("dispatched",p.work.back().isolated?"isolated_retry":"worker_queue",i.owner.spawn_cookie,p.work.back().events);i.hit_wait.reset();if(p.work.back().isolated)i.retry_pending.erase(i.retry_pending.begin());else i.pending.erase(i.pending.begin(),i.pending.begin()+std::ptrdiff_t(p.work.back().events.size()));i.inflight=true;i.memory_waiting=false;i.need_commit=0;i.last_activity=core::Clock::now();p.wake.notify_one();return true;
 }catch(const std::bad_alloc&){fail(outOfMemoryText);return false;}catch(const std::exception&e){fail(e.what());return false;}catch(...){fail("unknown_dispatch_failure");return false;}}
 bool Pool::rebuild_completed(const std::shared_ptr<Session>&session,const std::shared_ptr<const Output>&expected,std::uint64_t generation)noexcept{AllocationScope scope;try{
- if(!session||!expected||session->impl_->piece)return false;auto&i=*session->impl_;auto&p=*impl_;
+ if(!session||!expected||session->impl_->is_piece_owner)return false;auto&i=*session->impl_;auto&p=*impl_;
  std::lock_guard<std::mutex>poollock(p.mutex);std::lock_guard<std::mutex>lock(i.mutex);
  if(p.stop||!i.asset->allow_renderer_rebuild||i.canceled||i.failed||!i.inflight||i.done!=expected||
     !i.ready_snapshot||!i.ready_grid||!expected->error.empty()||!expected->resource_failure.empty()||expected->no_geometry_change||

@@ -828,6 +828,25 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
  need(P>=1&&P<=maxPieces&&stats.sig.size()==K,"mask_piece3_input");
  need(published.mask_volume&&published.removal_field&&published.removal_field->available&&!published.children.empty(),"mask_piece3_published_mesh");
  stats.used=true;const PieceAt pieceAt(grid,volume,components);
+ // Assign a relief brick only when the source topology in its one-brick
+ // neighbourhood belongs to exactly one published piece. Ambiguous bricks
+ // at a split retain the released torn surface of each piece.
+ std::unordered_map<Cell,int,core::CellHash> floorOwner;
+ if(grid.visibleFloor)for(const auto& relief:*grid.visibleFloor){
+  const Cell k=relief.first;int owner=-1;bool ambiguous=false;
+  const int z0=std::max(0,8*k.z-8),z1=std::min(grid.size.z,8*k.z+16);
+  for(int x=std::max(0,8*k.x-8);x<std::min(grid.size.x,8*k.x+16)&&!ambiguous;++x)
+   for(int y=std::max(0,8*k.y-8);y<std::min(grid.size.y,8*k.y+16)&&!ambiguous;++y){
+    const auto ci=pieceAt.columnOf[std::size_t(y)*grid.size.x+x];if(ci<0)continue;
+    const auto& c=volume.columns[std::size_t(ci)];
+    for(auto it=c.first;it<c.first+c.count;++it){
+     const auto& span=volume.spans[it];if(span.hi<=z0||span.lo>=z1)continue;
+     int part=span.component<pieceAt.pieceOf.size()?pieceAt.pieceOf[span.component]:-1;
+     if(part<0||(owner>=0&&part!=owner)){ambiguous=true;break;}owner=part;
+    }
+   }
+  if(!ambiguous&&owner>=0)floorOwner.emplace(k,owner);
+ }
  std::vector<Region> R;R.reserve(K);for(const auto&t:published.tears)R.emplace_back(*t.block);
  std::vector<std::size_t> freshIdx;for(std::size_t t=0;t<K;++t)if(fresh(published.tears[t]))freshIdx.push_back(t);
  // the pieces a sample on side s of fresh tear t may belong to
@@ -969,10 +988,58 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
    const Vec nn{A.surface[3]+B.surface[3]+Cc.surface[3],A.surface[4]+B.surface[4]+Cc.surface[4],A.surface[5]+B.surface[5]+Cc.surface[5]};
    const double s=dot(g,nn);windingVote+=s>0?1:(s<0?-1:0);}}
  const bool ccwOutward=windingVote>=0;
+ // A split can contain both a fresh joint tear and a fresh burst. Its
+ // preceding publication has no burst proxy yet. Locate the retained cells
+ // inside each new burst using the final connectivity spans once per record.
+ std::vector<std::vector<head_burst_pieces::CarryBox>> burstStarts(P);
+ std::vector<std::vector<CellBox>> burstBounds(K);
+ for(std::size_t t=0;t<K;++t){
+  const auto&tr=published.tears[t];
+  if(!fresh(tr)||!tear_atlas::burstRecord(*tr.block))continue;
+  const auto& h=tr.block->header;
+  if(h.size()!=104||h[14]!=2u||h[27]!=0u)continue;
+  const double radius=tear_atlas::f32(h,3);
+  const std::array<double,3> centre={tear_atlas::f32(h,0),tear_atlas::f32(h,1),tear_atlas::f32(h,2)};
+  if(!(radius>0))continue;
+  auto&bounds=burstBounds[t];bounds.resize(P);
+  const auto lower=[&](int a,double d){return std::max(0,int(std::ceil((centre[a]-d-grid.origin[a])/grid.pitch-.5)));};
+  const auto upper=[&](int a,double d){return std::min((&grid.size.x)[a],1+int(std::floor((centre[a]+d-grid.origin[a])/grid.pitch-.5)));};
+  const int x0=lower(0,radius),x1=upper(0,radius),y0=lower(1,radius),y1=upper(1,radius);
+  for(int y=y0;y<y1;++y)for(int x=x0;x<x1;++x){
+   const auto ci=pieceAt.columnOf[std::size_t(y)*grid.size.x+x];
+   if(ci<0)continue;
+   const double dx=grid.origin.x+(x+.5)*grid.pitch-centre[0],dy=grid.origin.y+(y+.5)*grid.pitch-centre[1];
+   const double zz=radius*radius-dx*dx-dy*dy;
+   if(zz<=0.)continue;
+   const double dz=std::sqrt(zz);
+   const int z0=lower(2,dz),z1=upper(2,dz);
+   const auto&col=volume.columns[std::size_t(ci)];
+   for(auto i=col.first;i<col.first+col.count;++i){
+    const auto&sp=volume.spans[i];
+    if(sp.component>=pieceAt.pieceOf.size())continue;
+    const int k=pieceAt.pieceOf[sp.component],lo=std::max(z0,sp.lo),hi=std::min(z1,sp.hi);
+    if(k>=0&&lo<hi)bounds[std::size_t(k)].add(x,y,lo,hi);
+   }
+  }
+ }
  // the tears each piece keeps: unsplit ones it lies on (its voted side), inherited ones it borders (the parent's side)
  std::vector<std::vector<gfy_packed::TearRef>> keep(P);
  for(std::size_t k=0;k<P;++k)for(std::size_t t=0;t<K;++t){const auto&tr=published.tears[t];int side=-1;
-  if(tear_atlas::burstRecord(*tr.block)){if(auto c=burstFor(tr,pieceAt,k))keep[k].push_back({c,3});continue;} // headfix
+  if(tear_atlas::burstRecord(*tr.block)){
+   if(auto c=burstFor(tr,pieceAt,k)){
+    keep[k].push_back({c,3});
+    if(!burstBounds[t].empty()&&burstBounds[t][k].valid()){
+     const auto& bounds=burstBounds[t][k];
+     head_burst_pieces::CarryBox box;
+     for(int a=0;a<3;++a){
+      box.b[a]=grid.origin[a]+bounds.lo[a]*grid.pitch-.035;
+      box.b[a+3]=grid.origin[a]+bounds.hi[a]*grid.pitch+.035;
+     }
+     burstStarts[k].push_back(box);
+    }
+   }
+   continue;
+  }
   if(fresh(tr))side=stats.sig[t][k];
   else{int touched=0;for(const auto&s:sel)if(!s.touch.empty())touched|=s.touch[k][t];
    const bool voted=tr.side<2?stats.votes[t][std::size_t(tr.side)*maxPieces+k]>0:(stats.votes[t][k]+stats.votes[t][maxPieces+k])>0;
@@ -1071,11 +1138,13 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
      child.indices.push_back(std::uint16_t(child.vertices.size()));child.vertices.push_back(row);}
     child.original_faces.push_back(~std::uint32_t(0));}
    stats.boxTriangles+=child.indices.size()/3;++stats.boxes;mesh.children.push_back(std::move(child));}
-  if(!stCarry[k].empty()){ // seethrough: the burst boxes this piece keeps, merged (HeadBurstPieces.h mergeCarryBoxes)
+  if(!stCarry[k].empty()||!burstStarts[k].empty()){ // inherited and newly visible burst faces
    std::vector<head_burst_pieces::CarryBox> L;
-   for(auto x:stCarry[k]){if(x.bone>=64||!ok[k][x.bone]){const Vec cc{.5*(x.b[0]+x.b[3]),.5*(x.b[1]+x.b[4]),.5*(x.b[2]+x.b[5])};double bestD=1e300;x.bone=65535;
+   auto boxes=stCarry[k];
+   boxes.insert(boxes.end(),burstStarts[k].begin(),burstStarts[k].end());
+   for(auto x:boxes){if(x.bone>=64||!ok[k][x.bone]){const Vec cc{.5*(x.b[0]+x.b[3]),.5*(x.b[1]+x.b[4]),.5*(x.b[2]+x.b[5])};double bestD=1e300;x.bone=65535;
      for(const auto&ch:mesh.children)for(const auto&row:ch.vertices){unsigned best=0;for(unsigned w=1;w<4;++w)if(row.weight[w]>row.weight[best])best=w;
-      const double dd=length(position(row)-cc);if(dd<bestD&&row.bone[best]<64&&ok[k][row.bone[best]]){bestD=dd;x.bone=row.bone[best];}}
+      const double dd=length(position(row)-cc);if(dd<bestD&&row.bone[best]<64&&ok[k][row.bone[best]]){bestD=dd;x.bone=row.bone[best];if(!x.kept)x.src=ch.material_source_child;}}
      if(x.bone==65535)for(unsigned bb=0;bb<64;++bb)if(ok[k][bb]){x.bone=std::uint16_t(bb);break;}
      if(x.bone==65535)continue;}
     L.push_back(x);}
@@ -1093,7 +1162,14 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
   // box of what the piece draws only (its children lie inside it)
   struct FieldTiles {std::unordered_map<Cell,core::Tile,core::CellHash> tiles;const void* ownership=nullptr;double pitch;Vec origin;decltype(grid.size) size;};
   FieldTiles field{{},nullptr,grid.pitch,grid.origin,grid.size};
-  for(const auto&t:grid.tiles){std::uint64_t any=0;for(auto wd:t.second.removed)any|=wd;if(any)field.tiles.emplace(t.first,t.second);}
+  for(const auto&t:grid.tiles){std::uint64_t any=0;for(auto wd:t.second.removed)any|=wd;if(any){
+   auto v=t.second;
+   const auto who=floorOwner.find(t.first);
+   if(who!=floorOwner.end()&&who->second==int(k)){
+    const auto& relief=grid.visibleFloor->at(t.first);
+    for(unsigned j=0;j<8;++j)v.removed[j]&=~relief.removed[j];
+   }
+   field.tiles.emplace(t.first,v);}}
   const CellBox&mb=drawn[k];auto inBox=[&](const Cell&t){return mb.valid()&&t.x*8>=mb.lo[0]&&t.x*8<mb.hi[0]&&t.y*8>=mb.lo[1]&&t.y*8<mb.hi[1]&&t.z*8>=mb.lo[2]&&t.z*8<mb.hi[2];};
   std::unordered_map<Cell,core::Tile,core::CellHash> mine;
   {const auto m0=core::Clock::now();CellBox ob=own[k];if(ob.valid())for(int a=0;a<3;++a){ob.lo[a]-=2;ob.hi[a]+=2;}
@@ -1198,6 +1274,26 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
   marks.reserve(mine.size());for(const auto&m:mine)marks.push_back(m);
   std::sort(marks.begin(),marks.end(),[](const std::pair<Cell,core::Tile>&a,const std::pair<Cell,core::Tile>&b){return a.first.x!=b.first.x?a.first.x<b.first.x:(a.first.y!=b.first.y?a.first.y<b.first.y:a.first.z<b.first.z);});
   for(const auto&m:marks){auto&t=field.tiles[m.first];for(unsigned q=0;q<8;++q)t.removed[q]|=m.second.removed[q];}
+  // Only carry actual visible differences from this piece's published birth mask.
+  // floorOwner excludes shared, ownerless and otherwise ambiguous bricks. Marks
+  // added by this piece's tear, gear and ancestry take precedence.
+  if(grid.visibleFloor){
+   auto carried=std::make_shared<Grid::FloorTiles>();
+   for(const auto& assignment:floorOwner){
+    if(assignment.second!=int(k))continue;
+    const auto raw=grid.findTile(assignment.first);
+    const auto shown=field.tiles.find(assignment.first);
+    if(!raw||shown==field.tiles.end())continue;
+    const auto& floor=grid.visibleFloor->at(assignment.first);
+    core::Tile kept{};bool any=false;
+    for(unsigned j=0;j<8;++j){
+     kept.removed[j]=floor.removed[j]&raw->removed[j]&~shown->second.removed[j];
+     any|=kept.removed[j]!=0;
+    }
+    if(any)carried->emplace(assignment.first,kept);
+   }
+   if(!carried->empty())piece.grenadeFloor=std::move(carried);
+  }
   auto removal=painter_detail::buildDamageField(field);need(removal&&removal->available,"mask_piece3_removal_field");
   stats.fieldBytes+=removal->bytes();
   if(marksOut)(*marksOut)[k]=std::move(marks);

@@ -711,6 +711,15 @@ void CRenderTarget::SetActive(bool force)
 }
 #endif
 
+// BloodEngine: also called from CRender::reset_end before the shaders are warmed
+void NormalizeSceneSsaoQuality()
+{
+	if (ps_r_ssao_mode != 2/*hdao*/)
+		ps_r_ssao = _min(ps_r_ssao, 3);
+
+	RImplementation.o.ssao_ultra = ps_r_ssao > 3;
+}
+
 CRenderTarget::CRenderTarget()
 	: CRenderTarget(nullptr, Device.dwWidth, Device.dwHeight)
 {
@@ -728,10 +737,7 @@ CRenderTarget::CRenderTarget(LPCSTR name, u32 width, u32 height)
 		dlss::InitializeTargets();
 	u32 SampleCount = 1;
 
-	if (ps_r_ssao_mode != 2/*hdao*/)
-		ps_r_ssao = _min(ps_r_ssao, 3);
-
-	RImplementation.o.ssao_ultra = ps_r_ssao > 3;
+	NormalizeSceneSsaoQuality();
 	if (RImplementation.o.dx10_msaa)
 		SampleCount = RImplementation.o.dx10_msaa_samples;
 

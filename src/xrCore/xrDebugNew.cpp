@@ -133,6 +133,64 @@ void LogStackTrace(LPCSTR header = nullptr, bool printStack = false)
     }
 }
 
+// crashchain (2026-11-26): the stack trace above prints no frames in a player's log (no symbol file ships and the walker
+// drops every frame it cannot name). Walk the thread from the given registers with the exe's own unwind tables
+// (RtlLookupFunctionEntry / RtlVirtualUnwind: no symbol file needed) and log every return address: game-exe ones as at its
+// usual base 0x140000000, so the build's symbol file names them, others as module+offset.
+static void painter_call_chain_line(int depth, DWORD64 pc)
+{
+	HMODULE mod = nullptr;
+	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                        reinterpret_cast<LPCSTR>(pc), &mod))
+		mod = nullptr;
+	if (mod && mod == GetModuleHandleA(nullptr))
+	{
+		Msg("  %2d 0x%llX", depth, (unsigned long long)(pc - DWORD64(mod) + 0x140000000ull));
+		return;
+	}
+	char path[MAX_PATH] = "?";
+	if (mod)
+		GetModuleFileNameA(mod, path, MAX_PATH);
+	const char* name = strrchr(path, '\\');
+	Msg("  %2d %s+0x%llX", depth, name ? name + 1 : path, (unsigned long long)(mod ? pc - DWORD64(mod) : pc));
+}
+static void painter_log_call_chain(const CONTEXT* start)
+{
+	if (!start || !shared_str_initialized)
+		return;
+	Msg("call chain (game exe addresses as at 0x140000000):");
+	CONTEXT c = *start;
+	int depth = 0;
+	__try
+	{
+		for (; depth < 48 && c.Rip; ++depth)
+		{
+			painter_call_chain_line(depth, c.Rip);
+			const DWORD64 sp = c.Rsp;
+			DWORD64 image = 0;
+			PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &image, nullptr);
+			if (!fn)
+			{
+				// a leaf function keeps its return address on top of the stack
+				c.Rip = *reinterpret_cast<const DWORD64*>(c.Rsp);
+				c.Rsp += 8;
+			}
+			else
+			{
+				PVOID handler_data = nullptr;
+				DWORD64 frame = 0;
+				RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, fn, &c, &handler_data, &frame, nullptr);
+			}
+			if (c.Rsp <= sp)
+				break; // no progress: the walk ends here
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		Msg("  (the walk stopped at frame %d)", depth);
+	}
+}
+
 void xrDebug::gather_info(const char* expression, const char* description, const char* argument0, const char* argument1,
                           const char* file, int line, const char* function, LPSTR assertion_info,
                           u32 const assertion_info_size)
@@ -221,6 +279,11 @@ void xrDebug::gather_info(const char* expression, const char* description, const
 			Msg("stack trace:\n");
 
         LogStackTrace(nullptr, true);
+        {
+            CONTEXT here; // crashchain: from where the error was raised
+            RtlCaptureContext(&here);
+            painter_log_call_chain(&here);
+        }
 
 #ifdef USE_OWN_ERROR_MESSAGE_WINDOW
 		buffer += xr_sprintf(buffer, assertion_size - u32(buffer - buffer_base), "stack trace:%s%s", endline, endline);
@@ -720,6 +783,7 @@ LONG WINAPI UnhandledFilter(_EXCEPTION_POINTERS* pExceptionInfo)
 		Msg("stack trace:\n");
 
     LogStackTrace(nullptr, true);
+    painter_log_call_chain(pExceptionInfo ? pExceptionInfo->ContextRecord : nullptr); // crashchain
 
 	if (!IsDebuggerPresent())
 	{

@@ -8,6 +8,8 @@
 #ifdef USE_DX11
 #include "WallmarksEngine.h"
 #include "BloodGpuParticles.h"
+#include "PainterFire.h"
+#include "../../xrCore/PainterBurnTrace.h"
 int r_blood_gpu = 1;
 // Painter runtime geometry publication: 0 synchronous (legacy), 1 prepared off
 // the main thread and committed atomically at a later barrier (default),
@@ -235,6 +237,10 @@ float ps_r__Tree_SBC = 1.5f; // scale bias correct
 int ps_r__tree_ib_reorder = 1;
 
 float ps_r__WallmarkTTL = 50.f;
+#ifdef USE_DX11
+int ps_blood_snapshots=1;
+int ps_blood_snapshot_mb=64;
+#endif
 float ps_r__WallmarkSHIFT = 0.0001f;
 float ps_r__WallmarkSHIFT_V = 0.0001f;
 
@@ -1824,6 +1830,78 @@ public:
 };
 
 #ifdef USE_DX11
+namespace PainterFire { void TestSmoke(float amount, float albedo); }
+// painter_fire_test <take> [seconds] [smoke amount] [smoke colour]: one baked fire take a few metres in front of the camera
+class CCC_PainterWorldMaster : public CCC_Integer {
+public:
+    CCC_PainterWorldMaster(LPCSTR name,int* setting):CCC_Integer(name,setting,0,1){}
+    void Execute(LPCSTR args) override {
+        CCC_Integer::Execute(args);
+        PainterSetFireMaster(*value!=0);
+    }
+};
+class CCC_PainterFireTest : public IConsole_Command
+{
+public:
+    CCC_PainterFireTest(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR args)
+    {
+        string128 take = "";
+        float seconds = 15.f, smoke = -1.f, albedo = .6f;
+        const int n = args ? sscanf(args, "%127s %f %f %f", take, &seconds, &smoke, &albedo) : 0;
+        PainterFire::Test(n >= 1 ? take : "", seconds);
+        if (n >= 3) PainterFire::TestSmoke(smoke, albedo);
+    }
+};
+// painter_fire_wall <take> [seconds] [scale]: a take baked with a wall in it (door, eave) on the wall the camera looks at
+class CCC_PainterFireWall : public IConsole_Command
+{
+public:
+    CCC_PainterFireWall(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR args)
+    {
+        string128 take = "";
+        float seconds = 30.f, scale = 1.f;
+        const int n = args ? sscanf(args, "%127s %f %f", take, &seconds, &scale) : 0;
+        PainterFire::TestWall(n >= 1 ? take : "door", seconds, scale);
+    }
+};
+// painter_fire_body [seconds]: the person the camera looks at burns
+class CCC_PainterFireBody : public IConsole_Command
+{
+public:
+    CCC_PainterFireBody(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR args)
+    {
+        float seconds = 30.f;
+        if (args) sscanf(args, "%f", &seconds);
+        PainterFire::TestBody(seconds);
+    }
+};
+// painter_fire_spread [seconds]: burning fuel on the ground the camera looks at; the fire spreads from there
+class CCC_PainterFireSpread : public IConsole_Command
+{
+public:
+    CCC_PainterFireSpread(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR args)
+    {
+        float seconds = 10.f;
+        if (args) sscanf(args, "%f", &seconds);
+        PainterFire::Spread(seconds);
+    }
+};
+class CCC_PainterFireSpreadInfo : public IConsole_Command
+{
+public:
+    CCC_PainterFireSpreadInfo(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR) { PainterFire::SpreadInfo(); }
+};
+class CCC_PainterFireSpreadStop : public IConsole_Command
+{
+public:
+    CCC_PainterFireSpreadStop(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = true; }
+    virtual void Execute(LPCSTR) { PainterFire::SpreadStop(); }
+};
 class CCC_BloodGpuMode : public CCC_Integer
 {
 public:
@@ -1906,6 +1984,38 @@ void xrRender_initconsole()
 #ifdef USE_DX11
 	Msg("* Painter blood burst test: native overlap geometry, independent particle creation and batched GPU blood sprites; saved GPU choice respected; native capture off by default (64 MiB)");
     CMD1(CCC_BloodGpuMode, "r_blood_gpu");
+    CMD2(CCC_PainterWorldMaster, "painter_fire", &ps_painter_fire);
+    CMD4(CCC_Integer, "painter_fire_light_quality", &ps_painter_fire_light_quality, 0, 3); // 3 = Extreme (firelightextreme)
+    CMD4(CCC_Integer, "painter_fire_light_beams", &ps_painter_fire_light_beams, 0, 1); // firebeams: shafts of firelight in fog / smoke
+    CMD4(CCC_Integer, "painter_fire_light_count", &ps_painter_fire_light_count, 4, 32); // firetrack: how many fires get a lamp
+    CMD4(CCC_Float, "painter_fire_fog_buildup", &ps_painter_fire_fog_buildup, 20.f, 600.f); // firefog: s to full haze
+    CMD4(CCC_Float, "painter_fire_fog_fire", &ps_painter_fire_fog_fire, 3.f, 80.f); // firefog: burning patches for full haze
+    CMD4(CCC_Float, "painter_fire_fog_linger", &ps_painter_fire_fog_linger, 20.f, 900.f); // firefog: s it hangs after
+    CMD4(CCC_Float, "painter_fire_fog_thickness", &ps_painter_fire_fog_thickness, .2f, 2.f); // firefog: how thick
+    CMD4(CCC_Float, "painter_fire_fog_area", &ps_painter_fire_fog_area, 50.f, 1000.f); // smokeair: m, fires this far count
+    CMD4(CCC_Float, "painter_fire_light_reach", &ps_painter_fire_light_reach, .5f, 2.f); // firefog: fire light reach
+    CMD4(CCC_Float, "painter_fire_brightness", &ps_painter_fire_brightness, .2f, 4.f);
+    CMD4(CCC_Integer, "painter_fire_quality", &ps_painter_fire_quality, 0, 2);
+    CMD4(CCC_Integer, "painter_fire_embers", &ps_painter_fire_embers, 0, 1);
+    CMD4(CCC_Integer, "painter_fire_haze", &ps_painter_fire_haze, 0, 1);
+    CMD4(CCC_Integer, "painter_fire_burnt", &ps_painter_fire_burnt, 0, 1);
+    CMD4(CCC_Integer, "painter_fire_fence_foot", &ps_painter_fire_fence_foot, 0, 1);
+    CMD4(CCC_Integer, "painter_fire_fog", &ps_painter_fire_fog, 0, 1);
+    CMD4(CCC_Integer, "painter_fire_smoke", &ps_painter_fire_smoke, 0, 1);
+    CMD4(CCC_Integer, "painter_stall_log", &ps_painter_stall_log, 0, 1);
+    CMD1(CCC_PainterFireTest, "painter_fire_test");
+    CMD1(CCC_PainterFireSpread, "painter_fire_spread");
+    CMD1(CCC_PainterFireSpreadInfo, "painter_fire_spread_info");
+    CMD1(CCC_PainterFireSpreadStop, "painter_fire_spread_stop");
+    CMD4(CCC_Float, "painter_fire_spread_speed", &ps_painter_fire_spread_speed, .1f, 5.f);
+    CMD4(CCC_Float, "painter_fire_spread_seconds", &ps_painter_fire_spread_seconds, 10.f, 1800.f);
+    CMD4(CCC_Float, "painter_fire_spread_radius", &ps_painter_fire_spread_radius, 10.f, 300.f);
+    CMD4(CCC_Integer, "painter_fire_spread_on", &ps_painter_fire_spread_on, 0, 1);
+    CMD4(CCC_Float, "painter_fire_burn_time", &ps_painter_fire_burn_time, .25f, 4.f);
+    CMD4(CCC_Float, "painter_fire_pool_time", &ps_painter_fire_pool_time, .25f, 4.f);
+    CMD4(CCC_Float, "painter_fire_burnt_minutes", &ps_painter_fire_burnt_minutes, 0.f, 240.f);
+    CMD1(CCC_PainterFireWall, "painter_fire_wall");
+    CMD1(CCC_PainterFireBody, "painter_fire_body");
     CMD1(CCC_BloodGpuStats, "r_blood_gpu_stats");
     CMD1(CCC_BloodGpuCreate, "r_blood_gpu_create");
     CMD4(CCC_Integer, "r_painter_publish", &r_painter_publish, 0, 2);
@@ -1942,6 +2052,10 @@ void xrRender_initconsole()
 #endif // DEBUG
 	CMD1(CCC_ModelPoolStat,"stat_models"		);
 	CMD4(CCC_Float, "r__wallmark_ttl", &ps_r__WallmarkTTL, 1.0f, 10.f*60.f);
+#ifdef USE_DX11
+    CMD4(CCC_Integer,"r__blood_snapshots",&ps_blood_snapshots,0,1);
+    CMD4(CCC_Integer,"r__blood_snapshot_vram_mb",&ps_blood_snapshot_mb,4,256);
+#endif
 
 	CMD4(CCC_Integer, "r__supersample", &ps_r__Supersample, 1, 8);
 

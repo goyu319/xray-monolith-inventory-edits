@@ -138,6 +138,9 @@ public: //	Public class members (must be encapsulated furthur)
 	} flags;
 
 #ifdef USE_DX11
+    resptr_core<CTexture,resptr_base<CTexture>> painterLeafSource;
+    ID3DShaderResourceView* painterLeafView = nullptr;
+    void __stdcall apply_leaf_wood(u32 stage);
     PainterBloodTextureSource::SnapshotSlot painter_blood_snapshot; // nonblocking capture of immutable loader result
 #endif
     u32 dwLastUsedFrame = 0; // frame index of last Apply() call — used for eviction

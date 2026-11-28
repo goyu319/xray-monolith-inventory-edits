@@ -2,6 +2,7 @@
 #include "BloodNativeProfile.h"
 #ifdef USE_DX11
 #include "BloodGpuParticles.h"
+#include "PainterFire.h"
 #endif
 #include "dxRenderDeviceRender.h"
 
@@ -111,6 +112,7 @@ void dxRenderDeviceRender::OnDeviceDestroy(BOOL bKeepTextures)
 {
 #ifdef USE_DX11
 	BloodGpuParticles::Reset();
+	PainterFire::Clear();
 #endif
 	m_WireShader.destroy();
 	m_SelectionShader.destroy();

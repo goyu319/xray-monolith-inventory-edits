@@ -73,6 +73,8 @@ protected:
 	bool IsSoundPlaying() { return !!m_layered_sounds.FindSoundItem("sndExplode", true)->playing(); }
 	bool IsExploded() { return !!m_explosion_flags.test(flExploded); }
 public:
+	unsigned long long painterBurnSerial{};
+	bool painterBurnPrimaryClaimed{};
 	float painter_blast_radius() const { return m_fBlastRadius; }
 	bool IsExploding() { return !!m_explosion_flags.test(flExploding); }
 private:

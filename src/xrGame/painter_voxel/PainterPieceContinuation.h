@@ -17,6 +17,7 @@ struct RuntimeSkinBone;
 gfy_live::Pool* painter_voxel_live_pool();
 namespace painter_explosions {struct RouteWitness;}
 
+namespace painter_flight { struct Member; }
 namespace painter_piece_continuation {
 // After a split, the stump and every severed piece own a piece session (Pool::attach_piece): reserved before the
 // split's visual/physics commit with the piece's seed and the mesh as installed, activated after it (the session
@@ -25,7 +26,7 @@ bool reserve(CPhysicsShellHolder&,std::shared_ptr<const gfy_live::PieceSeed>,std
     gfy_live::Identity,std::uint64_t projected_generation,
     const gfy_live::SeparationInput&,const xr_vector<RuntimeSkinBone>&,
     const xr_vector<shared_str>&,std::uint16_t original_children,
-    std::uint64_t published_revision);
+    std::uint64_t published_revision,const painter_flight::Member* flight=nullptr);
 bool activate(CPhysicsShellHolder&,std::uint64_t actual_generation);
 void abandon(CPhysicsShellHolder&);
 // R31: the collision group a split registered its stump and pieces to (CGID); a later split of this object keeps it.
@@ -35,6 +36,8 @@ bool bind(CPhysicsShellHolder&,std::shared_ptr<const gfy_live::PieceSeed>,std::s
     const xr_vector<RuntimeSkinBone>&,const xr_vector<shared_str>&,
     std::uint16_t original_children,std::uint64_t published_revision);
 void forget(CPhysicsShellHolder&);
+bool bind_burn_receiver(CPhysicsShellHolder&);
+bool prime_burn_geometry(CPhysicsShellHolder&,std::uint64_t);
 bool owns(const CPhysicsShellHolder&,std::uint16_t bone);
 bool capture(CPhysicsShellHolder&,const SHit&);
 // Blast craters on an owned piece or stump (numbered here); returns how many were queued.

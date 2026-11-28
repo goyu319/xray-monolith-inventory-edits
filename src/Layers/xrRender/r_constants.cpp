@@ -241,6 +241,7 @@ void R_constant_table::merge(R_constant_table* T)
 #	endif
 #endif
 			C->samp = src->samp;
+			C->unusedInAllStages = src->unusedInAllStages;
 			table_tmp.push_back(C);
 		}
 		else
@@ -254,6 +255,7 @@ void R_constant_table::merge(R_constant_table* T)
 				continue;
 			}
 			C->destination |= src->destination;
+			C->unusedInAllStages &= src->unusedInAllStages;
 			VERIFY(C->type == src->type);
 			R_constant_load& sL = src->get_load(src->destination);
 			R_constant_load& dL = C->get_load(src->destination);

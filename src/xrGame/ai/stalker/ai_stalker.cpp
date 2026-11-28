@@ -125,9 +125,6 @@ CAI_Stalker::CAI_Stalker() :
 	m_aim_max_angle(-1.f),
 	m_aim_predict_time(-1.f),
 	m_fire_queue_size_k(-1.f),
-	m_painter_speed_scale(1.f),
-	m_painter_lean_target(0.f),
-	m_painter_lean_current(0.f), m_painter_shoulder_mode(2), m_painter_mirror_visual(nullptr), m_painter_mirror_ok(false), m_painter_fire_logged_at(0), m_painter_forced_action(0), m_painter_gait(0),
 	m_fire_queue_interval_k(-1.f),
 	m_take_items_enabled(true),
 	m_death_sound_enabled(true),
@@ -1922,58 +1919,4 @@ bool CAI_Stalker::use_HolderEx(CHolderCustom *object)
 }
 #endif
 
-float CAI_Stalker::painter_grip_blend() const
-{
-	return g_Alive() ? animation().painter_grip_blend() : 0.f;
-}
-
-bool CAI_Stalker::painter_mirror_grip(IKinematics& kinematics, u16& grip, u16& support, u16& grip2, Fvector& up_local)
-{
-	if (m_painter_mirror_visual != Visual())
-	{
-		m_painter_mirror_visual = Visual();
-		m_painter_mirror_ok = false;
-		LPCSTR const keys[3] = {"weapon_bone0", "weapon_bone1", "weapon_bone2"};
-		u16 original[3];
-		bool ok = true;
-		for (u32 i = 0; i < 3; ++i)
-		{
-			LPCSTR const name = pSettings->r_string(cNameSect(), keys[i]);
-			original[i] = kinematics.LL_BoneID(name);
-			m_painter_mirror_bones[i] = BI_NONE;
-			string128 partner;
-			xr_strcpy(partner, name);
-			char* side = strstr(partner, "_r_");
-			if (!side)
-				side = strstr(partner, "_l_");
-			if (side)
-			{
-				side[1] = side[1] == 'r' ? 'l' : 'r';
-				m_painter_mirror_bones[i] = kinematics.LL_BoneID(partner);
-			}
-			if (original[i] == BI_NONE || m_painter_mirror_bones[i] == BI_NONE)
-				ok = false;
-		}
-		if (ok)
-		{
-			// Model-space bind of the right grip bone = inverse(m2b). Its up axis mirrored across the sagittal plane
-			// (x -> -x), expressed in the left grip bone's bind frame (m2b maps model -> bone). With the "_ls" clips built
-			// as the mirror of the stock clips about that same bind pose, this reproduces the stock frame's mirror image.
-			// constant: the grip up vector of the reference rig the mirrored clips were built on (some character models'
-			// finger binds differ by up to 9 deg, which tilted the left-hand weapon when derived per visual)
-			m_painter_mirror_up.set(0.f, -1.f, 0.f);
-			ok = _valid(m_painter_mirror_up) && m_painter_mirror_up.square_magnitude() > EPS;
-			if (ok)
-				m_painter_mirror_up.normalize();
-		}
-		m_painter_mirror_ok = ok;
-	}
-	if (!m_painter_mirror_ok)
-		return false;
-	grip = m_painter_mirror_bones[0];
-	support = m_painter_mirror_bones[1];
-	grip2 = m_painter_mirror_bones[2];
-	up_local = m_painter_mirror_up;
-	return true;
-}
 

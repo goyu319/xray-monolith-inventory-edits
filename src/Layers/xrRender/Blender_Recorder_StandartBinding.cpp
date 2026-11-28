@@ -31,6 +31,32 @@ BIND_DECLARE(wv);
 BIND_DECLARE(vp);
 BIND_DECLARE(wvp);
 
+#ifdef USE_DX11
+// A low-detail material can omit the entire frame constant buffer. The pooled
+// interior reads the camera matrix and reflects the other, unused declarations.
+static R_constant_setup* interiorHemiFaceBinding(const char* name);
+bool PainterBindInteriorViewConstant(R_constant& c)
+{
+    if (c.type != RC_float)
+        return false;
+    if (c.unusedInAllStages)
+        return true;
+    if ((c.destination & 0xff) == RC_dest_pixel && c.ps.cls == RC_1x4 && c.ps.size == 16)
+    {
+        if (R_constant_setup* binding = interiorHemiFaceBinding(*c.name))
+        {
+            c.handler = binding;
+            return true;
+        }
+    }
+    if (xr_strcmp(*c.name, "m_V") || (c.destination & 0xff) != RC_dest_pixel ||
+        c.ps.cls != RC_3x4 || c.ps.size != 48)
+        return false;
+    c.handler = &binder_v;
+    return true;
+}
+#endif
+
 BIND_DECLARE(v_prev);
 BIND_DECLARE(p_prev);
 BIND_DECLARE(wv_prev);
@@ -63,6 +89,14 @@ class cl_hemi_cube_neg_faces : public R_constant_setup
 };
 
 static cl_hemi_cube_neg_faces binder_hemi_cube_neg_faces;
+#ifdef USE_DX11
+static R_constant_setup* interiorHemiFaceBinding(const char* name)
+{
+    if (!xr_strcmp(name, "hemi_cube_pos_faces")) return &binder_hemi_cube_pos_faces;
+    if (!xr_strcmp(name, "hemi_cube_neg_faces")) return &binder_hemi_cube_neg_faces;
+    return nullptr;
+}
+#endif
 
 class cl_material : public R_constant_setup
 {
@@ -1281,6 +1315,19 @@ static class dlss_params : public R_constant_setup
         RCache.set_c(C, dlss::Active() ? 1.0f : 0.0f, float(dlss::RenderWidth()), float(dlss::RenderHeight()), 0.0f);
     }
 } binder_dlss_params;
+static Fvector4 painterFireScopeMap={0.f,0.f,0.f,0.f};
+Fvector4 PainterSetFireScopeMap(const Fvector4& value)
+{
+    const Fvector4 previous=painterFireScopeMap;
+    painterFireScopeMap=value;
+    // The renderer may keep the same reflected constant table across a phase transition.
+    RCache.set_c("painter_fire_scope_map",value);
+    return previous;
+}
+static class cl_painter_fire_scope_map : public R_constant_setup
+{
+    void setup(R_constant* C) override {RCache.set_c(C,painterFireScopeMap);}
+} binder_painter_fire_scope_map;
 static class dlss_temporal_jitter : public R_constant_setup
 {
     void setup(R_constant* C) override
@@ -1301,6 +1348,22 @@ static class upscaler_reproject : public R_constant_setup
         RCache.set_c(C, reproject);
     }
 } binder_upscaler_reproject;
+// firerework: the fire's own smoky air (PainterFire AirConstants) for every shader that reads it - its own pass and the
+// volumetric light pass (accum_volumetric.ps through the edit list painter_fire_air.txt)
+namespace PainterFire { void AirConstants(Fvector4& map, Fvector4& k, Fvector4& colour); }
+class cl_painter_air : public R_constant_setup
+{
+	int which;
+public:
+	cl_painter_air(int w) : which(w) {}
+	void setup(R_constant* C) override
+	{
+		Fvector4 v[3];
+		PainterFire::AirConstants(v[0], v[1], v[2]);
+		RCache.set_c(C, v[which]);
+	}
+};
+static cl_painter_air binder_painter_air_map(0), binder_painter_air_k(1), binder_painter_air_color(2);
 #endif
 
 static class ssfx_fTimeDelta : public R_constant_setup
@@ -1673,7 +1736,11 @@ void CBlender_Compile::SetMapping()
 #if defined(USE_DX11)
 	r_Constant("dlss_params", &binder_dlss_params);
 	r_Constant("dlss_temporal_jitter", &binder_dlss_temporal_jitter);
+	r_Constant("painter_fire_scope_map", &binder_painter_fire_scope_map);
 	r_Constant("m_upscaler_reproject", &binder_upscaler_reproject);
+	r_Constant("painter_air_map", &binder_painter_air_map); // firerework
+	r_Constant("painter_air_k", &binder_painter_air_k);
+	r_Constant("painter_air_color", &binder_painter_air_color);
 #endif
 	r_Constant("ssfx_pom", &ssfx_pom);
 

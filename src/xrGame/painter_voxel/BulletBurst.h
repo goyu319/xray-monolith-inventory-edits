@@ -43,7 +43,7 @@ inline head_burst::Plan plan(Event kind,const Vec&mouth,const Vec&out,std::uint6
  if(const char*e=std::getenv("GFY_BULLET_BURST_SEED"))seed^=core::quantMix(std::strtoull(e,nullptr,10)*0x9E3779B97F4A7C15ull+1); // test knob
  auto R=[&](unsigned k){return damage_tear::hash01(seed,0xB0D1ull,k);};
  const bool blow=kind==blowout;
- head_burst::Plan p;p.body=true;p.cap=blow;p.seed=std::uint32_t(core::quantMix(seed^0xB0D1B57Bull));p.sigma=head_burst::strength(round);
+ head_burst::Plan p;p.body=true;p.ballisticBone=true;p.cap=blow;p.seed=std::uint32_t(core::quantMix(seed^0xB0D1B57Bull));p.sigma=head_burst::strength(round);
  if(const char*e=std::getenv("GFY_BULLET_BURST_STRENGTH"))p.sigma=std::clamp(std::atof(e),.05,1.); // test knob
  const double sg=p.sigma;
  p.rf=R0*(.25+.90*sg)/1.3*(.85+.30*R(4))*(blow?1.15:1.)*(round.size>0?round.size:1.); // modes: Extreme doubles it
@@ -95,12 +95,62 @@ inline head_burst::Plan plan(Event kind,const Vec&mouth,const Vec&out,std::uint6
 
 // ---- a crater: every tissue cell of the plan's near groups erased (a living body's burst, a blowout). Journaled through Grid::erase,
 // repaired as every cut (resolveEdgeContacts), the stations under it measured again. No record: the cells are the wound.
-struct Crater {bool done=false;std::size_t cells=0,mask=0,edgeCells=0,erased=0,tiles=0,wholeTiles=0,labelled=0;std::array<std::size_t,64> bySlot{};
+#include "BulletTornFloor.h"
+struct Crater {bool done=false;std::size_t cells=0,mask=0,edgeCells=0,erased=0,tiles=0,wholeTiles=0,labelled=0,boneKept=0;std::array<std::size_t,64> bySlot{};
  std::set<Cell> dirty;const char*refusal=nullptr;double ms=0,labelMs=0,eraseMs=0,repairMs=0;};
-inline Crater crater(Grid&g,const std::vector<SeverSegment>&segments,SeverState&state,const head_burst::Plan&p){
+inline std::atomic<int>& boneResistOn(){return head_burst::boneResistOn();} // bonefix2: one pair of switches (HeadBurst.h)
+inline std::atomic<int>& boneStrength(){return head_burst::boneStrength();}
+template<class Table>
+inline std::size_t keepResistingBone(Grid&g,const Table*table,std::vector<Cell>&cells,const head_burst::Plan&p){
+ if(cells.empty()||(!table&&!g.material_slots)||!boneResistOn().load(std::memory_order_relaxed))return 0;
+ const double s=std::clamp(double(boneStrength().load(std::memory_order_relaxed))/100.,0.,.95);
+ if(!(s>0))return 0;
+ // the crater as bits a tile, and its bone cells
+ std::unordered_map<Cell,core::Tile,core::CellHash> cut;cut.reserve(cells.size()/48+16);
+ std::vector<Cell> bone;
+ {Cell last{INT_MIN,INT_MIN,INT_MIN};core::Tile*mask=nullptr;const SeverState::TileMaterial*m=nullptr;
+  for(const Cell&c:cells){const Cell k=Grid::tileKey(c);
+   if(!(k==last)){last=k;mask=&cut[k];if(table){const auto it=table->find(k);m=it==table->end()?nullptr:&it->second;}}
+   const unsigned l=Grid::local(c);mask->removed[l>>6]|=std::uint64_t(1)<<(l&63);
+   const bool skeletal=table ? m&&((m->bone[l>>6]>>(l&63))&1u) : g.renderMaterial(c)==2;
+   if(skeletal&&!g.bonePreviouslyHit(c))bone.push_back(c);}}
+ if(bone.empty())return 0;
+ TissueLookup tissue{g,table};core::TileCache gone(g);
+ auto inCut=[&](Cell c){const auto it=cut.find(Grid::tileKey(c));return it!=cut.end()&&core::tileBit(it->second,c);};
+ // tissue that is still there and that this crater does not take
+ auto survives=[&](Cell c){if(!g.valid(c))return false;return !inCut(c)&&tissue.solid(c)&&!gone.removed(c);};
+ const double inv=1./g.pitch,stepL=.5*g.pitch,reach=std::max(p.Rcut,4*g.pitch);
+ std::unordered_map<Cell,unsigned char,core::CellHash> kept; // a resisting bone cell: 1 once it holds on to the body
+ for(const Cell&c:bone){const Vec x=g.center(c);Vec u=x-p.B;const double d=length(u);if(!(d>1e-6))continue;u=u*(1./d);
+  // the crater's reach along u: the first point past the cell whose cell the crater does not take
+  double R=d+reach;Cell lastC=c,lastK{INT_MIN,INT_MIN,INT_MIN};const core::Tile*lastT=nullptr;
+  for(double t=d+stepL;t<=d+reach;t+=stepL){const Vec q=p.B+u*t;
+   const Cell f{int(std::floor((q.x-g.origin.x)*inv)),int(std::floor((q.y-g.origin.y)*inv)),int(std::floor((q.z-g.origin.z)*inv))};
+   if(f==lastC)continue;lastC=f;
+   const Cell k=Grid::tileKey(f);if(!(k==lastK)){lastK=k;const auto it=cut.find(k);lastT=it==cut.end()?nullptr:&it->second;}
+   if(!lastT||!core::tileBit(*lastT,f)){R=t;break;}}
+  if(d>=(1.-s)*R)kept.emplace(c,(unsigned char)0);}
+ if(kept.empty())return 0;
+ static const int step[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+ std::vector<Cell> holding;holding.reserve(kept.size());
+ for(auto&e:kept){for(const auto&st:step)if(survives(Cell{e.first.x+st[0],e.first.y+st[1],e.first.z+st[2]})){e.second=1;holding.push_back(e.first);break;}}
+ for(std::size_t head=0;head<holding.size();++head){const Cell c=holding[head];
+  for(const auto&st:step){const auto it=kept.find(Cell{c.x+st[0],c.y+st[1],c.z+st[2]});
+   if(it!=kept.end()&&!it->second){it->second=1;holding.push_back(it->first);}}}
+ if(holding.empty())return 0;
+ std::unordered_map<Cell,core::Tile,core::CellHash> stay;
+ for(const Cell&c:holding){g.noteBoneStrike(c);const unsigned l=Grid::local(c);stay[Grid::tileKey(c)].removed[l>>6]|=std::uint64_t(1)<<(l&63);}
+ Cell last{INT_MIN,INT_MIN,INT_MIN};const core::Tile*t=nullptr;
+ const auto end=std::remove_if(cells.begin(),cells.end(),[&](const Cell&c){const Cell k=Grid::tileKey(c);
+  if(!(k==last)){last=k;const auto it=stay.find(k);t=it==stay.end()?nullptr:&it->second;}
+  return t&&core::tileBit(*t,c);});
+ const std::size_t n=std::size_t(cells.end()-end);cells.erase(end,cells.end());
+ return n;}
+inline Crater crater(Grid&g,const std::vector<SeverSegment>&segments,SeverState&state,const head_burst::Plan&p,const BulletSurfaceSource& source={}){
  const auto t0=core::Clock::now();Crater out;const double pitch=g.pitch;
  auto block=head_burst::record(p,pitch); // the record's own (float) numbers label the cells, as a burst's
  head_burst_record::Function fn;if(!head_burst_record::decode(*block,fn)){out.refusal="bullet_crater_record";return out;}
+ const BulletTornFloor::CertifiedBoxes stockBoxes(fn);
  int tlo[3],thi[3];for(int k=0;k<3;++k){tlo[k]=std::max(0,int(std::floor((fn.B[k]-fn.Rcut-g.origin[k])/pitch))/8);thi[k]=std::min(((&g.size.x)[k]-1)/8,int(std::floor((fn.B[k]+fn.Rcut-g.origin[k])/pitch))/8);}
  if(tlo[0]>thi[0]||tlo[1]>thi[1]||tlo[2]>thi[2]){out.refusal="bullet_crater_outside_grid";return out;}
  const auto*table=state.table;
@@ -111,8 +161,13 @@ inline Crater crater(Grid&g,const std::vector<SeverSegment>&segments,SeverState&
   const double bmin[3]={g.origin.x+(x*8+.5)*pitch,g.origin.y+(y*8+.5)*pitch,g.origin.z+(z*8+.5)*pitch};double c2=0;
   for(int a=0;a<3;++a){const double d=std::max(bmin[a]-fn.B[a],0.)+std::max(fn.B[a]-(bmin[a]+7*pitch),0.);c2+=d*d;}
   if(c2<=fn.Rcut*fn.Rcut)tiles.push_back(Cell{x,y,z});}
+ CraterMargin spatial(fn,tiles,tlo,thi);
  const std::size_t W=std::max<std::size_t>(1,core::parallelWidth());std::vector<std::vector<Cell>> by(W);std::vector<std::size_t> nLab(W,0),nWhole(W,0),nSeen(W,0);
- core::parallelChunks(tiles.size(),1,[&](std::size_t a,std::size_t b,std::size_t ch){TissueLookup tissue{g,table};core::TileCache cache(g);std::uint64_t bits[8];
+ std::atomic<std::size_t> cursor{0};
+ constexpr std::size_t group=8;
+ core::parallelChunks(std::min(W,(tiles.size()+group-1)/group),1,[&](std::size_t,std::size_t,std::size_t ch){CraterNoiseRow row;TissueLookup tissue{g,table};core::TileCache cache(g);std::uint64_t bits[8];
+  for(std::size_t a;(a=cursor.fetch_add(group,std::memory_order_relaxed))<tiles.size();){
+  const auto b=std::min(a+group,tiles.size());
   for(std::size_t i=a;i<b;++i){const Cell t=tiles[i];for(int q=0;q<8;++q)bits[q]=0;
    // the tile's kept tissue (TissueLookup's rule, as the burst's labelling reads it)
    if(table&&(!g.ownership||g.ownership->pureTile(Cell{t.x*8,t.y*8,t.z*8}))){const auto it=table->find(t);if(it==table->end())continue;const auto*tile=cache.find(t);
@@ -121,27 +176,56 @@ inline Crater crater(Grid&g,const std::vector<SeverSegment>&segments,SeverState&
    std::uint64_t any=0;for(int q=0;q<8;++q)any|=bits[q];if(!any)continue;++nSeen[ch];
    // the whole tile's group when the record's own proof gives one (boxGroup: the warp's range over the box), else cell by cell
    const double bmin[3]={g.origin.x+(t.x*8+.5)*pitch,g.origin.y+(t.y*8+.5)*pitch,g.origin.z+(t.z*8+.5)*pitch},bmax[3]={bmin[0]+7*pitch,bmin[1]+7*pitch,bmin[2]+7*pitch};
-   const unsigned tg=fn.boxGroup(bmin,bmax);
+   const unsigned tg=stockBoxes.test(bmin,bmax);
    if(tg==0)continue;
    if(tg!=255){++nWhole[ch];for(int q=0;q<8;++q)for(std::uint64_t w=bits[q];w;w&=w-1){const unsigned bit=head_burst::ctz64(w);by[ch].push_back(Cell{t.x*8+q,t.y*8+int(bit>>3),t.z*8+int(bit&7u)});}continue;}
    // a mixed tile: its eight 4^3 blocks the same way, then cell by cell
    for(int k=0;k<8;++k){const int bu=(k&1)*4,bv=((k>>1)&1)*4,bw=(k>>2)*4;
     std::uint64_t any4=0;for(int u=bu;u<bu+4;++u)for(int v=bv;v<bv+4;++v)any4|=(bits[u]>>(v*8+bw))&15u;if(!any4)continue;
     const double cmin[3]={bmin[0]+bu*pitch,bmin[1]+bv*pitch,bmin[2]+bw*pitch},cmax[3]={cmin[0]+3*pitch,cmin[1]+3*pitch,cmin[2]+3*pitch};
-    const unsigned bg=fn.boxGroup(cmin,cmax);if(bg==0)continue;
-    for(int u=bu;u<bu+4;++u)for(int v=bv;v<bv+4;++v)for(int w=bw;w<bw+4;++w){if(!((bits[u]>>(v*8+w))&1u))continue;const Cell c{t.x*8+u,t.y*8+v,t.z*8+w};
-     if(bg==255){const Vec qc=g.center(c);const unsigned gl=fn.label(qc.x,qc.y,qc.z);++nLab[ch];if(gl==0||gl>=253)continue;}
-     by[ch].push_back(c);}}}});
+    const unsigned bg=stockBoxes.test(cmin,cmax);if(bg==0)continue;
+    for(int u=bu;u<bu+4;++u)for(int v=bv;v<bv+4;++v){
+      unsigned active=unsigned((bits[u]>>(v*8+bw))&15u);if(!active)continue;
+      const Cell start{t.x*8+u,t.y*8+v,t.z*8+bw};
+      if(bg==255){nLab[ch]+=std::size_t(__popcnt(active));active=stockingFour(spatial,g,fn,row,start,i,active);}
+      while(active){const unsigned j=head_burst::ctz64(active);active&=active-1;
+        by[ch].push_back({start.x,start.y,start.z+int(j)});}
+    }}}}});
+
  std::vector<Cell> cells;for(std::size_t ch=0;ch<W;++ch){cells.insert(cells.end(),by[ch].begin(),by[ch].end());out.labelled+=nLab[ch];out.wholeTiles+=nWhole[ch];out.tiles+=nSeen[ch];}
- std::sort(cells.begin(),cells.end());
+ orderUniqueCraterCells(cells);
+ BulletTornFloor floor;floor.spatial=&spatial;
+ floor.prepare(g,cells,p,fn,source);
+ floor.balance(g,cells,table);
+ out.boneKept=keepResistingBone(g,table,cells,p); // bonefix2: bone outside the crater's middle stays standing
  out.labelMs=core::ms(t0);const auto e0=core::Clock::now();
- std::vector<Cell> boundary;std::set<Cell> touched;std::size_t solid=0;
- for(const Cell&c:cells){if(!g.valid(c)||!g.erase(c))continue;boundary.push_back(c);touched.insert(Grid::tileKey(c));++out.mask;
-  if(const auto label=g.materialBase(c)){++solid;const auto slot=g.material_slots&&label<g.material_slots->size()?unsigned((*g.material_slots)[label]&63u):1u;++out.bySlot[slot];}}
+ std::vector<Cell> boundary;std::set<Cell> touched;std::size_t solid=0; Cell lastTouched{-1,-1,-1};
+ core::Tile* currentTile=nullptr;
+ auto eraseLocal=[&](Cell c){
+  if(!g.valid(c)||!g.ownerCuttable(c))return false;
+  const Cell tile=Grid::tileKey(c);
+  if(!(tile==lastTouched)){currentTile=&core::journaledTile(g,tile);lastTouched=tile;}
+  const unsigned bit=Grid::local(c);auto& word=currentTile->removed[bit>>6];
+  const std::uint64_t mask=std::uint64_t(1)<<(bit&63);
+  if(word&mask)return false;
+  word|=mask;return true;
+ };
+ CraterMaterialRow material;Cell lastReported{-1,-1,-1};
+ boundary.reserve(cells.size());
+ if(cells.size()>=3072){
+  eraseCraterParallel(g,cells,boundary,touched,solid,out.bySlot);
+  out.mask+=boundary.size();
+ }else for(const Cell&c:cells){if(!eraseLocal(c))continue;boundary.push_back(c);const Cell tile=Grid::tileKey(c);if(!(tile==lastReported)){touched.insert(tile);lastReported=tile;}++out.mask;
+  if(const auto label=material.get(g,c)){++solid;const auto slot=g.material_slots&&label<g.material_slots->size()?unsigned((*g.material_slots)[label]&63u):1u;++out.bySlot[slot];}}
  out.erased=boundary.size();out.eraseMs=core::ms(e0);const auto r0=core::Clock::now();
  std::size_t extraSolid=0;
  // (every cell of a checkerboard the erase left lies beside an erased cell: the nearest to the blast is taken, as for a crack)
- if(!boundary.empty()){try{out.edgeCells=resolveEdgeContacts(g,boundary,p.B,[](Cell){return true;},touched,&extraSolid);}catch(const RecoverableImpactError&){out.refusal="bullet_crater_repair_budget";}}
+ if(!boundary.empty()){try{out.edgeCells=resolveEdgeContacts(g,boundary,p.B,[](Cell){return true;},touched,&extraSolid,!g.ownership&&painter_detail::edgeWordsEnabled());}catch(const RecoverableImpactError&){out.refusal="bullet_crater_repair_budget";}}
+ if(!out.refusal)try{floor.finishSupport(g,boundary,touched,out.bySlot,out.edgeCells,extraSolid);
+    if(out.edgeCells>8192)throw RecoverableImpactError("edge_contact_regularization_budget");}
+ catch(const RecoverableImpactError&){out.refusal="bullet_crater_repair_budget";}
+ const auto skinMask=floor.skin(g,boundary,touched,fn,source,touched);
+ out.mask+=skinMask;
  out.cells=solid+extraSolid;out.mask+=out.edgeCells;out.repairMs=core::ms(r0);
  out.dirty=core::expandDirtyTiles(touched);
  // the stations whose tiles changed are measured again (as every tear does)

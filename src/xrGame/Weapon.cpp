@@ -271,9 +271,8 @@ void CWeapon::UpdateXForm()
 	// A killing-blow cut can hide the grip before the inventory item is
 	// detached. Hidden transforms are zero-scaled and cannot define a weapon
 	// orientation; keep the last valid item pose until the handover completes.
-	extern int g_goyu_painter_grip;
-	if (g_goyu_painter_grip && (!painter_weapon_grip_chain_visible(*V, boneL) ||
-		!painter_weapon_grip_chain_visible(*V, boneR)))
+	if (!painter_weapon_grip_chain_visible(*V, boneL) ||
+		!painter_weapon_grip_chain_visible(*V, boneR))
 		return;
 
 	V->CalculateBones_Invalidate();
@@ -281,71 +280,9 @@ void CWeapon::UpdateXForm()
 
 	Fmatrix mRes;
 	if (!painter_weapon_hand_frame(*V, *E, u16(boneR), u16(boneL), 0, mRes))
-	{
-		if (g_goyu_painter_grip)
-			return;
-		mRes.set(E->XFORM()); // stock fallback (as for coincident hand bones)
-		mRes.c.set(V->LL_GetTransform_safed(u16(boneR)).c);
-	}
-
-	// Left-shoulder stance (painter): while a mirrored "_ls" torso clip is up, the weapon sits in the mirror image of the
-	// stock frame, built on the left hand; during the torso crossfade it moves between the two frames by the same weight,
-	// so the rifle travels with the hands instead of jumping.
-	float grip_blend = 0.f;
-	Fmatrix mMirror;
-	if (!m_strapped_mode && g_goyu_painter_grip)
-	{
-		CAI_Stalker* const stalker = smart_cast<CAI_Stalker*>(E);
-		u16 grip = BI_NONE, support = BI_NONE, grip2 = BI_NONE;
-		Fvector up_local;
-		if (stalker)
-			grip_blend = stalker->painter_grip_blend();
-		if (grip_blend > 0.f && stalker->painter_mirror_grip(*V, grip, support, grip2, up_local))
-		{
-			u16 const second = grip_only ? grip2 : support;
-			if (!painter_weapon_grip_chain_visible(*V, int(grip)) || !painter_weapon_grip_chain_visible(*V, int(second)) ||
-				!painter_weapon_hand_frame(*V, *E, grip, second, &up_local, mMirror))
-				grip_blend = 0.f;
-		}
-		else
-			grip_blend = 0.f;
-	}
-
-	if (grip_blend <= 0.f)
-	{
-		UpdatePosition(mRes);
 		return;
-	}
 
-	Fmatrix mirror_xform;
-	{
-		// grip offset mirrored across the sagittal plane: S * offset * S
-		Fmatrix S;
-		S.identity();
-		S._11 = -1.f;
-		Fmatrix half;
-		half.mul_43(S, m_Offset);
-		Fmatrix mirror_offset;
-		mirror_offset.mul_43(half, S);
-		mirror_xform.mul(mMirror, mirror_offset);
-	}
-	if (grip_blend >= 1.f)
-	{
-		Position().set(mMirror.c);
-		XFORM().set(mirror_xform);
-		return;
-	}
-	Fmatrix stock_xform;
-	stock_xform.mul(mRes, m_Offset);
-	Fquaternion from, to, mid;
-	from.set(stock_xform);
-	to.set(mirror_xform);
-	mid.slerp(from, to, grip_blend);
-	Fmatrix blended;
-	blended.rotation(mid);
-	blended.c.lerp(stock_xform.c, mirror_xform.c, grip_blend);
-	Position().lerp(mRes.c, mMirror.c, grip_blend);
-	XFORM().set(blended);
+	UpdatePosition(mRes);
 }
 
 

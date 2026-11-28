@@ -30,7 +30,6 @@
 #include "danger_object.h"
 #include "smart_cover_object.h"
 #include "ai/stalker/ai_stalker.h"
-#include "painter_ai/EngineCombatAdapter.h"
 #include "Actor.h"
 #include "Weapon.h"
 #include "PainterKillcamAim.h"
@@ -46,14 +45,6 @@ extern CScriptActionPlanner* script_action_planner(CScriptGameObject* obj);
 static u16 script_object_id(const CScriptGameObject* obj)
 {
 	return obj ? obj->ID() : u16(-1);
-}
-
-// native combat AI: npc:painter_combat_owned() - its owning action holds this stalker (any object may ask: not a stalker
-// is never owned)
-static bool painter_combat_owned(CScriptGameObject* self)
-{
-	CAI_Stalker* stalker = self ? smart_cast<CAI_Stalker*>(&self->object()) : nullptr;
-	return stalker && painter::combat::engine::owns(*stalker);
 }
 
 // Read the underlying actor camera, before cinematic effectors or HUD picks.
@@ -398,26 +389,6 @@ class_<CScriptGameObject> script_register_game_object1(class_<CScriptGameObject>
 		.def("set_range", SAFE_WRAP(&CScriptGameObject::set_range))
 
 		.def("head_orientation", SAFE_WRAP(&CScriptGameObject::head_orientation))
-		.def("painter_speed_scale", SAFE_WRAP(&CScriptGameObject::painter_speed_scale))
-		.def("set_painter_speed_scale", SAFE_WRAP(&CScriptGameObject::set_painter_speed_scale))
-		.def("painter_lean", SAFE_WRAP(&CScriptGameObject::painter_lean))
-		.def("set_painter_lean", SAFE_WRAP(&CScriptGameObject::set_painter_lean))
-		.def("painter_lean_level", SAFE_WRAP(&CScriptGameObject::painter_lean_level))
-		.def("set_painter_lean_level", SAFE_WRAP(&CScriptGameObject::set_painter_lean_level))
-		.def("set_painter_gait", SAFE_WRAP(&CScriptGameObject::set_painter_gait))
-		.def("painter_gait", SAFE_WRAP(&CScriptGameObject::painter_gait))
-		.def("painter_throw_target", SAFE_WRAP(&CScriptGameObject::painter_throw_target))
-		.def("painter_throw_through", SAFE_WRAP(&CScriptGameObject::painter_throw_through))
-		.def("painter_throw_clear", SAFE_WRAP(&CScriptGameObject::painter_throw_clear))
-		.def("painter_path_points", SAFE_WRAP(&CScriptGameObject::painter_path_points))
-		.def("painter_throw_state", SAFE_WRAP(&CScriptGameObject::painter_throw_state))
-		.def("painter_shoulder", SAFE_WRAP(&CScriptGameObject::painter_shoulder))
-		.def("set_painter_shoulder", SAFE_WRAP(&CScriptGameObject::set_painter_shoulder))
-		.def("painter_forced_action", SAFE_WRAP(&CScriptGameObject::painter_forced_action))
-		.def("set_painter_forced_action", SAFE_WRAP(&CScriptGameObject::set_painter_forced_action))
-		.def("painter_combat_owned", &painter_combat_owned)
-		.def("painter_native_fire_flags", SAFE_WRAP(&CScriptGameObject::painter_native_fire_flags))
-		.def("painter_native_fire_verdict", SAFE_WRAP(&CScriptGameObject::painter_native_fire_verdict))
 
 		.def("set_actor_position", &CScriptGameObject::SetActorPosition)
 		.def("get_actor_camera_angles", &get_actor_camera_angles)

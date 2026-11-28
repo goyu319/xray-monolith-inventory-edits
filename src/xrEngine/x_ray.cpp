@@ -1377,11 +1377,16 @@ extern BOOL DllMainXrPhysics(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lp
 //extern BOOL DllMainXrRenderR3(HANDLE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved);
 //extern BOOL DllMainXrRenderR4(HANDLE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved);
 
+#include "../Layers/xrRenderPC_R4/PainterShaderWorker.h"
+
 int APIENTRY WinMain(HINSTANCE hInstance,
                      HINSTANCE hPrevInstance,
                      char* lpCmdLine,
                      int nCmdShow)
 {
+    if(lpCmdLine && std::strcmp(lpCmdLine,painter_menu::wire::command)==0)
+        return painter_menu::wire::childMain();
+
   // Initialize LuaJIT low-memory pool FIRST, before any DLLs load and fragment
 	// the lower 2GB address space.
 	XR_EARLY_INIT();

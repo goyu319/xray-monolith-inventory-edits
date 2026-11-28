@@ -168,6 +168,8 @@ public:
 	bool QueuePainterGeometryProbe(u32 mode);
 	bool QueuePainterRuntimeGeometryProbe(u32 state);
     bool BindPainterVoxelLive(bool target=false);
+    bool BindExistingBurnReceiver();
+    bool PrimePainterBurnGeometry(u64 spawn_cookie);
     bool UnbindPainterVoxelLive();
     void ApplyPainterPieceContinuation();
     int PainterVoxelLiveState()const{return m_painter_voxel_live?2:m_painter_voxel_bind_requested?1:m_painter_voxel_bind_failed?-1:0;}

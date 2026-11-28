@@ -14,6 +14,7 @@ public:
 	virtual void Affect(SZoneObjectInfo* O);
 	virtual void feel_touch_new(CObject* O);
 	virtual void UpdateWorkload(u32 dt); // related to fast-mode optimizations
+	unsigned PainterThermalMode() const override {return 1;}
 	virtual bool feel_touch_contact(CObject* O);
 	float nearest_shape_radius(SZoneObjectInfo* O);
 

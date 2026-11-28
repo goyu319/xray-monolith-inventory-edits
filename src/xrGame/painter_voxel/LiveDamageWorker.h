@@ -14,6 +14,8 @@
 #include "RaggedBlade.h"
 #include "BodyHitOutcomes.h"
 namespace gfy_connectivity {struct Topology;}
+namespace painter_fire {struct Shape;}
+namespace painter_burn {struct SourceFaces;}
 namespace gfy_live {
 using Hash=std::array<std::uint8_t,32>;
 struct Point {double x{},y{},z{};};
@@ -132,6 +134,7 @@ using AssetHashFunction=Hash(*)(const void*,std::size_t);
 struct Impact {
     body_hit_outcomes::Tag hit_trace;
     std::uint64_t sequence{};
+    std::uint64_t shot_id{};
     GoreControls gore; // Complete accepted-event snapshot; never reread menu settings on workers.
     std::uint16_t cranial_bone{65535}; // Exact native rig lookup, not inferred from the struck bone.
     std::uint64_t explosion_world{},explosion_cookie{},explosion_target_birth{},explosion_member_token{};
@@ -262,6 +265,7 @@ struct WorkerPhaseTimes {
     double removal_ms{},boundary_ms{},exterior_ms{},join_ms{},pack_ms{};
 };
 struct Output {
+    bool burn_surface_prime=false; // rendering only, never a structural hit
     Stamp stamp;
     gfy_packed::Mesh mesh;
     std::vector<ImpactResult> impacts;
@@ -307,6 +311,8 @@ class Asset;
 std::shared_ptr<const Asset> prepare_asset(const AssetInput&) noexcept;
 // gearbody: the prepared outfit's gear line (merged / stayed children; empty: the outfit has no gear surfaces)
 std::string gear_body_note(const std::shared_ptr<const Asset>&) noexcept;
+// fieldalign: "moved_cells=x,y,z" when the outfit's baked cut field was lined up with its anatomy at preparation, else empty
+std::string field_align_note(const std::shared_ptr<const Asset>&) noexcept;
 const char* last_failure() noexcept;
 // ---- Allocation failure and memory admission (OOM safety) ----
 // Engine allocation failure is process-fatal by default. Every Painter-owned
@@ -402,6 +408,17 @@ struct DamageSample {
 // Exact, immutable state last accepted by the renderer owner. Keeps the shared
 // anatomy, sparse removal mask and matching wounded mesh alive after the NPC.
 // This is transfer input, NOT an already partitioned/spawned limb.
+
+struct BurnIntersection {
+    double distance{};
+    Point rest{},normal{};
+    std::uint32_t surface{};
+    unsigned child{},domain{};
+    Point posedNormal{};
+};
+using BurnBreach = std::function<bool(const BurnIntersection&)>;
+using BurnTrace = std::function<void(Point,Point,double,const BurnBreach&,BurnIntersection&)>;
+
 class DamageSnapshot {
     struct Impl;std::shared_ptr<const Impl> impl_;
     explicit DamageSnapshot(std::shared_ptr<const Impl>);
@@ -411,8 +428,13 @@ public:
     // Null means original, unmodified model. Positions/skin remain in the
     // original model's rest space; transfer must apply the captured bone pose.
     const gfy_packed::Mesh* mesh()const noexcept;
+    bool needs_burn_prime()const noexcept;
     DamageSample sample_rest(Point)const noexcept;
     double damage_pitch()const noexcept;
+    std::shared_ptr<const painter_fire::Shape> burn_spread_shape()const;
+    std::vector<BurnIntersection> burn_sites(std::uint64_t seed,unsigned limit)const;
+    bool owns_burn(unsigned,unsigned,Point)const;
+    std::shared_ptr<const BurnTrace> burn_trace(const std::vector<Matrix>& worldBones)const;
     // Null when disabled. Exposed only through an accepted immutable snapshot.
     // The snapshot stamp carries published renderer generation; history records
     // damage revisions only. Not transferred to detached ComponentSession.
@@ -424,6 +446,8 @@ public:
     std::shared_ptr<ComponentSession> prepare_component_session(std::uint32_t component)const noexcept;
     // CPU worker only. Geometry and collision derive from this accepted mask,
     // never from queued hits or a second destructive approximation of the cut.
+    std::shared_ptr<const SeparationOutput> prepare_separation_flight(const SeparationInput&,
+        const SeparationCheckpoint&,const std::function<void(std::shared_ptr<const SeparationOutput>)>& on_preview)const noexcept;
     std::shared_ptr<const SeparationOutput> prepare_separation(const SeparationInput&,
         const SeparationCheckpoint& checkpoint={})const noexcept;
 };
@@ -495,6 +519,7 @@ struct SeparationInput {
     // published wound mesh when one exists (SEMANTIC, separation-track P2 S4; not
     // implemented yet, so the union path still runs). Needs sign-off.
     bool published_surface{};
+    bool allow_flight_preview=true;
 };
 struct SeparationBox {
     Point center,half_extents;
@@ -527,6 +552,8 @@ struct SeparationPiece {
     std::vector<SeparationElement> elements;
     std::vector<std::uint16_t> pose_anchors; // Only original rigid-child→same-piece physical ancestor.
     std::vector<std::uint16_t> retained_accessories;
+    // Separate draw mesh. The selected skin packet remains available to the physics admission path.
+    std::shared_ptr<const gfy_packed::Mesh> flight_visual;
 };
 // Worker-side phase timings of one separation, named after the checkpoint that
 // starts each phase. Instrumentation only; never part of an output digest.
@@ -553,6 +580,7 @@ struct SeparationOutput {
     double worker_ms{};
     std::array<double,separation_phase_count> phase_ms{}; // Of the prepare() call that produced the pieces.
     double continuation_ms{};
+    bool flight_exact_backed=false;
     std::string lowpoly_summary; // LowPolyPieces.h statistics of this separation (log only) // component_continuation of every piece (after prepare()).
 };
 struct ComponentReceipt {
@@ -583,6 +611,8 @@ class SeparationPreparation {
     friend std::shared_ptr<SeparationPreparation> prepare_separation_async(std::shared_ptr<const DamageSnapshot>,SeparationInput) noexcept;
 public:
     ~SeparationPreparation();
+    std::shared_ptr<const SeparationOutput> preview()const;
+    std::shared_ptr<SeparationPreparation> retry_exact()const noexcept;
     const Stamp& stamp()const noexcept;
     SeparationProgress progress()const;
     void cancel();
@@ -609,6 +639,8 @@ void set_damage_mode(int mode) noexcept; // modes: console painter_damage_mode (
 int damage_mode_value() noexcept;
 void set_body_blowout_frequency(float f) noexcept; // bulletburst: console painter_body_blowout_frequency (0..2, 1 = the head's table)
 void set_body_blowout_chunks(int v) noexcept; // nochunks: console painter_body_blowout_chunks (1 pieces come off, 0 blown out)
+void set_bone_resist(int v) noexcept; // boneresist: console painter_bone_resist (1 bone resists a blowout, 0 it goes with the flesh)
+void set_bone_strength(int v) noexcept; // bonefix2: console painter_bone_strength (0..100 %: how far bone holds in a blowout)
 float body_blowout_frequency_value() noexcept;
 // Prewarm the per-(model, quality) separation caches (pristine connectivity and
 // physics map) on the low-priority warm thread, for separation_ready owners at
@@ -634,6 +666,7 @@ public:
     // Owner barrier only. Capture the actual generation here, before dispatch.
     // False (nothing consumed) also while memory admission holds the owner.
     bool dispatch(const std::shared_ptr<Session>&,std::uint64_t current_generation) noexcept;
+    bool prime_burn_geometry(const std::shared_ptr<Session>&,std::uint64_t generation,std::uint64_t publication_sequence) noexcept;
     // Owner barrier: keep the exact pending damage transaction while rebuilding
     // its complete geometry on this pool. Old output identity must match.
     // False leaves everything intact. Call acknowledge_output after completion.
@@ -654,7 +687,7 @@ public:
     bool any_memory_waiting() const noexcept;
     // Estimated recomputable cache bytes held by all attached idle owners.
     std::size_t cache_bytes() const noexcept;
-    // A value-only task of another engine system (the native combat AI's job queue). Tasks run only on their own lane:
+    // A value-only task of another engine system. Tasks run only on their own lane:
     // lane threads (configure_task_lane, default 1), started with the first task, that never take wound jobs, while the
     // wound workers never take tasks, so neither queue can hold the other back. Urgent ones go ahead of the other tasks.
     // The task must not throw out (it is caught and dropped) and touches no session. False when the pool is stopping or
@@ -684,6 +717,11 @@ class Session {
 #endif
 public:
     ~Session();
+    // Complete a reserved piece birth while keeping every admitted impact and its sequence.
+    void hold_flight_birth() noexcept;
+    void resume_flight_birth() noexcept;
+    bool finish_flight_birth(std::shared_ptr<const PieceSeed> initial,std::shared_ptr<const PieceSeed> exact,
+        std::shared_ptr<const gfy_packed::Mesh> published,std::uint64_t generation,std::uint64_t revision) noexcept;
     bool enqueue(Impact) noexcept; // Sequence checked; bounded queue; non-blocking work.
     std::shared_ptr<const Output> completed()const; // Poll; never waits for job.
     // published_generation is the renderer version AFTER installation. The
@@ -703,10 +741,12 @@ public:
     // completed(). Optional: the owner still polls and acknowledges as before.
     void set_ready_hook(std::function<void()>) noexcept;
     bool supports_bone(std::uint16_t bone)const;
+    std::shared_ptr<const painter_burn::SourceFaces> burn_faces()const;
     bool piece()const noexcept; // continuation of a separated piece (Pool::attach_piece)
     // O(1) capture at an idle owner barrier. Refuses queued, in-flight,
     // unacknowledged, failed or canceled owners; never exports provisional cuts.
     std::shared_ptr<const DamageSnapshot> capture_damage()const;
+    std::shared_ptr<const DamageSnapshot> published_burn_surface()const;
     std::shared_ptr<const painter_detail::TissueField> tissue_field()const;
     // Memory admission state of this owner (for logging).
     struct MemoryState {std::uint64_t need_commit{},deferrals{},failures{};std::size_t cache_bytes{};bool waiting{};};

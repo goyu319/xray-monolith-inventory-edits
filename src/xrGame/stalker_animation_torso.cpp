@@ -18,7 +18,6 @@
 #include "entitycondition.h"
 #include "stalker_animation_data.h"
 #include "stalker_animation_manager_impl.h"
-#include "../Include/xrRender/KinematicsAnimated.h"
 
 const u32 need_look_back_time_interval = 2000;
 
@@ -148,36 +147,7 @@ MotionID CStalkerAnimationManager::unknown_object_animation(u32 slot, const EBod
 				if ((body_state == eBodyStateStand) && (slot == 2) && need_look_back())
 					return (animation[13 + m_looking_back - 1].A[1]);
 				else
-				{
-					// Optional authored forward-walk torso for the two-hand rifle-type slots (2 rifles, 3 bolt/break
-					// rifles, 8 SMG/bullpup, 9 pump shotguns, 10 drum shotguns). Stationary crouch remains
-					// on its native aim motion; absent aliases retain vanilla behavior.
-					MotionID selected = aim_animation(slot, animation, 0);
-					if (m_weapon && (slot == 2 || slot == 3 || slot == 8 || slot == 9 || slot == 10) &&
-						movement.mental_state() == eMentalStateDanger &&
-						m_previous_speed_direction == eMovementDirectionForward &&
-						selected == animation[6].A[0])
-					{
-						LPCSTR alias = 0;
-						if (body_state == eBodyStateStand)
-							alias = "painter_torso_rifle_walk";
-						else if (body_state == eBodyStateCrouch)
-							alias = "painter_torso_rifle_crouch_walk";
-						if (alias)
-						{
-							// Per-slot walking torso first (its grip is fitted to that slot's weapons); the unsuffixed alias is
-							// the slot-2 fit and only serves slot 2, so a slot without its own alias keeps the stock aim torso.
-							string64 per_slot;
-							xr_sprintf(per_slot, "%s_%d", alias, int(slot));
-							MotionID replacement = m_skeleton_animated->ID_Cycle_Safe(per_slot);
-							if (!replacement.valid() && slot == 2)
-								replacement = m_skeleton_animated->ID_Cycle_Safe(alias);
-							if (replacement.valid())
-								return replacement;
-						}
-					}
-					return selected;
-				}
+					return (aim_animation(slot, animation, 0));
 			}
 
 			if ((body_state == eBodyStateStand) && (slot == 2) && need_look_back())
@@ -236,20 +206,6 @@ MotionID CStalkerAnimationManager::weapon_animation(u32 slot, const EBodyState& 
 			object().movement().speed(object().character_physics_support()->movement())))
 	{
 		return (animation[15].A[0]);
-	}
-
-	// native17 (v2.24 Order::gait): the rifle-down torsos while the legs run the lowered jog / sprint cycles (the guard in
-	// painter_gait_effective keeps aimed while firing, aiming at an enemy, off the path or crouched)
-	if (u32 const gait = object().painter_gait_effective())
-	{
-		if (eMovementTypeRun == object().movement().movement_type() && body_state == eBodyStateStand &&
-			!fis_zero(object().movement().speed(object().character_physics_support()->movement())))
-		{
-			if (gait == 2 && !animation[15].A.empty())
-				return (animation[15].A[0]);
-			if (gait == 1 && animation[8].A.size() > 1)
-				return (animation[8].A[1]);
-		}
 	}
 
 	switch (m_weapon->GetState())

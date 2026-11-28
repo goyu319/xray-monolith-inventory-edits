@@ -108,6 +108,7 @@ inline Result build(CObject& object,IKinematics* k,bool alive,const SHit& hit,u6
                 kill_sever=int(value);}}}
     const Fmatrix object_world=object.XFORM();Fmatrix world_to_object;world_to_object.invert(object_world);
     gfy_live::Impact event;event.sequence=sequence+1;
+    event.shot_id=ammo.shot_id;
     event.gore=painter_deformation::snapshot();event.cranial_bone=k->LL_BoneID("bip01_head");
     Fvector point_model,direction_model;
     {xrCriticalSectionGuard pose(&k->UCalc_Mutex);k->CalculateBones_Invalidate();k->CalculateBones(TRUE);

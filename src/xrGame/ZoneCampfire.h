@@ -27,6 +27,7 @@ public:
 	void turn_on_script();
 	void turn_off_script();
 	bool is_on();
+    unsigned PainterThermalMode() const override {return m_turned_on?1u:2u;}
 	virtual void shedule_Update(u32 dt);
 DECLARE_SCRIPT_REGISTER_FUNCTION
 };

@@ -4,6 +4,7 @@ struct PieceSeed {
  std::vector<std::uint32_t> components; // Exact raw components carried by a composite semantic owner; empty means ordinary single component.
  std::shared_ptr<const Asset> asset;
  Stamp parent;                                   // accepted snapshot the piece was separated from
+ std::shared_ptr<const Grid::FloorTiles> grenadeFloor; // transferred to this piece's initial grid
  std::shared_ptr<const Grid> grid;               // that snapshot's damage, cropped to the piece, with its ownership
  std::shared_ptr<const ::gfy_connectivity::Topology> topology; // exact remaining tissue at birth, including disconnected carried pristine islands
  std::shared_ptr<const ResolvedCutHistory> history;           // cuts at birth: their walls are in the birth mesh

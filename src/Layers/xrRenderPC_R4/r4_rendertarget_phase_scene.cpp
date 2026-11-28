@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+namespace PainterFire {void PrepareHeatTarget(const ref_rt& native,bool needed);}
+
 // startup
 void CRenderTarget::phase_scene_prepare()
 {
@@ -16,6 +18,7 @@ void CRenderTarget::phase_scene_prepare()
 
 		//--DSR-- HeatVision_start
 		HW.pContext->ClearRenderTargetView(rt_Heat->pRT, ColorRGBA);
+		PainterFire::PrepareHeatTarget(rt_Heat,ps_r2_heatvision>0);
 		//--DSR-- HeatVision_end
 
 		if (!RImplementation.o.dx10_msaa)

@@ -93,6 +93,21 @@ struct Function {
   for(unsigned i=0;i<S;++i){bool sure=true;for(unsigned j=0;j<S&&sure;++j)if(group[j]!=group[i]&&dmin[j]<=dmax[i])sure=false;
    if(sure){const unsigned g=group[i];if(f2>Rcut*Rcut&&g!=0)return 255;return g;}}
   return 255;}
+ // bonefix2: the group of a point and how far (warped space) it lies past the boundary with the far part: for a point of a
+ // near group, the bisector distance between its site and the nearest group-0 site (>= 0); a group-0 point: 0
+ unsigned zeroGap(double px,double py,double pz,double&gap)const{const double dx=px-B[0],dy=py-B[1],dz=pz-B[2];
+  if(dx*dx+dy*dy+dz*dz>Rcut*Rcut){gap=0;return 0;}
+  double x[3];warped(px,py,pz,x);double best=1e30,best0=1e30;unsigned bi=0,b0=maxSites;
+  for(unsigned i=0;i<S;++i){const double a=x[0]-site[i][0],b=x[1]-site[i][1],c=x[2]-site[i][2],dd=a*a+b*b+c*c;
+   if(dd<best){best=dd;bi=i;}if(group[i]==0&&dd<best0){best0=dd;b0=i;}}
+  if(group[bi]==0||b0==maxSites){gap=0;return group[bi];}
+  const double a=site[b0][0]-site[bi][0],b=site[b0][1]-site[bi][1],c=site[b0][2]-site[bi][2],l=std::sqrt(a*a+b*b+c*c);
+  gap=l>1e-9?(best0-best)/(2*l):1e30;return group[bi];}
+ // bonefix2: the pixel programs' value noise (painter_vh_noise: the same lattice, smoothstep and blend order)
+ static double vnoise(std::uint32_t s,double x,double y,double z){const double fx=std::floor(x),fy=std::floor(y),fz=std::floor(z);
+  const int X=int(fx),Y=int(fy),Z=int(fz);const double u=smooth(x-fx),w=smooth(y-fy),t=smooth(z-fz);
+  const double c0=lat(s,X,Y,Z),c1=lat(s,X+1,Y,Z),c2=lat(s,X,Y+1,Z),c3=lat(s,X+1,Y+1,Z),c4=lat(s,X,Y,Z+1),c5=lat(s,X+1,Y,Z+1),c6=lat(s,X,Y+1,Z+1),c7=lat(s,X+1,Y+1,Z+1);
+  const double a00=c0+(c1-c0)*u,a10=c2+(c3-c2)*u,a01=c4+(c5-c4)*u,a11=c6+(c7-c6)*u;const double y0=a00+(a10-a00)*w,y1=a01+(a11-a01)*w;return y0+(y1-y0)*t;}
  unsigned label(double px,double py,double pz)const{const double dx=px-B[0],dy=py-B[1],dz=pz-B[2];if(dx*dx+dy*dy+dz*dz>Rcut*Rcut)return 0;
   double x[3];warped(px,py,pz,x);double best=1e30;unsigned g=0;
   for(unsigned i=0;i<S;++i){const double a=x[0]-site[i][0],b=x[1]-site[i][1],c=x[2]-site[i][2],dd=a*a+b*b+c*c;if(dd<best){best=dd;g=group[i];}}return g;}

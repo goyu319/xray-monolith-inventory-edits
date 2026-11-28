@@ -13,6 +13,9 @@ void PainterBloodNotePrograms(const ref_shader& source);
 void PainterBloodRequestPrograms(const char* vs,int skinning,const char* ps,int sample);
 void PainterBloodPumpPrograms(bool all);
 int PainterMaskOnlyMode(); // the value of painter_voxel_mask_only
+bool PainterBurnOn(); // body burning is switched on (painter_burn, the game's own switch)
 class R_constant_setup;
 R_constant_setup* PainterBloodDecalControls();
+struct R_constant;
+bool PainterBindInteriorViewConstant(R_constant& c);
 #endif

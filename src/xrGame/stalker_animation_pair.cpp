@@ -10,8 +10,6 @@
 #include "stalker_animation_pair.h"
 #include "stalker_animation_manager.h"
 #include "../xrEngine/motion.h"
-#include "../xrEngine/SkeletonMotions.h"
-#include "../Include/xrRender/KinematicsAnimated.h"
 #include "ai_debug.h"
 #include "ai/stalker/ai_stalker.h"
 #include "ai/ai_monsters_anims.h"
@@ -41,14 +39,6 @@ void CStalkerAnimationPair::synchronize(IKinematicsAnimated* skeleton_animated,
 	CMotionDef* motion1 = skeleton_animated->LL_GetMotionDef(stalker_animation.animation());
 	VERIFY(motion1);
 	if (!(motion1->flags & esmSyncPart))
-		return;
-
-	// painter: slave the torso to the legs only when both cycles have the same length; otherwise the torso jumped back to
-	// its frame 0 at every legs loop (replacement legs cycles no longer match every stock torso cycle).
-	CMotion* const torso_motion = skeleton_animated->LL_GetMotion(animation(), 0);
-	CMotion* const legs_motion = skeleton_animated->LL_GetMotion(stalker_animation.animation(), 0);
-	extern int g_goyu_painter_anim;
-	if (g_goyu_painter_anim && torso_motion && legs_motion && _abs(int(torso_motion->get_count()) - int(legs_motion->get_count())) > 1)
 		return;
 
 	blend()->timeCurrent = stalker_animation.blend()->timeCurrent;

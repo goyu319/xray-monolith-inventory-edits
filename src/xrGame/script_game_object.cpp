@@ -1535,12 +1535,10 @@ static IKinematics* material_kinematics(CGameObject& owner, bool hud)
 	if (!k)
 		k = object().Visual()->dcast_PKinematics();
 
+	// BloodEngine: no model to read (e.g. a weapon whose HUD model was never made) = no materials. An empty table, not
+	// {error=true}: scripts walk the answer with pairs() and would index the boolean row.
 	if (!k)
-	{
-		::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
-		table["error"] = true;
-		return table;
-	}
+		return ::luabind::newtable(ai().script_engine().lua());
 
 	return get_shaders(k->dcast_RenderVisual());
 }
@@ -1564,11 +1562,9 @@ static IKinematics* material_kinematics(CGameObject& owner, bool hud)
 
 	::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
 
+	// BloodEngine: no model to read = no materials (an empty table, as in GetShaders)
 	if (!k)
-	{
-		table["error"] = true;
 		return table;
-	}
 
 	IRenderVisual* vis = k->dcast_RenderVisual();
 	xr_vector<IRenderVisual*>* children = vis->get_children();

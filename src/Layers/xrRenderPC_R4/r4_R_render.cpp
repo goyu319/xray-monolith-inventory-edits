@@ -7,6 +7,7 @@
 #include "../xrRender/SkeletonCustom.h"
 #include "../xrRender/BloodNativeProfile.h"
 #include "../xrRender/BloodGpuParticles.h"
+#include "../xrRender/PainterFire.h"
 #include "../../xrParticles/ParticlesAsyncManager.h"
 
 extern int r_blood_gpu;
@@ -165,6 +166,9 @@ void CRender::Render()
 	PIX_EVENT_C(CRender_Render, dx10_marker_frame);
 	dx10_annotate_frame();
 	dlss::EndScene();
+	// firerework: the fire's own smoky air - its map for this frame's shaders; the weather's fog is left alone (smokeair
+	// thickened it here)
+	PainterFire::AirFrame();
 	GMBase.RGraph.mapHUDNativeUi.clear(); // Never retain packets across views/menu/reset.
 	GMBase.RGraph.mapDlssEffects.clear();
 	GMBase.RGraph.mapDlssHudEffects.clear();
@@ -804,6 +808,7 @@ void CRender::render_forward()
 			GMBase.r_dsgraph_render_dlss_effects();
 		GMBase.fade_render(); // faded-portals
 		GMBase.r_dsgraph_render_sorted(false); // strict-sorted geoms
+		PainterFire::Render(); // baked fire pictures (PainterFire_impl.h)
 		g_pGamePersistent->Environment().RenderLast(); // rain/thunder-bolts
 
 		// Item and camera attachment UI draws before the sorted HUD so nearer glass and the post chain cover it
@@ -862,3 +867,5 @@ void CRender::RenderToTarget(RRT target)
 	HW.pContext->CopyResource((*RT)->pSurface, pBuffer);
 	pBuffer->Release();
 }
+
+#include "../xrRender/PainterFire_impl.h"

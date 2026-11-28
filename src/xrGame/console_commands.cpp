@@ -1,6 +1,9 @@
 #include "pch_script.h"
+#include "../xrCore/PainterBurnTrace.h"
+namespace painter_burn_host { void disableMaster() noexcept; }
 #include "../xrEngine/xr_ioconsole.h"
 #include "../xrEngine/xr_ioc_cmd.h"
+#include "painter_voxel/BodyHitOutcomes.h" // hitlogquiet
 #include "../xrEngine/customhud.h"
 #include "../xrEngine/fdemorecord.h"
 #include "../xrEngine/fdemoplay.h"
@@ -77,21 +80,9 @@ int painter_ragdoll_capture_next = 0;
 int painter_native_ragdoll = 0;
 extern int painter_sever_hold;    // R63 (PainterVoxelLive_impl.h): 1 = a killing hit Painter severs freezes its death shell until the sever
 extern int painter_sever_hold_ms; // longest wait (real ms) before the frozen shell starts anyway
+extern XRCORE_API int g_painter_log; // xrCore/log.cpp: 1 = Painter's lines reach the log (the MCM support log switch)
 extern int painter_bone_visibility_timing;
-extern int g_painter_look_log;
-extern int g_painter_pose_log;
-extern int g_painter_lean_test;
-extern int g_painter_shoulder_test;
-extern int g_painter_fire_log;
-extern int g_painter_spine_comp;
-// GOYU: switches to find which Painter (BloodEngine) engine change breaks NPC behaviour. 1 = Painter as merged.
-int g_goyu_painter_planner = 1; // native combat action/evaluator in the stalker planner (read when an NPC is set up)
-int g_goyu_painter_look = 1;    // look/turn rate caps, head dead zone, lean update
-int g_goyu_painter_grip = 1;    // weapon placement: hidden-grip early return, left-shoulder mirror
 int g_goyu_bone_hide_rebuild = 0; // rebuild a body's physics shell when a script hides/shows a bone (Painter merge, upstream 2026.11)
-int g_goyu_painter_anim = 1;    // torso/legs sync guard, mirrored torso, clip speed scaling, gait/speed scale
-extern int g_painter_lh_ik;
-extern int g_painter_lh_ik_test;
 
 #ifdef DEBUG
 extern float air_resistance_epsilon;
@@ -2807,6 +2798,27 @@ public:
     virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_holding_cut(*value); }
 };
 int painter_island_fill=1; // bonefill: on by default
+// Body burning from fire (molotov, fire zones, flame streams, fuel explosions): 0 (default) off, 1 on. Read at the
+// entry of every fire event (PainterBurnHost_impl.h, PainterBurnAoe.inl).
+int painter_burn_enabled=0;
+class CCC_PainterBodyMaster : public CCC_Integer {
+public:
+    CCC_PainterBodyMaster(LPCSTR name,int* setting):CCC_Integer(name,setting,0,1){}
+    void Execute(LPCSTR args) override {
+        CCC_Integer::Execute(args);
+        if(PainterSetBodyMaster(*value!=0) && !*value)painter_burn_host::disableMaster();
+    }
+};
+static int painter_burn_trace=0;
+class CCC_PainterBurnTrace : public CCC_Integer {
+public:
+    CCC_PainterBurnTrace(LPCSTR name,int* setting) : CCC_Integer(name,setting,0,1) {}
+    void Execute(LPCSTR args) override {
+        CCC_Integer::Execute(args);
+        PainterSetBurnTrace(*value!=0);
+    }
+};
+
 class CCC_PainterIslandFill : public CCC_Integer
 {
 public:
@@ -2830,6 +2842,8 @@ public:
     virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_gear_body(*value); }
 };
 int painter_piece_pass=1;
+extern int painter_fire_burn_trail; // burntrail (GameObject.cpp)
+extern int painter_sit_log;
 int painter_body_pass=1;
 class CCC_PainterHoleReach : public CCC_Integer
 {
@@ -2868,6 +2882,24 @@ class CCC_PainterBodyBlowoutChunks : public CCC_Integer
 public:
     CCC_PainterBodyBlowoutChunks(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
     virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_body_blowout_chunks(*value); }
+};
+// boneresist (2026-11-19): the Painter menu's Bone resists blowouts - 1 a blowout takes bone only where it reaches 10 - 20 %
+// farther than the bone lies (default), 0 bone goes with the flesh (the worker reads its own copy, as above)
+namespace gfy_live { void set_bone_resist(int v) noexcept; }
+class CCC_PainterBoneResist : public CCC_Integer
+{
+public:
+    CCC_PainterBoneResist(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 1) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_bone_resist(*value); }
+};
+// bonefix2 (2026-11-20): the Painter menu's Bone strength - 0..100 %: a blowout takes bone only within (100 - strength) %
+// of its reach from the blast point (default 70: ribs, bone ends and the spine stand in the wound)
+namespace gfy_live { void set_bone_strength(int v) noexcept; }
+class CCC_PainterBoneStrength : public CCC_Integer
+{
+public:
+    CCC_PainterBoneStrength(LPCSTR N, int* V) : CCC_Integer(N, V, 0, 100) {}
+    virtual void Execute(LPCSTR args) { CCC_Integer::Execute(args); gfy_live::set_bone_strength(*value); }
 };
 class CCC_PainterDamageMode : public CCC_Integer
 {
@@ -3676,21 +3708,10 @@ void CCC_RegisterCommands()
 	CMD4(CCC_Integer, "painter_native_ragdoll", &painter_native_ragdoll, 0, 1);
 	CMD4(CCC_Integer, "painter_sever_hold", &painter_sever_hold, 0, 1);
 	CMD4(CCC_Integer, "painter_sever_hold_ms", &painter_sever_hold_ms, 0, 2000);
+	CMD4(CCC_Integer, "painter_log", &g_painter_log, 0, 1);
 	CMD1(CCC_PainterAliveReference, "painter_alive_reference_id");
 	CMD4(CCC_Integer, "painter_bone_visibility_timing", &painter_bone_visibility_timing, 0, 1);
-	CMD4(CCC_Integer, "painter_look_log", &g_painter_look_log, 0, 1); // [painter_look] per NPC per second: sight target + head pitch
-	CMD4(CCC_Integer, "painter_pose_log", &g_painter_pose_log, 0, 1); // [painter_pose] per NPC per second: rendered-skeleton sanity
-	CMD4(CCC_Integer, "painter_lean_test", &g_painter_lean_test, -100, 100); // force every stalker's lean target to N/100 (diagnostics)
-	CMD4(CCC_Integer, "goyu_painter_planner", &g_goyu_painter_planner, 0, 1);
-	CMD4(CCC_Integer, "goyu_painter_look", &g_goyu_painter_look, 0, 1);
-	CMD4(CCC_Integer, "goyu_painter_grip", &g_goyu_painter_grip, 0, 1);
-	CMD4(CCC_Integer, "goyu_painter_anim", &g_goyu_painter_anim, 0, 1);
 	CMD4(CCC_Integer, "goyu_bone_hide_rebuild", &g_goyu_bone_hide_rebuild, 0, 1);
-	CMD4(CCC_Integer, "painter_spine_comp", &g_painter_spine_comp, 0, 1); // rotate the upper body onto its torso clip's authored spine (1)
-	CMD4(CCC_Integer, "painter_fire_log", &g_painter_fire_log, 0, 1); // [painter_fire] native fire checks per stalker with an enemy, 1 Hz
-	CMD4(CCC_Integer, "painter_shoulder_test", &g_painter_shoulder_test, -1, 2); // force every stalker's shoulder mode: 0 right, 1 left, 2 auto; -1 off
-	CMD4(CCC_Integer, "painter_lh_ik", &g_painter_lh_ik, 0, 1); // NPC left hand onto [npc_left_hand_grips] of the gun in hand (1)
-	CMD4(CCC_Integer, "painter_lh_ik_test", &g_painter_lh_ik_test, -300, 300); // guns without a grip entry: slide the clip's grip N mm along the barrel (diagnostics)
 	CMD1(CCC_PainterGeometryProbe, "painter_butcher_geometry_test");
 	CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result",&painter_runtime_result);
     CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result_owner",&painter_runtime_result_owner);
@@ -3705,12 +3726,16 @@ void CCC_RegisterCommands()
     CMD2(CCC_PainterSeamRule,"painter_seam_rule",&painter_seam_rule); // damagecut: the seam rule, 1 on (default) / 0 off
     CMD2(CCC_PainterSeverMethod,"painter_sever_method",&painter_sever_method); // damagecut: 0 the old severs, 1 the new (default)
     CMD2(CCC_PainterHoldingCut,"painter_holding_cut",&painter_holding_cut); // damagecut3: the holding-cells search, 0 off (default) / 1 on
+    CMD2(CCC_PainterBurnTrace,"painter_burn_trace",&painter_burn_trace);
+    CMD2(CCC_PainterBodyMaster,"painter_burn",&painter_burn_enabled);
     CMD2(CCC_PainterIslandFill,"painter_island_fill",&painter_island_fill); // headmask2: the island fill, 0 off (default) / 1 on
     CMD2(CCC_PainterSepThreads,"painter_sep_threads",&painter_sep_threads); // gearpar: a separation's threads, 0 automatic (default) / 1..16
     CMD2(CCC_PainterGearBody,"painter_gear_body",&painter_gear_body); // gearbody: gear surfaces join the body at outfit preparation, 1 (default) / 0 off
     CMD2(CCC_PainterHoleReach,"painter_hole_reach",&painter_hole_reach); // nothinghits: a bullet into a crater wounds the flesh behind it, 1 (default) / 0 off
     CMD2(CCC_PainterKillSeverRagged,"painter_kill_sever_ragged",&painter_kill_sever_ragged); // raggedsever: killing-shot limb tears through the damage, 1 (default) / 0 the old cut
     CMD2(CCC_PainterKillSeverBlowout,"painter_kill_sever_blowout",&painter_kill_sever_blowout); // killblow: a killing shot's limb sever blows a crater out first, 0 (default) off / 1
+    CMD4(CCC_Integer,"painter_fire_burn_trail",&painter_fire_burn_trail,0,2); // burntrail: burn damage lights 0 nothing / 1 what can burn / 2 everything
+    CMD4(CCC_Integer,"painter_sit_log",&painter_sit_log,0,1); // sitdiag: log camp NPCs who do not sit, 0 (default) off / 1
     CMD4(CCC_Integer,"painter_piece_pass",&painter_piece_pass,0,1); // piecehit: a bullet passes a piece where it has no flesh, 1 (default) / 0 off
     CMD4(CCC_Integer,"painter_body_pass",&painter_body_pass,0,1); // bodypass: a bullet passes a dead body's lost parts, 1 (default) / 0 off
     extern float painter_body_burst_chance; // headfix: value-3 blasts: the chance of a body burst (else the legacy torso cuts)
@@ -3721,6 +3746,11 @@ void CCC_RegisterCommands()
     CMD2(CCC_PainterBodyBlowoutFrequency,"painter_body_blowout_frequency",&painter_body_blowout_frequency);
     extern int painter_body_blowout_chunks; // nochunks: a bullet's body burst comes off in pieces, 1 (default) / 0 blown out
     CMD2(CCC_PainterBodyBlowoutChunks,"painter_body_blowout_chunks",&painter_body_blowout_chunks);
+    extern int painter_bone_resist; // boneresist: bone resists a blowout, 1 (default) / 0 it goes with the flesh
+    CMD2(CCC_PainterBoneResist,"painter_bone_resist",&painter_bone_resist);
+    extern int painter_bone_strength; // bonefix2: how far bone holds in a blowout, 0..100 % (default 70)
+    CMD2(CCC_PainterBoneStrength,"painter_bone_strength",&painter_bone_strength);
+    CMD4(CCC_Integer,"painter_hit_log",&body_hit_outcomes::log_on,0,1); // hitlogquiet: the [painter_body_hit] lines, 0 (default) / 1
     CMD1(CCC_PainterBalanceTest,"painter_balance_test");
     CMD2(CCC_PainterRuntimeStatus,"painter_balance_test_enabled",&painter_balance_test_enabled);
     CMD2(CCC_PainterRuntimeStatus,"painter_balance_test_active",&painter_balance_test_active);
@@ -3732,6 +3762,7 @@ void CCC_RegisterCommands()
     CMD2(CCC_PainterRuntimeStatus,"painter_voxel_live_revision",&painter_voxel_live_revision);
 	CMD1(CCC_PainterRuntimeWarm, "painter_butcher_runtime_warm");
 	CMD1(CCC_PainterRuntimeProbe, "painter_butcher_runtime_test");
+	CMD4(CCC_Integer, "print_ik_warnings", &print_ik_warnings, 0, 1);
 
 	// Print DLTX warnings when "override section which doesn't exist", also prints cache hit for each file
 	CMD4(CCC_Integer, "print_dltx_warnings", &print_dltx_warnings, 0, 1);

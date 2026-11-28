@@ -38,6 +38,67 @@ struct DamageField {
     }
 };
 
+// The existing occupancy page and its data words retain their old addressing.
+// Each occupied group of 32 tiles has one leaf; a mixed tag tile has 16 words.
+// Missing metadata always selects the full material. No changes to gameplay data.
+template<class Grid> std::shared_ptr<const DamageField> publishBlowoutTags(
+    const Grid& grid,std::shared_ptr<const DamageField> original,std::size_t limit=16u<<20){
+    if(!original||!original->available||!grid.lodAttached||!grid.blowoutTags||
+       grid.blowoutTags->empty()||!original->size[0]||original->page[15]!=0)return original;
+    const auto& f=*original;
+    std::array<int,3> corner{};
+    for(unsigned a=0;a<3;++a)
+        corner[a]=int(std::llround((double(f.origin[a])-grid.origin[a])/(8.*grid.pitch)));
+    struct TagTile{std::uint32_t index;std::array<std::uint32_t,16> bits;bool full;};
+    std::vector<TagTile> tags;tags.reserve(grid.blowoutTags->size());
+    for(const auto& item:*grid.blowoutTags){
+        const auto& c=item.first;const int x=c.x-corner[0],y=c.y-corner[1],z=c.z-corner[2];
+        if(x<0||y<0||z<0||unsigned(x)>=f.pages[0]||unsigned(y)>=f.pages[1]||unsigned(z)>=f.pages[2])continue;
+        TagTile tile{};tile.index=(unsigned(z)*f.pages[1]+unsigned(y))*f.pages[0]+unsigned(x);
+        const auto p=f.page[DamageField::headerWords+tile.index];
+        if(p==DamageField::keptPage)continue;
+        std::uint32_t any=0,all=~0u;
+        for(unsigned w=0;w<16;++w){
+            const auto raw=std::uint32_t(item.second.removed[w/2]>>(32*(w&1)));
+            tile.bits[w]=p==DamageField::removedPage?raw:raw&f.data[p-1+w];
+            any|=tile.bits[w];all&=tile.bits[w];
+        }
+        if(any){tile.full=all==~0u;tags.push_back(tile);}
+    }
+    if(tags.empty())return original;
+    std::sort(tags.begin(),tags.end(),[](const TagTile& a,const TagTile& b){return a.index<b.index;});
+    const std::size_t pages=std::size_t(f.pages[0])*f.pages[1]*f.pages[2];
+    const std::size_t dirs=(pages+31)/32;
+    const std::size_t start=std::size_t(f.mixed)*16;
+    std::size_t end=start+dirs;std::uint32_t group=~0u;
+    for(const auto& t:tags){
+        if(group!=(t.index>>5)){group=t.index>>5;end+=32;}
+        if(!t.full)end+=16;
+    }
+    const auto padded=(end+DamageField::dataWidth-1)/DamageField::dataWidth*DamageField::dataWidth;
+    if(padded>limit/4||f.page.size()>limit/4-padded)return original;
+    // A freshly built field has one owner. A shared field may still be drawn by a
+    // previous publication; never write to it.
+    auto out=original.use_count()==1?std::const_pointer_cast<DamageField>(original):std::make_shared<DamageField>(f);
+    out->data.resize(std::max(out->data.size(),padded),0);
+    std::fill(out->data.begin()+start,out->data.begin()+end,0);
+    std::uint32_t cursor=std::uint32_t(start+dirs),leaf=0;group=~0u;
+    for(const auto& t:tags){
+        if(group!=(t.index>>5)){
+            group=t.index>>5;leaf=cursor;cursor+=32;
+            out->data[start+group]=leaf+1;
+        }
+        if(t.full)out->data[leaf+(t.index&31)]=~0u;
+        else{
+            out->data[leaf+(t.index&31)]=cursor+1;
+            std::copy(t.bits.begin(),t.bits.end(),out->data.begin()+cursor);cursor+=16;
+        }
+    }
+    out->page[14]=std::uint32_t(start+1);
+    out->page[15]=0x424c4431u;
+    return out;
+}
+
 // Grid-compatible template keeps this header usable by the worker and renderer.
 // Owned severed components require their complete ownership predicate, not just
 // the journal bits. Until that format is implemented they keep the geometry path.

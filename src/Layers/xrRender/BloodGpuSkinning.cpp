@@ -8,7 +8,7 @@
 #include <cstring>
 #include <new>
 #include <limits>
-#include <d3dcompiler.h>
+#include "PainterFixedBloodPrograms.h"
 
 namespace BloodGpuSkinning
 {
@@ -287,15 +287,7 @@ struct Backend::State
     HRESULT Initialize(ID3D11Device* newDevice) noexcept
     {
         device = newDevice;
-        ID3DBlob *bytecode = nullptr, *errors = nullptr;
-        HRESULT hr = D3DCompile(ShaderSource, sizeof(ShaderSource) - 1, "blood_gpu_skinning", nullptr, nullptr,
-            "main", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS |
-            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bytecode, &errors);
-        if (FAILED(hr) && errors)
-            Msg("! Blood GPU shader: %.240s", static_cast<const char*>(errors->GetBufferPointer()));
-        Release(errors);
-        if (SUCCEEDED(hr)) hr = device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shader);
-        Release(bytecode);
+        HRESULT hr = PainterFixedBloodPrograms::acquire(device, PainterFixedBloodPrograms::Skin, &shader);
         if (FAILED(hr)) return hr;
         hr = StructuredBuffer(device, MaxSourceVertices, sizeof(InputVertex), &source, &sourceView);
         if (FAILED(hr)) return hr;

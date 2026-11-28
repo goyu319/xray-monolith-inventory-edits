@@ -16,8 +16,10 @@ class IKinematics;
 struct RuntimeSkinBone;
 struct SPainterDamagedFragmentData;
 
+namespace painter_flight { struct Group; }
 namespace painter_damaged_fragment {
 struct Piece {
+    std::shared_ptr<const gfy_packed::Mesh> flight_visual;
     bool ocular_remnant=false;
     bool burst_chunk=false; // chunknosplash: SeparationPiece::burst_chunk -> sever.chunk in the commit receipt
     bool destroy_on_commit=false; // Partition its exact surface out of the body without a physical child.
@@ -38,6 +40,7 @@ struct Piece {
     u32 component_id=0;
 };
 struct Prepared {
+    std::shared_ptr<painter_flight::Group> flight;
     gfy_live::Stamp stamp;
     gfy_live::GoreControls gore; // Carries the partition's policy through native staging.
     gfy_live::Identity current_owner;

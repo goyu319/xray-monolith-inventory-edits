@@ -5,6 +5,7 @@
 #include "stdafx.h"
 #include "../Layers/xrRender/BloodNativeProfile.h"
 #include "../Layers/xrRender/PainterHitMain.h" // triggerhitch
+#include "painter_voxel/BodyHitOutcomes.h" // hitlogquiet
 #include "Level.h"
 #include "Level_Bullet_Manager.h"
 #include "game_cl_base.h"
@@ -16,8 +17,6 @@
 #include "reward_event_generator.h"
 #include "material_manager.h"
 #include "Weapon.h"
-#include "painter_ai/EngineNearMiss.h"
-#include "painter_ai/EngineAppliedAction.h"
 #include "PhysicsSkeletonObject.h" // piecehit
 #include "AI/Stalker/ai_stalker.h" // bodypass
 #include "CharacterPhysicsSupport.h" // bodypass
@@ -25,6 +24,7 @@ extern int painter_body_pass; // bodypass: console painter_body_pass (1 default,
 // bodypass: one line per bullet that flew past a dead body's lost part (at most 20 a second), with the count
 static void painter_body_passed(const CObject& body, const SBullet& bullet, u16 bone, float range)
 {
+	if (!body_hit_outcomes::log_on) return; // hitlogquiet
 	static u32 passed = 0, window = 0, lines = 0;
 	++passed;
 	if (Device.dwTimeGlobal - window >= 1000) { window = Device.dwTimeGlobal; lines = 0; }
@@ -36,6 +36,7 @@ extern int painter_piece_pass; // piecehit: console painter_piece_pass (1 defaul
 // piecehit: one line per bullet that flew past a piece where the piece holds no flesh (at most 20 a second), with the count
 static void painter_piece_passed(const CObject& piece, const SBullet& bullet, u16 bone, float range)
 {
+	if (!body_hit_outcomes::log_on) return; // hitlogquiet
 	static u32 passed = 0, window = 0, lines = 0;
 	++passed;
 	if (Device.dwTimeGlobal - window >= 1000) { window = Device.dwTimeGlobal; lines = 0; }
@@ -120,6 +121,7 @@ void SBullet::Init(const Fvector& position,
 	armor_piercing = cartridge.param_s.kAP;
 	ammo.assign(cartridge.m_ammoSect.c_str(),cartridge.param_s.buckShot,
 		armor_piercing,hit_param.power);
+	if (ammo.valid()) ammo.shot_id = painter_cartridge::Scope::for_source(&cartridge);
 	painter_fragment=ammo.valid()?PainterFragmentSource{}:painter_fragment_source::captured();
 	air_resistance = cartridge.param_s.kAirRes * air_resistance_factor;
 	wallmark_size = cartridge.param_s.fWallmarkSize;
@@ -310,7 +312,6 @@ void CBulletManager::AddBullet(const Fvector& position,
 	            e_hit_type, maximum_distance, cartridge, air_resistance_factor, SendHit, iShotNum);
 	//	bullet.frame_num			= Device.dwFrame;
 	bullet.flags.aim_bullet = AimBullet;
-	painter::combat::engine::note_native_projectile(sender_id, sendersweapon_id);
 
 	// demonized - bullet on init callback
 	::luabind::functor<void> funct;
@@ -358,7 +359,6 @@ void CBulletManager::UpdateWorkload()
 		return;
 
 	collide::rq_result dummy;
-	painter::combat::engine::near_miss_frame_begin();
 
 	// this is because of ugly nature of removing bullets
 	// when index in vector passed through the tgt_material field
@@ -372,10 +372,8 @@ void CBulletManager::UpdateWorkload()
 			continue;
 
 		VERIFY(j > 0);
-		painter::combat::engine::near_miss_removed(i->bulletId);
 		RegisterEvent(EVENT_REMOVE, FALSE, &*i, Fvector().set(0, 0, 0), dummy, j - 1);
 	}
-	painter::combat::engine::near_miss_frame_end();
 }
 
 static Fvector parabolic_velocity(
@@ -958,11 +956,6 @@ bool CBulletManager::trajectory_check_error(
 	collide::ray_defs RD(start, start_to_target, distance, CDB::OPT_FULL_TEST, collide::rqtBoth);
 	BOOL const result = Level().ObjectSpace.RayQuery(storage, RD, CBulletManager::firetrace_callback, &data,
 	                                                 CBulletManager::test_callback, NULL);
-	// native combat AI near misses: the stretch this round flew (to its first collision, or the whole step); firearm
-	// rounds only (the whine-sound class), not fragments or the knife's short ray
-	if (bullet.hit_type == ALife::eHitTypeFireWound)
-		painter::combat::engine::near_miss_stretch(bullet.bulletId, bullet.parent_id, bullet.shot_origin, start,
-		                                           (!result || data.collide_time == 0.f) ? target : data.collide_position);
 	if (!result || (data.collide_time == 0.f))
 	{
 		add_bullet_point(bullet.start_position, previous_position, bullet.start_velocity, gravity, air_resistance,
@@ -1453,7 +1446,6 @@ void CBulletManager::RegisterEvent(EventType Type, BOOL _dynamic, SBullet* bulle
 				//	E.Repeated = (R.O->ID() == E.bullet.targetID);
 				//	bullet->targetID = R.O->ID();
 
-				painter::combat::engine::near_miss_struck(bullet->bulletId, R.O->ID()); // a hit, never a near miss
 				E.Repeated = (R.O->ID() == E.bullet.targetID);
 				if (GameID() == eGameIDSingle)
 				{

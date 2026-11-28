@@ -86,8 +86,6 @@ struct SBoneProtections;
 class CDangerLocation;
 class CRestrictedObject;
 
-class IKinematics;
-
 class CAI_Stalker :
 	public CCustomMonster,
 	public CObjectHandler,
@@ -728,25 +726,6 @@ private:
 	// collision prediction
 	Fvector m_throw_collide_position;
 	bool m_throw_enabled;
-	// Script-aimed throw (painter_throw_target / painter_throw_through): exact speed, no random spread and no Lua force
-	// override; with a via point the arc is solved to pass through it (a doorway) and land on the target.
-	bool m_painter_throw = false;
-	bool m_painter_throw_via_set = false;
-	Fvector m_painter_throw_via;
-	// the target as asked (a door throw re-aims it onto the line from the release point through the door point) and why
-	// the last solve is not clear: ok, no_target, no_grenade, out_of_range, door_behind, no_arc, blocked
-	Fvector m_painter_throw_requested;
-	LPCSTR m_painter_throw_reason = "no_target";
-
-public:
-	bool painter_throw_active() const { return m_painter_throw; }
-	LPCSTR painter_throw_reason() const { return m_painter_throw_reason; }
-	Fvector const& painter_throw_release() const { return m_throw_position; }
-	Fvector const& painter_throw_aim() const { return m_throw_target_position; }
-	Fvector const& painter_throw_blocked_at() const { return m_throw_collide_position; }
-	float painter_throw_speed() const { return m_throw_velocity.magnitude(); }
-
-private:
 
 	u32 m_last_throw_time;
 	u32 m_throw_time_interval;
@@ -786,7 +765,6 @@ public:
 	void throw_target(const Fvector& position, u32 const vertex_id, CObject* throw_ignore_object);
 	IC const Fvector& throw_target() const;
 	void update_throw_params();
-	void painter_throw(const Fvector& target, const Fvector* via); // script-aimed throw; via = doorway point or null
 	void on_throw_completed();
 	IC const u32& last_throw_time() const;
 
@@ -869,101 +847,7 @@ private:
 	float m_fire_queue_size_k;
 	float m_fire_queue_interval_k;
 
-	// Per-NPC movement speed scale (script: set_painter_speed_scale / painter_speed_scale). Applied to the
-	// configured [stalker_movement_speeds] velocity in stalker_movement_manager_base::speed() AND to the legs
-	// (and moving torso) blend playback rate in CStalkerAnimationManager, so a 0.7 walk is a 0.7 cycle: feet keep
-	// matching the ground. 1 = exact vanilla. Clamped to [0.3, 1.5]; outside that the cycles stop looking natural.
-	float m_painter_speed_scale;
-
-	// Per-NPC procedural lean (script: set_painter_lean / painter_lean): -1 = full left, +1 = full right, 0 = none.
-	// The spine bone callback rolls the upper body about the NPC's forward axis by current * painter_lean_max_rad();
-	// the current value chases the target at painter_lean_rate per second (full lean in 0.5 s).
-	float m_painter_lean_target;
-	float m_painter_lean_current;
-	int m_painter_shoulder_mode;
-	// Left-hand weapon frame cache (painter_mirror_grip) and the [painter_fire] log timer.
-	IRenderVisual* m_painter_mirror_visual;
-	u16 m_painter_mirror_bones[3];
-	Fvector m_painter_mirror_up;
-	bool m_painter_mirror_ok;
-	u32 m_painter_fire_logged_at;
-	// AI ownership (script: set_painter_forced_action / painter_forced_action): while non-zero, the root motivation
-	// planner (CStalkerPlanner) runs this action every update instead of its own GOAP choice. 0 = vanilla.
-	u32 m_painter_forced_action;
-	// native17 (v2.24 Order::gait): the executor's gait for a moving order. 0 aimed (the danger walk / jog with the rifle
-	// up), 1 lowered (the rifle-down jog: the free-state run legs and torso, the free run speed), 2 sprint (the rifle-down
-	// full run: the escape legs and torso, the panic run speed). Set by the native action (script: set_painter_gait),
-	// reset to aimed whenever the native action is not the man's current one. painter_gait_effective() applies the
-	// engine's own guard: aimed while the weapon fires, the sight is on an enemy object, the body is more than 30 deg off
-	// the path direction, or crouched.
-	u8 m_painter_gait;
-
-
 public:
-	IC float painter_speed_scale() const { return m_painter_speed_scale; }
-	IC void set_painter_speed_scale(float scale) { m_painter_speed_scale = _valid(scale) ? clampr(scale, .3f, 1.5f) : 1.f; }
-	IC u32 painter_forced_action() const { return m_painter_forced_action; }
-	IC void set_painter_forced_action(u32 id) { m_painter_forced_action = id; }
-	IC u8 painter_gait() const { return m_painter_gait; }
-	IC void set_painter_gait(u8 gait) { m_painter_gait = gait > 2 ? 2 : gait; }
-	u32 painter_gait_effective() const;   // sight_manager.cpp: the requested gait after the engine guard
-	IC float painter_lean() const { return m_painter_lean_current; }
-	IC float painter_lean_target() const { return m_painter_lean_target; }
-	IC void set_painter_lean(float lean) { m_painter_lean_target = _valid(lean) ? clampr(lean, -1.f, 1.f) : 0.f; }
-	IC void painter_lean_update(float time_delta)
-	{
-		float const rate = 2.f * time_delta;
-		float const delta = m_painter_lean_target - m_painter_lean_current;
-		m_painter_lean_current += clampr(delta, -rate, rate);
-	}
-	static IC float painter_lean_max_rad() { return deg2rad(35.f); }
-	// A curve, not a hinge: shares of the full angle rolled at the spine (hip), the shoulder bone and the head (negative =
-	// counter-roll so the eyes stay nearer level). Spine + shoulder = the trunk angle; the head ends at 70% of it.
-	static IC float painter_lean_share_spine() { return .5f; }
-	static IC float painter_lean_share_shoulder() { return .5f; }
-	static IC float painter_lean_share_head() { return -.3f; }
-	// Discrete levels for the AI (script: set_painter_lean_level / painter_lean_level): 0 upright, 1 slight (~12 deg),
-	// 2 half (~25 deg), 3 full (35 deg); negative = left, positive = right. Levels map onto the continuous value.
-	static IC float painter_lean_level_value(int level)
-	{
-		int const l = level < -3 ? -3 : (level > 3 ? 3 : level);
-		float const v[4] = {0.f, .35f, .7f, 1.f};
-		return (l < 0 ? -1.f : 1.f) * v[l < 0 ? -l : l];
-	}
-	IC void set_painter_lean_level(int level) { set_painter_lean(painter_lean_level_value(level)); }
-	IC int painter_lean_level() const
-	{
-		float const a = _abs(m_painter_lean_target);
-		int const l = a < .175f ? 0 : (a < .525f ? 1 : (a < .85f ? 2 : 3));
-		return m_painter_lean_target < 0.f ? -l : l;
-	}
-	// Shoulder (script: set_painter_shoulder / painter_shoulder): the left shoulder is only ever taken while leaning left.
-	// 0 = always right (stock), 1 = left from any left lean (target below -0.05), 2 = auto (default) = left from half lean
-	// (target below -0.5). With no lean every mode is the right shoulder. The left shoulder plays the mirrored "<name>_ls"
-	// torso clips when the bank has them (standing, two-hand weapons; the bank mirrors the aimed and firing torsos only, so
-	// lowered, relaxed, sprint and reload torsos stay on the right); the weapon then sits in the mirror image of its
-	// right-hand frame, on the left hand.
-	IC int painter_shoulder_mode() const { return m_painter_shoulder_mode; }
-	IC void set_painter_shoulder(int mode) { m_painter_shoulder_mode = (mode < 0 || mode > 2) ? 2 : mode; }
-	IC bool painter_shoulder_left() const
-	{
-		return (m_painter_shoulder_mode == 1 && m_painter_lean_target < -.05f) || (m_painter_shoulder_mode == 2 && m_painter_lean_target < -.5f);
-	}
-	// Grip side of the weapon: 0 = right hand (stock frame), 1 = left hand (exact mirror of the stock frame), in between
-	// while the mirrored torso clip crossfades, so the rifle travels with the hands. painter_grip_mirrored() = blend >= 0.5.
-	float painter_grip_blend() const;
-	IC bool painter_grip_mirrored() const { return painter_grip_blend() >= .5f; }
-	// Left-hand weapon frame data, computed once per visual: the mirror partners of weapon_bone0/1/2 (bip01_r_* <-> bip01_l_*)
-	// and the left grip bone's local vector that maps onto the mirror image of the right grip bone's up axis (bind pose).
-	bool painter_mirror_grip(IKinematics& kinematics, u16& grip, u16& support, u16& grip2, Fvector& up_local);
-	// Native fire checks for the AI layer (script: painter_native_fire_flags / painter_native_fire_verdict): bit 1
-	// fire_make_sense, 2 can_kill_enemy, 4 can_kill_member, 8 armed. verdict = fire_make_sense && can_kill_enemy && !can_kill_member.
-	u32 painter_native_fire_flags();
-	u32 painter_target_fire_flags(const CEntityAlive* target);
-	IC bool painter_native_fire_verdict() { u32 const f = painter_native_fire_flags(); return (f & 3) == 3 && !(f & 4); }
-	void painter_fire_log();
-
-
 	IC void sniper_update_rate(bool value);
 	IC bool sniper_update_rate() const;
 	IC void sniper_fire_mode(bool value);

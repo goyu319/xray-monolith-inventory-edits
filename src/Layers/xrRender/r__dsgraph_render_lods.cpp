@@ -1,5 +1,8 @@
 #include "stdafx.h"
 #include "flod.h"
+#if RENDER==R_R4
+#include "PainterFire.h"
+#endif
 
 #ifdef _EDITOR
 #include "igame_persistent.h"
@@ -69,6 +72,10 @@ void CDSGraphManager::r_dsgraph_render_lods(bool _setup_zb, bool _clear)
 
 			// calculate direction and shift
 			FLOD* lodV = (FLOD*)P.pVisual;
+#if RENDER==R_R4
+            float thermal=0.f;
+            const float burnt=PainterFire::TreeBurnAmount(lodV,nullptr,PainterFire::thermalViewPossible()?&thermal:nullptr);
+#endif
 			Fvector Ldir, shift;
 			Ldir.sub(lodV->vis.sphere.P, Device.vCameraPosition).normalize();
 			shift.mul(Ldir, -.5f * lodV->vis.sphere.R);
@@ -126,6 +133,10 @@ void CDSGraphManager::r_dsgraph_render_lods(bool _setup_zb, bool _clear)
 				V->t1 = FA.v[id].t;
 				V->rgbh0 = FB.v[id].c_rgb_hemi;
 				V->rgbh1 = FA.v[id].c_rgb_hemi;
+#if RENDER==R_R4
+                V->painterBurn=burnt;
+                V->painterThermal=thermal;
+#endif
 				V++;
 			}
 		}

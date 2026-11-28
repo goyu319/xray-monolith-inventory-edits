@@ -56,7 +56,7 @@ inline bool onHead(const std::vector<SeverSegment>&segments,const CranialMeasure
 inline Result fracture(Grid&g,const std::vector<SeverSegment>&segments,SeverState&state,const CranialMeasure&cranial,
     const std::vector<const ResolvedTunnel*>&cuts,const painter_detail::TissueField*countField,Vec entry,Vec direction,std::uint64_t seed,std::uint16_t bone,
     Event kind=pieces,const painter_detail::TissueField*closure=nullptr,const head_burst::Round*round=nullptr, // headfix: the round sizes a value-3 burst
-    bool ownScale=false){ // headsize (value 3): the head's own scale and placement (the Extreme damage mode, a crushing weapon's blow)
+    bool ownScale=false,bool ballistic=false){ // headsize (value 3): the head's own scale and placement (the Extreme damage mode, a crushing weapon's blow)
     Result r;const auto t0=core::Clock::now();
     Vec up{0,1,0}; // rest pose stands upright; the neck row's axis when the profile has one
     const SeverSegment*neck=nullptr; // headsize: the neck row (its far end is the head joint)
@@ -72,7 +72,8 @@ inline Result fracture(Grid&g,const std::vector<SeverSegment>&segments,SeverStat
         auto tissueAt=[&](const Vec&p){const unsigned l=closure->sample(p.x,p.y,p.z)&63u;return l!=0&&l!=16;};
         const head_burst::Round rd=round?*round:head_burst::Round{};
         const Vec floorAt=headFloor(neck,C);
-        const auto pl=head_burst::plan(C,entry,P0,d,seed,kind==cap,rd,tissueAt,ownScale?.5*(high-low)+.035:0.,&floorAt);
+        auto pl=head_burst::plan(C,entry,P0,d,seed,kind==cap,rd,tissueAt,ownScale?.5*(high-low)+.035:0.,&floorAt);
+        pl.ballisticBone=ballistic;
         if(!pl.S){r.refusal="head_fracture_path_off_head";return r;}
         auto b=head_burst::burst(g,segments,state,pl);
         if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_TEAR_SELECT_LOG")){const auto&p=b.plan;

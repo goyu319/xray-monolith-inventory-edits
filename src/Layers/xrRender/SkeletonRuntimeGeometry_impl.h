@@ -1,3 +1,4 @@
+#include <chrono>
 // Compiled in SkeletonCustom.cpp. The CPU barrier is set only while the engine
 // drains its joined-worker queue. It cannot be supplied or replayed by callers.
 #include "FSkinned.h"
@@ -170,11 +171,11 @@ const char* CKinematics::LL_AdmitRuntimeHeader(const RuntimeSkinUpdate& update,u
     const RuntimeRevisionState* active=nullptr;
     if(m_runtime_geometry){
         active_revision={m_runtime_geometry->owner_cookie,
-            m_runtime_geometry->damage_revision,m_runtime_geometry->separation_packet};
+            m_runtime_geometry->damage_revision,m_runtime_geometry->separation_packet,m_runtime_geometry->flight_preview};
         active=&active_revision;
     }
     if(!RuntimeRevisionAdmitted(active,current_owner_cookie,m_render_geometry_generation,
-        update.expected_geometry_generation,update.damage_revision,update.separation_packet))
+        update.expected_geometry_generation,update.damage_revision,update.separation_packet,update.flight_preview,update.flight_detail))
         return "nonmonotonic_revision_or_stage";
     for (u16 b=0;b<LL_BoneCount();++b) {
         const auto& request=update.exact_rig[b];const auto& actual=LL_GetData(b);
@@ -219,8 +220,9 @@ bool CKinematics::LL_PrepareRuntimeGeometryInternal(const RuntimeSkinUpdate& upd
     }
     std::unique_ptr<RuntimeGeometryPacket> next(new RuntimeGeometryPacket());
     next->owner_cookie=current_owner_cookie;next->damage_revision=update.damage_revision;
-    next->geometry_generation=m_render_geometry_generation+1;
+    next->geometry_generation=m_render_geometry_generation+(update.flight_detail?0:1);
     next->separation_packet=update.separation_packet;
+    next->flight_preview=update.flight_preview;next->flight_detail=update.flight_detail;
     next->children=originals;next->children.resize(count,nullptr);next->faces.resize(LL_BoneCount());
     // Replaced rows are rebuilt below. Copying the previous large cavity's
     // entire face table only to clear it causes avoidable owner-thread work.
@@ -400,6 +402,31 @@ const char* CKinematics::LL_FinishRuntimeGeometryPrepare(RuntimeGeometryPacket* 
     return nullptr;
 #endif
 }
+bool CKinematics::LL_FlightPreviewAllowed() const
+{
+#ifdef USE_DX11
+    if (!r_painter_publish || !Device.IsGeometryPublishBarrier()) return false;
+    {
+        xrCriticalSectionGuard guard(wallmarks_cs);
+        if (!wallmarks.empty()) return false;
+    }
+    return !::RImplementation.Wallmarks || !::RImplementation.Wallmarks->HasSkeletonWallmarks(this);
+#else
+    return false;
+#endif
+}
+
+void CKinematics::RecordFlightDraw()
+{
+#ifdef USE_DX11
+    if (!m_flight_first_draw || !m_runtime_geometry || RImplementation.phase!=RImplementation.PHASE_NORMAL) return;
+    m_flight_first_draw=false;
+    Msg("[painter_flight] phase=first_draw lod=%s cookie=%llu revision=%llu frame=%u t=%u host_us=%lld",
+        m_runtime_geometry->flight_preview?"preview":"exact",m_runtime_geometry->owner_cookie,
+        m_runtime_geometry->damage_revision,Device.dwFrame,Device.dwTimeGlobal, static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));
+#endif
+}
+
 bool CKinematics::LL_CanCommitPreparedRuntimeGeometry(u64 current_owner_cookie) const
 {
 #ifndef USE_DX11
@@ -409,18 +436,18 @@ bool CKinematics::LL_CanCommitPreparedRuntimeGeometry(u64 current_owner_cookie) 
     if(!prepared||!Device.IsGeometryPublishBarrier()||
        prepared->prior_packet!=m_runtime_geometry)return false;
     const auto* next=prepared->packet;
-    if(!next||next->geometry_generation!=m_render_geometry_generation+1)return false;
+    if(!next||next->geometry_generation!=m_render_geometry_generation+(next->flight_detail?0:1))return false;
     if(next->required_fields&&!next->required_fields->AdmittedAtCommit(HW.pDevice,current_owner_cookie,
         m_render_geometry_generation,next->damage_revision))return false;
     RuntimeRevisionState active_revision;
     const RuntimeRevisionState* active=nullptr;
     if(m_runtime_geometry){
         active_revision={m_runtime_geometry->owner_cookie,
-            m_runtime_geometry->damage_revision,m_runtime_geometry->separation_packet};
+            m_runtime_geometry->damage_revision,m_runtime_geometry->separation_packet,m_runtime_geometry->flight_preview};
         active=&active_revision;
     }
     return RuntimeRevisionAdmitted(active,current_owner_cookie,m_render_geometry_generation,
-        next->geometry_generation-1,next->damage_revision,next->separation_packet)&&
+        m_render_geometry_generation,next->damage_revision,next->separation_packet,next->flight_preview,next->flight_detail)&&
         next->owner_cookie==current_owner_cookie;
 #endif
 }
@@ -450,13 +477,21 @@ bool CKinematics::LL_CommitPreparedRuntimeGeometry(u64 current_owner_cookie)
         children.swap(prepared->published);m_lod=nullptr;m_runtime_geometry=next;
         painter_shot_dump::live(this,next->required_fields?next->required_fields->shot_mesh:nullptr,next->owner_cookie,next->damage_revision); // shotdump (diagnostic)
         m_blood_cells=next->blood_cells;if(m_blood_cells)m_blood_cells->refreshed=~0u;
-        ++m_render_geometry_generation;
+        m_flight_first_draw=next->flight_preview || next->flight_detail;
+        if(next->flight_detail)++m_flight_detail_swaps;
+        else ++m_render_geometry_generation;
         for(auto* visual:children)fast_dynamic_cast<CSkeletonX*>(visual)->SetParent(this);
         CalculateBones_Invalidate();Visibility_Invalidate();
     }
     // Projection sources are built from this generation's private face table.
     // Every new child starts cold; unchanged children keep the immutable source.
     prepared->packet=nullptr;LL_DiscardPreparedRuntimeGeometry();
+#if RENDER==R_R4
+    if(m_burn_binding && m_burn_binding->hasRenderedBurn){
+        m_burn_binding->frame=~0u;
+        PainterBurnRefresh();
+    }
+#endif
     retire_runtime(old);CollectRuntimeGeometryRetired(false);
     return true;
 #endif
@@ -748,16 +783,21 @@ void RuntimeGeometryStage::Run() noexcept
                 runtime_stage_projection(*child,bone_count,faces,remap);child->projection_attempted=true;
             }
             timing.projection_ms=RuntimeStageMs(projection_start);
+#if RENDER==R_R4
+            if(!reason && burnSource)for(auto& child:children)if(child->built)
+                child->burnFaces=PainterBurnGpu::buildFaces(device,burnSource,child->material_source_child,&child->source->original_faces);
+#endif
             if(!reason)for(const auto& child:children)if(child->built)RuntimePreparedCpuStore(*this,*child,scratch);
             ok=!reason;
         }
     }
+    if(ok&&!canceled.load(std::memory_order_relaxed)&&packed&&packed->post_work)packed->post_work->Run(*packed); // Pure packed-data auxiliary result, never live objects.
     timing.run_ms=RuntimeStageMs(start);
     ready.store(true,std::memory_order_release);
 }
 IRuntimeGeometryStage* CKinematics::LL_StageRuntimeGeometry(const RuntimeSkinUpdate& header,
     const std::shared_ptr<const gfy_packed::Mesh>& packed,LPCSTR cavity_shader,LPCSTR cavity_texture,
-    const xr_vector<shared_str>* tissue_textures,u64 current_owner_cookie,int& outcome)
+    const xr_vector<shared_str>* tissue_textures,u64 current_owner_cookie,int& outcome,std::shared_ptr<const painter_burn::SourceFaces> burnSource)
 {
     outcome=RuntimeStageOutcome::unavailable;
     if(!r_painter_publish || !packed || !HW.pDevice)return nullptr;
@@ -790,9 +830,13 @@ IRuntimeGeometryStage* CKinematics::LL_StageRuntimeGeometry(const RuntimeSkinUpd
         replaced[c.child_index]=true;
     }
     auto* stage=new RuntimeGeometryStage();
+#if RENDER==R_R4
+    stage->burnSource=burnSource?std::move(burnSource):LL_PainterBurnStageSource();
+#endif
     stage->owner_model=this;stage->owner_cookie=current_owner_cookie;
     stage->expected_generation=header.expected_geometry_generation;stage->damage_revision=header.damage_revision;
     stage->separation_packet=header.separation_packet;
+    stage->flight_preview=header.flight_preview;stage->flight_detail=header.flight_detail;
     stage->bone_count=LL_BoneCount();stage->registers=HW.Caps.geometry.dwRegisters;
     RuntimePreparedCpuCaptureRig(*stage,header);
     stage->originals_count=originals.size();stage->count=count;
@@ -896,7 +940,8 @@ bool CKinematics::LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage* handle,
     // while the stage was prepared (separation commit, despawn, device reset).
     if(stage->owner_model!=this || stage->owner_cookie!=header.owner_cookie ||
        stage->expected_generation!=header.expected_geometry_generation || stage->damage_revision!=header.damage_revision ||
-       stage->separation_packet!=header.separation_packet || stage->bone_count!=LL_BoneCount())
+       stage->separation_packet!=header.separation_packet || stage->flight_preview!=header.flight_preview ||
+       stage->flight_detail!=header.flight_detail || stage->bone_count!=LL_BoneCount())
         return finish(reject("stage_identity"));
     xr_vector<IRenderVisual*> originals;
     if(const char* why=LL_AdmitRuntimeHeader(header,current_owner_cookie,!stage->children.empty(),originals))return finish(reject(why));
@@ -913,9 +958,20 @@ bool CKinematics::LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage* handle,
     for(const auto& child:stage->children){replaced[child->child_index]=1;accepts[child->child_index]=child->receives_wallmarks?1:0;}
     std::unique_ptr<RuntimeGeometryPacket> next(new RuntimeGeometryPacket());
     next->owner_cookie=current_owner_cookie;next->damage_revision=header.damage_revision;
-    next->geometry_generation=m_render_geometry_generation+1;
+    next->geometry_generation=m_render_geometry_generation+(header.flight_detail?0:1);
     next->separation_packet=header.separation_packet;
+    next->flight_preview=header.flight_preview;next->flight_detail=header.flight_detail;
     next->required_fields=stage->required_fields;
+    // Repeat hits on a detached piece carry its birth atlas unchanged. The removal
+    // field is still new. Only the tear textures can pass from the current packet.
+    if (m_runtime_geometry && m_runtime_geometry->owner_cookie == current_owner_cookie) {
+        const auto& prev = m_runtime_geometry->required_fields;
+        const auto& curr = next->required_fields;
+        if (prev && curr && curr->mask_piece && curr->tear_atlas && !curr->tear_gpu &&
+            curr->epoch == prev->epoch && curr->tear_atlas == prev->tear_atlas &&
+            prev->tear_gpu && prev->tear_gpu->built_device == HW.pDevice)
+            curr->tear_gpu = prev->tear_gpu;
+    }
     next->children=originals;next->children.resize(count,nullptr);
     next->faces.swap(stage->faces); // [bone][slot], replaced rows built by Run()
     // Borrowed originals keep their original rows (bone data is read at a barrier only).
@@ -945,6 +1001,15 @@ bool CKinematics::LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage* handle,
         if(!material)return finish(reject("material_visual_type"));
         std::unique_ptr<CSkeletonX_ST> skin(new CSkeletonX_ST());
         if(!skin->AdoptRuntime(*child,this,*material,reuse))return finish(reject("child_build_see_child_reason"));
+#if RENDER==R_R4
+        // A staged child copied this exact packet's original_faces in AdoptRuntime.
+        // Associate its new immutable copy with the finished GPU table at adoption.
+        auto map=std::move(child->burnFaces);
+        if(!map && donor->m_burn_binding && donor->m_burn_binding->hasRenderedBurn && donor->m_burn_binding->bank && donor->m_burn_binding->source)
+            map=PainterBurnGpu::buildFaces(HW.pDevice,PainterBurnGpu::geometryOf(donor->m_burn_binding->source),
+                skin->PainterBurnSourceChild(),skin->PainterBurnRemap().get());
+        if(map){map->original=skin->PainterBurnRemap();next->burnFaces.emplace(skin.get(),std::move(map));}
+#endif
         sources_done[child->child_index]=child->projection_attempted?1:0;adopted[child->child_index]=skin.get();
         next->children[child->child_index]=skin.get();next->owned.push_back(skin.release());
     }
@@ -1018,7 +1083,7 @@ unsigned CKinematics::LL_WarmRuntimeShaders(LPCSTR cavity_shader,LPCSTR cavity_t
 }
 #else
 IRuntimeGeometryStage* CKinematics::LL_StageRuntimeGeometry(const RuntimeSkinUpdate&,const std::shared_ptr<const gfy_packed::Mesh>&,
-    LPCSTR,LPCSTR,const xr_vector<shared_str>*,u64,int& outcome){outcome=3;return nullptr;}
+    LPCSTR,LPCSTR,const xr_vector<shared_str>*,u64,int& outcome,std::shared_ptr<const painter_burn::SourceFaces>){outcome=3;return nullptr;}
 bool CKinematics::LL_InstallStagedRuntimeGeometry(IRuntimeGeometryStage*,const RuntimeSkinUpdate&,u64){return false;}
 bool CKinematics::LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage*,const RuntimeSkinUpdate&,u64,IRenderVisual*,const Fmatrix*){return false;}
 unsigned CKinematics::LL_WarmRuntimeShaders(LPCSTR,LPCSTR,const xr_vector<shared_str>*,unsigned,const std::shared_ptr<const painter_detail::TissueField>&){return 0;}

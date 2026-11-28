@@ -2,6 +2,7 @@
 #include "../Layers/xrRender/BloodNativeProfile.h"
 
 #include "PHWorld.h"
+#include <algorithm>
 #include "tri-colliderknoopc/dTriList.h"
 #include "PhysicsCommon.h"
 //#include "Level.h"
@@ -41,6 +42,98 @@
 ///////////////////////////////////////////////////////////
 //BOOL		g_bDebugDumpPhysicsStep				= 0;
 CPHWorld* ph_world = 0;
+
+// physlist (2026-11-26): the physics update objects (artefacts, rockets, vehicles, mounted guns, telekinesis, the use-key
+// grab, Painter's head and gut tethers) are listed here in two plain pointer lists; CPHWorld's intrusive lists
+// m_update_objects / m_freezed_update_objects are no longer used. Those kept their links inside each object, so a dead
+// object could stay in the chain every physics step walks: an object deactivated while the world was frozen was erased
+// from the active list although the freeze had moved it to the frozen one; a copy of an object carried its links and its
+// removal unlinked the original; an update that deleted the next object of the loop left the loop holding it.
+// A player crashed loading a save after head bursts (2026-11-25): PhDataUpdate called on an object whose memory had
+// become a stalker's character physics. Here an object is listed by its pointer from Activate to Deactivate (its
+// destructor runs Deactivate) and by nothing else; loops visit entries by position, an entry removed during a loop is
+// cleared and skipped, and cleared entries are dropped once no loop runs.
+namespace physlist
+{
+struct Lists
+{
+	xr_vector<CPHUpdateObject*> active, frozen;
+	u32 loops = 0; // loops running now (steps nest: FlyTo and spawn activation step the world inside game code)
+	bool holes = false; // entries cleared during a loop
+};
+static Lists& lists()
+{
+	static Lists value;
+	return value;
+}
+static bool listed(const xr_vector<CPHUpdateObject*>& v, CPHUpdateObject* o)
+{
+	return std::find(v.begin(), v.end(), o) != v.end();
+}
+static bool take(xr_vector<CPHUpdateObject*>& v, CPHUpdateObject* o)
+{
+	for (size_t k = 0; k < v.size(); ++k)
+		if (v[k] == o)
+		{
+			if (lists().loops)
+			{
+				v[k] = nullptr;
+				lists().holes = true;
+			}
+			else
+				v.erase(v.begin() + k);
+			return true;
+		}
+	return false;
+}
+static void tidy()
+{
+	Lists& l = lists();
+	if (l.loops || !l.holes)
+		return;
+	l.active.erase(std::remove(l.active.begin(), l.active.end(), static_cast<CPHUpdateObject*>(nullptr)), l.active.end());
+	l.frozen.erase(std::remove(l.frozen.begin(), l.frozen.end(), static_cast<CPHUpdateObject*>(nullptr)), l.frozen.end());
+	l.holes = false;
+}
+struct Loop
+{
+	Loop() { ++lists().loops; }
+	~Loop()
+	{
+		--lists().loops;
+		tidy();
+	}
+};
+// Every entry listed when the loop starts, in order; one removed meanwhile is skipped, one added meanwhile waits for the
+// next loop (as the intrusive loop treated an object added behind its last one).
+template <class F>
+static void each(xr_vector<CPHUpdateObject*>& v, F f)
+{
+	Loop running;
+	const size_t n = v.size();
+	for (size_t k = 0; k < n && k < v.size(); ++k)
+		if (CPHUpdateObject* o = v[k])
+			f(o);
+}
+static void move_all(xr_vector<CPHUpdateObject*>& to, xr_vector<CPHUpdateObject*>& from)
+{
+	for (size_t k = 0; k < from.size(); ++k)
+		if (from[k])
+			to.push_back(from[k]);
+	from.clear();
+}
+static void clear()
+{
+	Lists& l = lists();
+	l.active.clear();
+	l.frozen.clear();
+	l.holes = false;
+}
+}
+// physlist: CPHUpdateObject::Deactivate (PHObject.cpp) hands its pointer over as a PH_UPDATE_OBJECT_I. The intrusive loops
+// that were here were the only code generating that list's members (link error LNK2001 on the iterator without them), so
+// they are generated here explicitly.
+template class CPHItemList<CPHUpdateObject>;
 
 IPHWorld* __stdcall physics_world()
 {
@@ -185,6 +278,7 @@ void CPHWorld::SetStep(float s)
 void CPHWorld::Create(bool mt, CObjectSpace* os, CObjectList* lo, CRenderDeviceBase* dv)
 {
 	LoadParams();
+	physlist::clear(); // physlist: a new world starts with no update objects
 	dWorldID phWorld = 0;
 	m_object_space = os;
 	m_level_objects = lo;
@@ -247,6 +341,7 @@ void CPHWorld::Create(bool mt, CObjectSpace* os, CObjectList* lo, CRenderDeviceB
 void CPHWorld::Destroy()
 {
 	r_spatial.clear();
+	physlist::clear(); // physlist
 	//xr_delete(m_commander);
 	Mesh.Destroy();
 #ifdef PH_PLAIN
@@ -341,7 +436,6 @@ void CPHWorld::Step()
 	VERIFY(b_processing||IsFreezed());
 
 	PH_OBJECT_I i_object;
-	PH_UPDATE_OBJECT_I i_update_object;
 
 	if (disable_count == 0)
 	{
@@ -405,12 +499,7 @@ void CPHWorld::Step()
 #endif
 	}
 
-	for (i_update_object = m_update_objects.begin(); m_update_objects.end() != i_update_object;)
-	{
-		CPHUpdateObject* obj = (*i_update_object);
-		++i_update_object;
-		obj->PhTune(fixed_step);
-	}
+	physlist::each(physlist::lists().active, [](CPHUpdateObject* obj) { obj->PhTune(fixed_step); }); // physlist
 	}
 
 	Device().StatPhysics()->ph_core.Begin();
@@ -536,12 +625,7 @@ void CPHWorld::Step()
 		obj->spatial_move();
 	}
 
-	for (i_update_object = m_update_objects.begin(); m_update_objects.end() != i_update_object;)
-	{
-		CPHUpdateObject* obj = *i_update_object;
-		++i_update_object;
-		obj->PhDataUpdate(fixed_step);
-	}
+	physlist::each(physlist::lists().active, [](CPHUpdateObject* obj) { obj->PhDataUpdate(fixed_step); }); // physlist
 	}
 
 #ifdef DEBUG
@@ -669,13 +753,21 @@ void CPHWorld::RemoveFromRecentlyDisabled(PH_OBJECT_I i)
 
 void CPHWorld::AddUpdateObject(CPHUpdateObject* object)
 {
-	//.	if(object->IsFreezed())m_freezed_update_objects.erase(i);
-	m_update_objects.push_back(object);
+	// physlist: listed once; one activated while the world is frozen joins the active list (steps run during a freeze)
+	physlist::Lists& l = physlist::lists();
+	if (!object || physlist::listed(l.active, object) || physlist::listed(l.frozen, object))
+		return;
+	l.active.push_back(object);
 }
 
 void CPHWorld::RemoveUpdateObject(PH_UPDATE_OBJECT_I i)
 {
-	m_update_objects.erase(i);
+	// physlist: from whichever list holds it (a freeze may have moved it); an object not listed (a copy) changes nothing
+	CPHUpdateObject* object = *i;
+	physlist::Lists& l = physlist::lists();
+	if (!physlist::take(l.active, object))
+		physlist::take(l.frozen, object);
+	physlist::tidy();
 }
 
 void CPHWorld::RemoveObject(PH_OBJECT_I i)
@@ -704,7 +796,7 @@ void CPHWorld::Freeze()
 	for (; e != iter; ++iter)
 		(*iter)->FreezeContent();
 
-	m_freezed_update_objects.move_items(m_update_objects);
+	physlist::move_all(physlist::lists().frozen, physlist::lists().active); // physlist
 
 	b_world_freezed = true;
 }
@@ -719,7 +811,7 @@ void CPHWorld::UnFreeze()
 
 	m_objects.move_items(m_freezed_objects);
 
-	m_update_objects.move_items(m_freezed_update_objects);
+	physlist::move_all(physlist::lists().active, physlist::lists().frozen); // physlist
 	b_world_freezed = false;
 }
 
@@ -747,14 +839,9 @@ void CPHWorld::NetRelcase(CPhysicsShell* s)
 	*/
 	VERIFY(m_update_callback);
 	m_update_callback->phys_shell_relcase(s);
-	PH_UPDATE_OBJECT_I i_update_object;
-	for (i_update_object = m_update_objects.begin(); m_update_objects.end() != i_update_object;)
-	{
-		CPHUpdateObject* obj = (*i_update_object);
-		++i_update_object;
-		obj->NetRelcase(s);
-		//obj->PhTune(fixed_step);
-	}
+	// physlist: the frozen list too: an update object holding this shell lets it go even while the world is frozen
+	physlist::each(physlist::lists().active, [s](CPHUpdateObject* obj) { obj->NetRelcase(s); });
+	physlist::each(physlist::lists().frozen, [s](CPHUpdateObject* obj) { obj->NetRelcase(s); });
 }
 
 /*
@@ -770,7 +857,8 @@ u16 CPHWorld::ObjectsNumber()
 
 u16 CPHWorld::UpdateObjectsNumber()
 {
-	return m_update_objects.count();
+	const xr_vector<CPHUpdateObject*>& v = physlist::lists().active; // physlist
+	return u16(v.size() - std::count(v.begin(), v.end(), static_cast<CPHUpdateObject*>(nullptr)));
 }
 
 void CPHWorld::GetState(V_PH_WORLD_STATE& state)

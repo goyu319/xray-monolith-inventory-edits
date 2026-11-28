@@ -65,7 +65,14 @@ template<class C> struct IsProfiledTunnel<C,std::void_t<decltype(std::declval<co
 // Slab cutters (R18 explosion blades) are boxes: the round-channel cell filter and SIMD columns do not apply to them.
 template<class,class=void> struct HasSlabFlag:std::false_type{};
 template<class C> struct HasSlabFlag<C,std::void_t<decltype(std::declval<const C&>().slab)>>:std::true_type{};
-template<class C> inline bool cutIsSlab(const C& c){if constexpr(HasSlabFlag<C>::value)return c.slab;else return false;}
+template<class C,class=void> struct HasGrenadeFloor:std::false_type{};
+template<class C> struct HasGrenadeFloor<C,std::void_t<decltype(std::declval<const C&>().grenadeFloor)>>:std::true_type{};
+template<class C> inline bool customCut(const C& c){
+    // A grenade is a round envelope intersected with its sampled floor.
+    // Column certificates are for the envelope; floorRow below clips positive lanes.
+    if constexpr(HasSlabFlag<C>::value)return c.slab;
+    return false;
+}
 // Cell membership for Tunnel::contains without its exact angle: the same arithmetic for the depth t, the axis distance
 // and the radius limit (so every decision made from them is identical), and the edge-profile multiplier at the
 // polynomial angle (WoundEdgeProfile::approximateAngle) instead of std::atan2. The profile is piecewise linear in the
@@ -263,6 +270,7 @@ template<class Grid> struct TileTunnelPlan {
     static constexpr std::uint32_t noStage=~std::uint32_t(0);
     std::vector<std::uint32_t> stageAt; // dense tile window -> compact stage, or noStage (use old grid)
     std::vector<Cell> stageKeys;
+    std::vector<Tile> envelopeBits;
     std::vector<Stage> stages; // compact lexicographic x,y,z tile order, z fastest
     std::vector<Cell> touched; // same deterministic order; only nonzero fresh masks
     std::vector<Cell> boundary; // fresh cells with a kept/invalid face neighbor
@@ -309,7 +317,7 @@ template<class Grid> struct TileTunnelPlan {
 template<class Grid,class Cut,class Field,class Parallel>
 TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
     typename TileTunnelPlan<Grid>::Cell low,typename TileTunnelPlan<Grid>::Cell high,
-    const Field* countField,Parallel&& parallel,std::size_t maxScratchBytes=64u<<20) {
+    const Field* countField,Parallel&& parallel,std::size_t maxScratchBytes=64u<<20,bool captureEnvelope=false) {
     using Plan=TileTunnelPlan<Grid>;using Cell=typename Plan::Cell;using Tile=typename Plan::Tile;
     using Vec=typename std::decay<decltype(grid.origin)>::type;
     using namespace tile_tunnel_detail;
@@ -356,6 +364,8 @@ TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
     };
     const std::size_t fixedBytes=indexBytes+tileCount*(sizeof(typename Plan::Stage)+sizeof(Cell))+blocks*sizeof(Counts)+mapsBytes+(blocks+1)*sizeof(std::size_t);
     if(fixedBytes>maxScratchBytes)return unsupported("tile_scratch_budget");
+    // Capturing an optional mask must not change the old planner's admission.
+    if(captureEnvelope&&tileCount<=(maxScratchBytes-fixedBytes)/sizeof(Tile))plan.envelopeBits.resize(tileCount);
     plan.stageAt.assign(windowTileCount,Plan::noStage);plan.stageKeys.reserve(tileCount);
     // Preserve lexicographic tile order, but skip an empty coarse z-span in
     // one step. Avoid two full-window coordinate/division scans for large
@@ -385,13 +395,26 @@ TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
     int axis=0;for(int a=1;a<3;++a)if(std::abs(cut.direction[a])>std::abs(cut.direction[axis]))axis=a;
     const int u=(axis+1)%3,v=(axis+2)%3;Vec step{};step[axis]=grid.pitch;
     using Filter=typename std::conditional<IsProfiledTunnel<Cut>::value,TunnelCellFilter<Cut>,NoCellFilter>::type;
-    const Filter filter(cut);const bool filtering=cellFilterEnabled()&&!cutIsSlab(cut);
+    const Filter filter(cut);const bool filtering=cellFilterEnabled()&&!customCut(cut);
 #ifdef __AVX__
     using Columns=typename std::conditional<IsProfiledTunnel<Cut>::value,TunnelColumnEval<Cut>,NoColumnEval>::type;
 #else
     using Columns=NoColumnEval;
 #endif
-    const Columns columns(cut,axis,grid.pitch);const bool lanes=columnLanesEnabled()&&columns.usable&&!cutIsSlab(cut);
+    const Columns columns(cut,axis,grid.pitch);const bool lanes=columnLanesEnabled()&&columns.usable&&!customCut(cut);
+    auto floorRow=[&](Cell c,unsigned row,int tileBase){
+        if constexpr(HasGrenadeFloor<Cut>::value){
+            if(cut.grenadeFloor){
+                for(unsigned bits=row;bits;bits&=bits-1){
+                    const unsigned bit=firstBit(bits);
+                    (&c.x)[axis]=tileBase+int(bit);
+                    const Vec q=grid.center(c)-cut.entry;
+                    if(!cut.grenadeFloor->keepsCut(q,dot(q,cut.direction)))row&=~(1u<<bit);
+                }
+            }
+        }
+        return row;
+    };
     auto setRow=[&](Tile& t,Cell c,unsigned row){
         if(axis==2)t.removed[c.x&7]|=std::uint64_t(row)<<((c.y&7)*8);
         else if(axis==1){std::uint64_t spread=row;spread=(spread|(spread<<28))&0x0000000F0000000Full;
@@ -465,8 +488,13 @@ TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
 #ifdef GFY_RX_PROF
                                 if(in<0)++prof.containsCalls;else ++prof.filterCalls;
 #endif
-                                if(in<0)in=cut.contains(p)?1:0;
+                                if(in<0){
+                                    if constexpr(HasGrenadeFloor<Cut>::value)in=cut.insideEnvelope(p)?1:0;
+                                    else in=cut.contains(p)?1:0;
+                                }
                                 if(in)row|=1u<<bit;}
+                            if(!plan.envelopeBits.empty())setRow(plan.envelopeBits[i],c,row&~oldRow);
+                            row=floorRow(c,row&~oldRow,base[axis]);
                             if(row)setRow(damage,c,row);
                             continue;}
 #ifdef GFY_RX_PROF
@@ -479,8 +507,13 @@ TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
 #ifdef GFY_RX_PROF
                             if(inside<0)++prof.containsCalls;else ++prof.filterCalls;
 #endif
-                            if(inside<0)inside=cut.contains(p)?1:0;
+                            if(inside<0){
+                                if constexpr(HasGrenadeFloor<Cut>::value)inside=cut.insideEnvelope(p)?1:0;
+                                else inside=cut.contains(p)?1:0;
+                            }
                             if(inside)row|=1u<<unsigned(a-base[axis]);}
+                        if(!plan.envelopeBits.empty())setRow(plan.envelopeBits[i],c,row&~oldRow);
+                        row=floorRow(c,row&~oldRow,base[axis]);
                         if(row)setRow(damage,c,row);
                     }
                 }
@@ -512,6 +545,11 @@ TileTunnelPlan<Grid> planTileTunnel(const Grid& grid,const Cut& cut,
                 if(!fresh)continue;sum.mask+=fresh;++sum.changed;
 #ifdef GFY_RX_PROF
                 ProfileTimer countTimer(prof.countNs);
+#endif
+#ifndef GFY_RX_VERIFY
+                // Only presence of new solid is consumed on the private display pass.
+                // The public physics path and its diagnostic oracle retain exact counts.
+                if(captureEnvelope&&sum.solid)continue;
 #endif
                 int uniform=-1;
                 if(fieldAvailable){std::array<int,3> al,ah;for(int a=0;a<3;++a){al[a]=coordinate(lo[a],a);ah[a]=coordinate(hi[a],a);}

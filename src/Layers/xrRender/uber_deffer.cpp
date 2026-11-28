@@ -94,6 +94,20 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 		xr_strcat(ps, "-hq");
 	}
 
+#if defined(USE_DX11)
+    const bool painterLeaf = _aref && (strstr(_vspec,"tree")==_vspec);
+    const bool painterWood = !_aref && (!strcmp(_vspec,"tree") || !strcmp(_vspec,"tree_s")) && !strcmp(_pspec,"base");
+    auto leafPs=[&](const char* original)->xr_string {
+        if (!painterLeaf && !painterWood) return original;
+        xr_string base=original,opts;
+        const size_t tail=base.find('(');
+        if(tail!=xr_string::npos){opts=base.substr(tail);base.resize(tail);}
+        xr_string alt=painterWood?"painter_wood_":"painter_leaf_";alt+=base;
+        string_path fn;
+        xr_string rel=::Render->getShaderPath();rel+=alt;rel+=".ps";
+        return FS.exist(fn,"$game_shaders$",rel.c_str())?alt+opts:xr_string(original);
+    };
+#endif
 	// Uber-construct
 #if defined(USE_DX10) || defined(USE_DX11)
 #	ifdef USE_DX11
@@ -141,7 +155,7 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 
 		VERIFY(strstr(vs, "bump")!=0);
 		VERIFY(strstr(ps, "bump")!=0);
-		C.r_TessPass(vs, hs, ds, "null", ps, FALSE);
+		C.r_TessPass(vs, hs, ds, "null", leafPs(ps).c_str(), FALSE);
 		RImplementation.clearAllShaderOptions();
 		u32 stage = C.r_dx10Sampler("smp_bump_ds");
 		if (stage != -1)
@@ -160,14 +174,26 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 	}
 	else
 #	endif
-	if (DO_NOT_WRITE) C.r_Pass(vs, ps, FALSE, TRUE, FALSE);
-	else C.r_Pass(vs, ps, FALSE);
-	//C.r_Sampler		("s_base",		C.L_textures[0],	false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
+  {
+#ifdef USE_DX11
+    const xr_string selected=leafPs(ps); const char* target=selected.c_str();
+#else
+    const char* target=ps;
+#endif
+    if(DO_NOT_WRITE)C.r_Pass(vs,target,FALSE,TRUE,FALSE);else C.r_Pass(vs,target,FALSE);
+  }
+//C.r_Sampler		("s_base",		C.L_textures[0],	false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
 	//C.r_Sampler		("s_bumpX",		fnameB,				false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);	// should be before base bump
 	//C.r_Sampler		("s_bump",		fnameA,				false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
 	//C.r_Sampler		("s_bumpD",		dt,					false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
 	//C.r_Sampler		("s_detail",	dt,					false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
 	C.r_dx10Texture("s_base", C.L_textures[0]);
+#ifdef USE_DX11
+    if(painterLeaf){
+        C.r_dx10Texture("s_painter_leaf_wood",fname);
+    }
+#endif
+
 	C.r_dx10Texture("s_bumpX", fnameB); // should be before base bump
 	C.r_dx10Texture("s_bump", fnameA);
 	C.r_dx10Texture("s_bumpD", dt);

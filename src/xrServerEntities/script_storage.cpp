@@ -12,6 +12,7 @@
 #include "script_thread.h"
 #include "../xrCore/mezz_stringbuffer.h"
 #include <luabind/weak_ref.hpp>
+#include "../xrCore/ShaderSourceCRC.h"
 #include <stdarg.h>
 #include <unordered_map>
 #include <set>
@@ -1097,6 +1098,16 @@ bool CScriptStorage::do_file(LPCSTR caScriptName, LPCSTR caNameSpaceName)
 	{
 		script_log(eLuaMessageTypeError, "Cannot open file \"%s\"", caScriptName);
 		return (false);
+	}
+	{
+		// source edits (configs/painter_source_edits) apply to the installed script
+		const void* edited = nullptr;
+		u32 editedSize = 0;
+		if (painterSourceEdits(caScriptName, l_tpFileReader->pointer(), l_tpFileReader->length(), edited, editedSize))
+		{
+			FS.r_close(l_tpFileReader);
+			l_tpFileReader = xr_new<IReader>(const_cast<void*>(edited), int(editedSize));
+		}
 	}
 
 	// Unlocalize variables in the script defined by unlocalizers map. Process the

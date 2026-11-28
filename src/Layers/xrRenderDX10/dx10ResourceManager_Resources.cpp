@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../../xrCore/ShaderSourceCRC.h"
 #pragma hdrstop
 
 #pragma warning(disable:4995)
@@ -199,9 +200,16 @@ SVS* CResourceManager::_CreateVS(LPCSTR _name)
 			FS.update_path(cname, "$game_shaders$", cname);
 			file = FS.r_open(cname);
 		}
-		u32 const size = file->length();
+		// source edits (configs/painter_source_edits) apply to the installed file
+		const void* source = file->pointer();
+		u32 size = file->length();
+		{
+			string_path editPath;
+			strconcat(sizeof(editPath), editPath, "shaders\\", ::Render->getShaderPath(), shName, ".vs");
+			painterSourceEdits(editPath, file->pointer(), file->length(), source, size);
+		}
 		char* const data = (LPSTR)_alloca(size + 1);
-		CopyMemory(data, file->pointer(), size);
+		CopyMemory(data, source, size);
 		data[size] = 0;
 		FS.r_close(file);
 
@@ -326,9 +334,16 @@ SPS* CResourceManager::_CreatePS(LPCSTR _name)
 		}
 
 		R_ASSERT2(file, cname);
-		u32 const size = file->length();
+		// source edits (configs/painter_source_edits) apply to the installed file
+		const void* source = file->pointer();
+		u32 size = file->length();
+		{
+			string_path editPath;
+			strconcat(sizeof(editPath), editPath, "shaders\\", ::Render->getShaderPath(), shName, ".ps");
+			painterSourceEdits(editPath, file->pointer(), file->length(), source, size);
+		}
 		char* const data = (LPSTR)_alloca(size + 1);
-		CopyMemory(data, file->pointer(), size);
+		CopyMemory(data, source, size);
 		data[size] = 0;
 		FS.r_close(file);
 
@@ -441,7 +456,15 @@ SGS* CResourceManager::_CreateGS(LPCSTR name)
 		LPCSTR c_target = "gs_4_0";
 		LPCSTR c_entry = "main";
 
-		HRESULT const _hr = ::Render->shader_compile(name, (DWORD const*)file->pointer(), file->length(), c_entry,
+		// source edits (configs/painter_source_edits) apply to the installed file
+		const void* gsSource = file->pointer();
+		u32 gsSize = file->length();
+		{
+			string_path editPath;
+			strconcat(sizeof(editPath), editPath, "shaders\\", ::Render->getShaderPath(), name, ".gs");
+			painterSourceEdits(editPath, file->pointer(), file->length(), gsSource, gsSize);
+		}
+		HRESULT const _hr = ::Render->shader_compile(name, (DWORD const*)gsSource, gsSize, c_entry,
 		                                             c_target, D3D10_SHADER_PACK_MATRIX_ROW_MAJOR, (void*&)_gs);
 
 		VERIFY(SUCCEEDED(_hr));
@@ -664,6 +687,17 @@ ref_texture CResourceManager::_CreateTexture(LPCSTR _Name)
 		T->dwFlags |= xr_resource_flagged::RF_REGISTERED;
 		m_textures.insert(mk_pair(T->set_name(Name), T));
 		T->Preload();
+#ifdef USE_DX11
+        static constexpr char leafPrefix[] = "$user$leafwood\\";
+        if (!strncmp(Name,leafPrefix,sizeof(leafPrefix)-1)) {
+            // Painter fire: the burnt-leaf proxy samples its source texture; it never loads a DDS of its own.
+            const char* sourceName=Name+sizeof(leafPrefix)-1;
+            if (*sourceName && !strstr(sourceName,"$user$")) {
+                T->painterLeafSource = _CreateTexture(sourceName);
+                T->bind=xr_make_delegate(T,&CTexture::apply_leaf_wood);
+            }
+        }
+#endif
         const ref_texture result(T); // Own caller result before any worker can complete.
         if (Device.b_is_Ready) QueueTextureLoad(result);
         return result;

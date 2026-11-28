@@ -71,12 +71,10 @@
 #include "PHDebug.h"
 #include "debug_text_tree.h"
 #endif
-#include "painter_ai/EngineServices.h"
-#include "painter_ai/EngineCombatRuntime.h"
-#include "painter_ai/EngineRecorder.h"
 #include "painter_stream/NativeStream.h"
 #include "painter_stream/PrefetchWait.h"
 #include "../xrEngine/PainterLifetimeCookie.h"
+#include "PainterBurnHost.h"
 #include <atomic>
 #include <process.h>
 extern BOOL mt_Scheduler;
@@ -258,8 +256,6 @@ CLevel::CLevel() :
     R_ASSERT2(m_painter_world_cookie,"Native world cookie exhausted");
     m_painter_spawn_stream=painter_spawn_stream?xr_new<painter_stream::NativeStream>(*this):nullptr;
     Msg("[GOYU] painter_spawn_stream=%d", int(painter_spawn_stream));
-    painter::combat::engine::level_created(); // native combat AI: a new level epoch before the level's scripts run
-    painter::combat::engine::initialize_combat_runtime(); // native combat AI: registers its frame tick (stays for the next map)
     g_bDebugEvents = Core.ParamsData.test(ECoreParams::debug_ge);
     game_events = xr_new<NET_Queue_Event>();
     game_events->painter_capture_context=m_painter_spawn_stream;
@@ -324,25 +320,10 @@ extern CAI_Space* g_ai_space;
 CLevel::~CLevel()
 {
     PROF_EVENT("CLevel::~CLevel");
+    painter_burn_host::releaseWorld(PainterWorldCookie());
     PainterStopSpawnPrefetch();
     PainterRetireSpawnStream();
     xr_delete(m_painter_spawn_stream);
-    {   // native combat AI: its authority tick on this level, last / max per phase (capture includes the compatibility
-        // checks and dispatch includes publication: the phases nest, never add them); beside the job queue's jobs_summary
-        const painter::combat::engine::RuntimeStatus s = painter::combat::engine::combat_runtime_status();
-        Msg("[painter_combat] phase=runtime_summary level=%s frames=%llu failures=%llu ingest_rejected=%llu tick_ms=%.2f/%.2f "
-            "capture_ms=%.2f/%.2f dispatch_ms=%.2f/%.2f publish_ms=%.2f/%.2f first_applied=%llu first_deadline_missed=%llu "
-            "first_applied_ms_max=%llu accepted=%llu rejected=%llu %s record_ms=%.2f record_mb=%.1f", *name(), s.frames, s.failures, s.ingest_rejected, s.last_tick_ms,
-            s.maximum_tick_ms, s.capture_ms, s.maximum_capture_ms, s.dispatch_ms, s.maximum_dispatch_ms, s.publish_ms,
-            s.maximum_publish_ms, s.dispatch.first_applied, s.dispatch.first_deadline_missed, s.dispatch.maximum_first_applied_ms,
-            s.dispatch.native_accepted, s.dispatch.native_rejected,
-            painter::combat::engine::reject_summary().c_str(),   // native17: rejects by RejectReason + envelopes, the recorder's cost
-            painter::combat::engine::recorder_max_ms(), float(painter::combat::engine::recorder_bytes()) / 1048576.f);
-        painter::combat::engine::recorder_level_end();
-        painter::combat::engine::reset_reject_counters();
-    }
-    painter::combat::engine::level_ending_combat_runtime(); // native combat AI: hand its men back while the actors are valid
-    painter::combat::engine::level_destroyed(); // native combat AI: drain its jobs before anything they read is freed
     //crash_saving::save_impl = nullptr; // CLevel not available, disable crash save
     FirstPerson::Reset();
     xr_delete(g_player_hud);
@@ -1095,10 +1076,17 @@ BOOL mt_ph_commander = FALSE;
 BOOL mt_TaskManager = FALSE;
 void PainterSpawnFrameFlush(u32 current_frame); // Level_network_spawn.cpp (R11 spawn attribution)
 
+#include "PainterFlightTiming.h"
+#include "../Layers/xrRender/PainterHitMain.h"
+#include "PainterBurnHost_impl.h"
+
 void CLevel::OnFrame()
 {
 	PROF_EVENT("CLevel::OnFrame()");
 	PainterSpawnFrameFlush(Device.dwFrame);
+	painter_hit_main::flush_volley(Device.dwFrame);
+    painter_flight_perf::flush(Device.dwFrame);
+    painter_burn_host::frame();
 
     // demonized: update wallmarks before rendering
     ::Render->update_Wallmarks();
@@ -1167,14 +1155,6 @@ void CLevel::OnFrame()
 			Device.seqParallel.push_back(xr_make_delegate(m_map_manager, &CMapManager::Update));
 		else
 			MapManager().Update();
-
-		// Native combat AI (painter_ai/CombatContract.h, THREAD MODEL): capture and publish on the AI thread right after
-		// the scheduler, serialized with every Think and agent manager pass; directly here when the scheduler runs on
-		// this thread. Nothing runs until a tick is registered.
-		if (mt_Scheduler)
-			Device.seqParallel.push_back(xr_make_delegate(&painter::combat::engine::frame_task(), &painter::combat::engine::FrameTask::run));
-		else
-			painter::combat::engine::frame_task().run();
 
         if (!mt_TaskManager && Device.dwPrecacheFrame == 0)
             GameTaskManager().UpdateTasks();

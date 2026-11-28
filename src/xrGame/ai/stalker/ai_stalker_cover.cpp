@@ -25,7 +25,6 @@
 #include "../../script_game_object.h"
 #include "../../stalker_decision_space.h"
 #include "../../weapon.h"
-#include "../../painter_ai/EngineCombatAdapter.h"
 
 extern const float MIN_SUITABLE_ENEMY_DISTANCE = 3.f;
 
@@ -336,7 +335,6 @@ const CCoverPoint* CAI_Stalker::best_cover(const Fvector& position_to_cover_from
 
 void CAI_Stalker::on_restrictions_change()
 {
-	painter::combat::engine::restrictions_changed(*this);
 	inherited::on_restrictions_change();
 	m_best_cover_actual = false;
 #ifdef _DEBUG

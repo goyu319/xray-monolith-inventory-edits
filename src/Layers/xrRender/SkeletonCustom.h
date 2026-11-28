@@ -37,6 +37,7 @@ class IRenderable;
 #ifdef USE_DX11
 struct PainterBloodInstance;
 struct PainterRemovalGpu;
+struct PainterBurnActorBinding;
 struct PainterSkinOwnershipGpu;
 struct PainterWallmarkOwnershipGpu;
 struct PainterWallmarkTear; // maskdecal
@@ -323,6 +324,8 @@ protected:
 	struct RuntimeGeometryPacket* m_runtime_geometry = nullptr;
 	struct RuntimeGeometryPrepared* m_prepared_runtime_geometry = nullptr;
 	u64 m_render_geometry_generation = 0;
+    u64 m_flight_detail_swaps = 0;
+    bool m_flight_first_draw = false;
     std::shared_ptr<const painter_skin_proxy::Source> m_original_skin_proxy_source;
 	xr_vector<IRenderVisual*> m_geometry_original_children;
 	xr_vector<IRenderVisual*> m_geometry_original_invisible;
@@ -385,6 +388,19 @@ public:
     std::shared_ptr<PainterBloodInstance> m_blood_cells;
     bool QueueBloodCells(intrusive_ptr<CSkeletonWallmark>);
     void RefreshBloodCells();
+#if RENDER==R_R4
+    std::shared_ptr<PainterBurnActorBinding> m_burn_binding;
+    void PainterBurnRefresh();
+    std::shared_ptr<const painter_burn::SourceFaces> LL_PainterBurnStageSource() const override;
+    int LL_TryBurnPublication() override;
+    void LL_EndBurnPublication() override;
+    void LL_PainterBurnSplitOwner(u64,u64,u64,u64,u64,std::shared_ptr<const painter_burn::SourceFaces>) override;
+    void LL_PainterBurnOwner(u64,u64,u64,std::shared_ptr<const painter_burn::SourceFaces>) override;
+    std::vector<unsigned char> LL_PainterBurnMaterialRoles() const override;
+    bool HasPainterBurnBinding()const{return bool(m_burn_binding);}
+    ID3D11PixelShader* PainterBurnDraw(const CSkeletonX*,unsigned);
+    bool PainterBurnNeedsFullWitness(const CSkeletonX*,const Shader*) const;
+#endif
     void RestoreBloodMaterials();
     void ClearBloodCells();
 #endif
@@ -602,6 +618,10 @@ public:
 	bool LL_InstallGeometryVariant(IRenderVisual*& staged) override;
 	void LL_ClearGeometryVariant() override;
 	u64 LL_RenderGeometryGeneration() const override { return m_render_geometry_generation; }
+    bool LL_FlightPreviewAllowed() const override;
+    bool FlightDrawPending() const { return m_flight_first_draw; }
+    void RecordFlightDraw();
+    u64 LL_SurfaceGeometryGeneration() const override { return m_render_geometry_generation + m_flight_detail_swaps; }
 	bool LL_InstallRuntimeGeometry(const RuntimeSkinUpdate& update, u64 current_owner_cookie) override;
 	bool LL_PrepareRuntimeGeometry(const RuntimeSkinUpdate& update, u64 current_owner_cookie) override;
 	bool LL_PrepareRuntimeGeometryWithDonor(const RuntimeSkinUpdate& update, u64 current_owner_cookie,
@@ -614,7 +634,7 @@ public:
 	void LL_ClearRuntimeGeometry() override;
 	IRuntimeGeometryStage* LL_StageRuntimeGeometry(const RuntimeSkinUpdate& header,
 		const std::shared_ptr<const gfy_packed::Mesh>& packed, LPCSTR cavity_shader, LPCSTR cavity_texture,
-		const xr_vector<shared_str>* tissue_textures, u64 current_owner_cookie, int& outcome) override;
+		const xr_vector<shared_str>* tissue_textures, u64 current_owner_cookie, int& outcome, std::shared_ptr<const painter_burn::SourceFaces> burnSource={}) override;
 	bool LL_InstallStagedRuntimeGeometry(IRuntimeGeometryStage* stage, const RuntimeSkinUpdate& header,
 		u64 current_owner_cookie) override;
 	bool LL_PrepareStagedRuntimeGeometry(IRuntimeGeometryStage* stage, const RuntimeSkinUpdate& header,

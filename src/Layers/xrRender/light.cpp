@@ -1,5 +1,8 @@
 #include "StdAfx.h"
 #include "light.h"
+#if RENDER==R_R4
+#include "PainterFireLocalLights.h"
+#endif
 
 #include "QueryHelper.h"
 #include "../../xrEngine/IGame_Level.h"
@@ -17,6 +20,8 @@ light::light()
 	flags.bVolumetric = false;
 	flags.bHudMode = false;
 	flags.bOccq = true;
+	flags.bFireSource = false;
+	flags.bFireDetailed = false;
 
 	position.set(0, -1000, 0);
 	direction.set(0, -1, 0);
@@ -527,6 +532,9 @@ void light::optimize_smap_size()
 	int _epsilon				= iCeil	(float(_size)*0.01f);
 	int _diff					= _abs	(int(_size)-int(_cached_size));
 	X.S.size					= (_diff>=_epsilon)?_size:_cached_size;
+#if RENDER==R_R4
+	if (m_parent && m_parent->flags.bFireSource) X.S.size = _min(X.S.size, u32(m_parent->flags.bFireDetailed ? PainterFireLighting::fineFacePixels : PainterFireLighting::facePixels));
+#endif
 }
 
 void light::export_()
@@ -576,6 +584,7 @@ void light::export_()
 					L->set_volumetric_quality(m_volumetric_quality);
 					L->set_volumetric_intensity(m_volumetric_intensity);
 					L->set_volumetric_distance(m_volumetric_distance);
+					if (flags.bFireSource) L->flags.bVolumetric = fire_beam > 0.f; // firebeams: a fire's shafts follow the fire menu, not SSS's switch
 					L->set_ignore_object(ignore_object);
 					for (int f=0; f<6; f++) L->set_decor_object(decor_object[f],f);
 					L->set_occq_mode(flags.bOccq);

@@ -49,6 +49,7 @@ void RequestClonePrograms(const ref_shader& shader);
 // R62: while the loading screen is up (precache frames, the press-a-key wait) every queued pair and program is compiled
 // in one call, and the channel programs a first wound needs are queued at the first call after a clear: the 2 s cold
 // compile of painter_channel happens behind the loading screen instead of in the frame of the first wound.
+void WarmLevelInteriors();
 unsigned Warm(unsigned budget);
 unsigned Pending();
 // Drop every handle. rewarm: queue the dropped keys again (device reset).

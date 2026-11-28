@@ -2,17 +2,19 @@
 #ifdef USE_DX11
 // Main-thread-only immutable material cloning. No global shader-cache entry or
 // source visual is modified. Caller owns the returned handle and mask textures.
+#include "PainterBodyTess.h"
 #include "ResourceManager.h"
 #include "PainterSoftShader.h"
 #include "PainterRemovalPrograms.h"
 #include "PainterMaskPass.h" // maskpass: the shadow passes and the alpha-to-coverage pre-pass try the volume programs too
 #include "PainterBloodOwner.h" // shaderslim: PainterBloodDecalControls (the blood-capable volume programs' live decal controls)
 #include "PainterBloodPrograms.h" // bloodfix: the warm blood aliases of the plain surface programs
+#include "WoundPassLayouts.h"
 namespace PainterRemovalMaterial {
-struct ProgramPair {xr_string vertex,pixel;int sample=-1;bool glass=false,forwardModel=false;};
+struct ProgramPair {xr_string vertex,pixel;int sample=-1;bool glass=false,forwardModel=false; painter_body_tess::Result stages=painter_body_tess::Result::Plain;};
+inline bool programNames(const xr_string& vertex,const xr_string& pixel,ProgramPair& pair);
 inline bool programPair(const SPass& pass,ProgramPair& pair){
     if(!pass.vs||!pass.ps||!pass.vs->vs||!pass.ps->ps||pass.vs->skinning!=4)return false;
-    if((pass.gs&&pass.gs->gs)||(pass.hs&&pass.hs->sh)||(pass.ds&&pass.ds->sh)||(pass.cs&&pass.cs->sh))return false;
     xr_string vertex=*pass.vs->cName,pixel=*pass.ps->cName;
     if(vertex.size()<2||vertex.substr(vertex.size()-2)!="_4")return false;
     vertex.resize(vertex.size()-2);
@@ -20,6 +22,15 @@ inline bool programPair(const SPass& pass,ProgramPair& pair){
     if(pixel.size()>2&&pixel[pixel.size()-2]=='_'&&pixel.back()>='0'&&pixel.back()<='7'){
         pair.sample=pixel.back()-'0';pixel.resize(pixel.size()-2);
     }
+    std::string nv=vertex.c_str(),np=pixel.c_str();
+    pair.stages=painter_body_tess::fromPass(pass,nv,np);
+    if(pair.stages==painter_body_tess::Result::Unsupported)return false;
+    vertex=nv.c_str();pixel=np.c_str();
+    return programNames(vertex,pixel,pair);
+}
+// The same from a recipe's two names alone (no skinning / sample suffix): the clone's programs for it. sample and stages are
+// the caller's. Body burning asks with the names of a model's own passes, before the model is bound (RuntimeShaderCache).
+inline bool programNames(const xr_string& vertex,const xr_string& pixel,ProgramPair& pair){
     pair.glass=vertex=="ssfx_glass"&&pixel=="ssfx_glass";
     pair.forwardModel=vertex=="model_def_lq"&&pixel=="model_def_lq";
     const bool shadow=vertex=="shadow_direct_model",alphaShadow=vertex=="shadow_direct_model_aref";
@@ -50,6 +61,12 @@ inline bool canClone(const ref_shader& source){
 // blood draws them with the blood layer off (clone), a bloodied one with its blood (PainterBloodBake::clone rebinds the same
 // programs) - one compile instead of a plain and a blood twin. Shadow / alpha-to-coverage passes carry no blood: plain names.
 struct VolumeNames {xr_string vertexA,dentA,pixelA,vertexB,dentB,pixelB;};
+inline bool wallBoundsShaders() {
+    static const bool present = FS.exist("$game_shaders$", "r3\\painter_wall_bounds_model.vs") &&
+        FS.exist("$game_shaders$", "r3\\painter_wall_bounds_dent_model.vs") &&
+        FS.exist("$game_shaders$", "r3\\painter_wall_cull.h");
+    return present;
+}
 inline VolumeNames volumeNames(const ProgramPair& pair,bool withTear,const char* job){
     const bool shadowPass=pair.vertex.find("painter_mask_shadow_direct_model")==0,atocPass=pair.pixel.find("_atoc_")!=xr_string::npos;
     const bool deferred=!shadowPass&&!atocPass;
@@ -60,11 +77,15 @@ inline VolumeNames volumeNames(const ProgramPair& pair,bool withTear,const char*
         if(deferred){names.vertexA="painter_blood_"+names.vertexA;names.dentA="painter_blood_"+names.dentA;names.pixelA="painter_blood_"+names.pixelA;}
     }
     names.vertexB=shadowPass?"painter_vmi_shadow_model":"painter_vmi_model";names.dentB=shadowPass?"painter_vmid_shadow_model":"painter_vmid_model";
-    names.pixelB=xr_string(deferred?"painter_blood_painter_vmi_":(shadowPass?"painter_vmi_shadow_":"painter_vmi_atoc_"))+job;
+    if (deferred && !xr_strcmp(job, "wall") && wallBoundsShaders()) {
+        names.vertexB = "painter_wall_bounds_model";
+        names.dentB = "painter_wall_bounds_dent_model";
+    }
+    const char* interiorJob = shadowPass && !xr_strcmp(job,"piece") ? "wall" : job;
+    names.pixelB=xr_string(deferred?"painter_blood_painter_vmi_":(shadowPass?"painter_vmi_shadow_":"painter_vmi_atoc_"))+interiorJob;
     return names;
 }
-template<class Request> inline void clonePrograms(const SPass& pass,int mode,Request&& request){
-    ProgramPair pair;if(!programPair(pass,pair))return;
+template<class Request> inline void clonePairPrograms(const ProgramPair& pair,int mode,Request&& request){
     request(pair.vertex,pair.pixel,pair.sample);request(xr_string("painter_maskd_")+pair.vertex.substr(13),pair.pixel,pair.sample);
     if(mode<=0||pair.sample>=0||pair.glass||pair.forwardModel||!PainterMaskPass::volumeEligible(pair.vertex,pair.pixel))return;
     for(const char* job:{"wall","piece","tear"}){
@@ -74,6 +95,9 @@ template<class Request> inline void clonePrograms(const SPass& pass,int mode,Req
         if(withTear){request(names.vertexA,names.pixelA,-1);request(names.dentA,names.pixelA,-1);}
         request(names.vertexB,names.pixelB,-1);request(names.dentB,names.pixelB,-1);
     }
+}
+template<class Request> inline void clonePrograms(const SPass& pass,int mode,Request&& request){
+    ProgramPair pair;if(programPair(pass,pair))clonePairPrograms(pair,mode,request);
 }
 // shaderslim: the blood layer's constants of a blood-capable pass on a body without baked blood: off (painter_blood_cells.h reads
 // nothing while painter_blood_clock.w is 0; painter_blood_target 0 = no clamp)
@@ -134,6 +158,7 @@ inline bool clone(CResourceManager& resources,const ref_shader& source,const ref
                 Engine.External.SetSkinningMode(4);::Render->m_MSAASample=pair.sample;
                 SPass pass;pass.state=original->state;pass.C=original->C;
                 pass.gs=original->gs;pass.hs=original->hs;pass.ds=original->ds;pass.cs=original->cs;
+                painter_body_tess::triangleStages(pass,resources,pair.stages);
                 // bloodfix: a plain surface pass is created as its blood alias when the pair is warm (PainterBloodPrograms; the
                 // rule of PainterBloodBake::clone: no shadow pass, no pre-pass); else the plain pair, as before
                 bool aliased=false;
@@ -143,36 +168,63 @@ inline bool clone(CResourceManager& resources,const ref_shader& source,const ref
                 if(dented&&(!pass.vs||!pass.vs->vs)){Msg("! [painter_mask_only] dent_program_refused vs=%s",vertexName.c_str());dented=false;
                     vertexName=vertexPlain;PainterSoftShaderGuard soft;pass.vs=resources._CreateVS(vertexName.c_str());}
                 if(!pass.vs||!pass.ps||!pass.vs->vs||!pass.ps->ps){refusal="mask_program_creation";return false;}
+                using namespace PainterPassLayouts;
+                const unsigned layoutFlags = unsigned(volume) | (unsigned(withTear)<<1) |
+                    (unsigned(dented)<<2) | (unsigned(removal)<<3) | (unsigned(ownership)<<4) |
+                    (unsigned(liveOn)<<5) | (unsigned(pixelName.find("painter_blood_painter_vmi_")==0)<<6);
+                const Key layoutKey{pass.ps,pass.vs,original->constants,
+                    tissuePass?tissuePass->constants:ref_ctable(),liveOn?live->clock:nullptr,liveOn?live->target:nullptr,layoutFlags};
+                const ref_texture* supplies[]={&pages,&bits,&planes,&regions,&anatomyPages,&anatomyData,
+                    &tearParams,&tearMap,&tearBake,&dents,&slits,liveOn?&live->table:&pages};
+                if (const Layout* cached=cache().find(layoutKey)) {
+                    STextureList rebound;
+                    if (!cached->bind(*original,tissuePass,supplies,rebound,refusal)) return false;
+                    pass.constants=cached->constants;
+                    pass.T=resources._CreateTextureList(rebound);
+                    made=resources._CreatePass(pass);
+                    return true;
+                }
+                Layout learned{layoutKey,{},{}};
                 R_constant_table constants;constants.merge(&pass.ps->constants);constants.merge(&pass.vs->constants);
                 STextureList textures;
                 for(auto& c:constants.table){
-                    const ref_texture*field=nullptr;
-                    if(!xr_strcmp(*c->name,"s_painter_removal_pages"))field=&pages;
-                    if(!xr_strcmp(*c->name,"s_painter_removal_data"))field=&bits;
-                    if(!xr_strcmp(*c->name,"s_painter_skin_planes"))field=&planes;
-                    if(!xr_strcmp(*c->name,"s_painter_skin_regions"))field=&regions;
-                    if(volume&&!xr_strcmp(*c->name,"s_anatomy_pages"))field=&anatomyPages;
-                    if(volume&&!xr_strcmp(*c->name,"s_anatomy_data"))field=&anatomyData;
-                    if(withTear&&!xr_strcmp(*c->name,"s_tear_params"))field=&tearParams;
-                    if(withTear&&!xr_strcmp(*c->name,"s_tear_map"))field=&tearMap;
-                    if(withTear&&!xr_strcmp(*c->name,"s_tear_bake"))field=&tearBake;
-                    if(dented&&!xr_strcmp(*c->name,"s_painter_dents"))field=&dents; // melee
-                    if(!xr_strcmp(*c->name,"s_painter_slits"))field=&slits; // melee: the value-3 exterior tests (painter_slit.h)
+                    Input sourceInput=Input::Original;
+                    if(!xr_strcmp(*c->name,"s_painter_removal_pages") || !xr_strcmp(*c->name,"s_painter_wall_cull_pages"))sourceInput=Input::Pages;
+                    if(!xr_strcmp(*c->name,"s_painter_removal_data"))sourceInput=Input::Bits;
+                    if(!xr_strcmp(*c->name,"s_painter_skin_planes"))sourceInput=Input::Planes;
+                    if(!xr_strcmp(*c->name,"s_painter_skin_regions"))sourceInput=Input::Regions;
+                    if(volume&&!xr_strcmp(*c->name,"s_anatomy_pages"))sourceInput=Input::AnatomyPages;
+                    if(volume&&!xr_strcmp(*c->name,"s_anatomy_data"))sourceInput=Input::AnatomyData;
+                    if(withTear&&!xr_strcmp(*c->name,"s_tear_params"))sourceInput=Input::TearParams;
+                    if(withTear&&!xr_strcmp(*c->name,"s_tear_map"))sourceInput=Input::TearMap;
+                    if(withTear&&!xr_strcmp(*c->name,"s_tear_bake"))sourceInput=Input::TearBake;
+                    if(dented&&!xr_strcmp(*c->name,"s_painter_dents"))sourceInput=Input::Dents; // melee
+                    if(!xr_strcmp(*c->name,"s_painter_slits"))sourceInput=Input::Slits; // melee: the value-3 exterior tests (painter_slit.h)
                     // a blood-capable program before any blood is baked on the body: the layer is off (bloodOff), its three
                     // textures only have to be bound (never read); PainterBloodBake::clone binds the body's own when blood lands
-                    if(!xr_strcmp(*c->name,"s_painter_blood_pages")||!xr_strcmp(*c->name,"s_painter_blood_cells")||!xr_strcmp(*c->name,"s_painter_blood_records"))field=liveOn?&live->table:&pages; // bloodfix: the body's own table when it is at hand
-                    if(field){if(c->type!=RC_dx10texture||!(*field)){refusal="mask_resource_type";return false;}textures.emplace_back(c->samp.index,*field);continue;}
+                    if(!xr_strcmp(*c->name,"s_painter_blood_pages")||!xr_strcmp(*c->name,"s_painter_blood_cells")||!xr_strcmp(*c->name,"s_painter_blood_records"))sourceInput=Input::Blood; // bloodfix: the body's own table when it is at hand
+                    if(sourceInput!=Input::Original){
+                        const auto& texture=*supplies[static_cast<unsigned>(sourceInput)];
+                        if(c->type!=RC_dx10texture||!texture){refusal="mask_resource_type";return false;}
+                        textures.emplace_back(c->samp.index,texture);
+                        learned.bindings.push_back({c->samp.index,sourceInput,0});
+                        continue;
+                    }
                     if(!xr_strcmp(*c->name,"painter_blood_clock")){if(liveOn)c->handler=live->clock;else c->handler=&bloodOff();continue;} // bloodfix
                     if(!xr_strcmp(*c->name,"painter_blood_target")){if(liveOn)c->handler=live->target;else c->handler=&bloodOff();continue;}
                     if(!xr_strcmp(*c->name,"ssfx_blood_decals")){c->handler=PainterBloodDecalControls();continue;}
                     const SPass* from=original._get();
                     auto* old=original->constants?original->constants->get(*c->name):nullptr;
                     if(!old&&volume&&tissuePass&&tissuePass->constants){from=tissuePass;old=tissuePass->constants->get(*c->name);}
-                    if(!old||old->type!=c->type){refusal="constant_contract_changed";return false;}
+                    if(!old && volume && pixelName.find("painter_blood_painter_vmi_")==0 && PainterBindInteriorViewConstant(*c))
+                        continue;
+                    if(!old||old->type!=c->type){{static int said=0;if(said<8){++said;Msg("! [painter_mask_only] the wound program %s needs the shader value '%s', which the body's own shader %s (another mod's shader files in the game?)",pixelName.c_str(),*c->name,old?"has as another type":"does not have");}}refusal="constant_contract_changed";return false;}
                     c->handler=old->handler;
                     if(c->type==RC_sampler&&c->samp.index!=old->samp.index){refusal="sampler_contract_changed";return false;}
                     if(c->type==RC_dx10texture){
-                        bool found=false;if(from->T)for(const auto& binding:*from->T)if(binding.first==old->samp.index){textures.emplace_back(c->samp.index,binding.second);found=true;break;}
+                        bool found=false;if(from->T)for(const auto& binding:*from->T)if(binding.first==old->samp.index){textures.emplace_back(c->samp.index,binding.second);
+                            learned.bindings.push_back({c->samp.index,from==original._get()?Input::Original:Input::Tissue,old->samp.index});
+                            found=true;break;}
                         if(!found){refusal="missing_original_texture";return false;}
                     }
                 }
@@ -181,7 +233,9 @@ inline bool clone(CResourceManager& resources,const ref_shader& source,const ref
                 if(volume&&(!constants.get("s_anatomy_pages")||!constants.get("s_anatomy_data"))){refusal="missing_volume_reflection";return false;}
                 if(withTear&&(!constants.get("s_tear_params")||!constants.get("s_tear_map")||!constants.get("s_tear_bake"))){refusal="missing_tear_reflection";return false;}
                 pass.constants=resources._CreateConstantTable(constants);pass.T=resources._CreateTextureList(textures);
-                made=resources._CreatePass(pass);return true;
+                made=resources._CreatePass(pass);
+                if(made){ learned.constants=pass.constants; cache().remember(std::move(learned)); }
+                return true;
             };
             const bool tearPiece=piece&&bool(tearParams)&&bool(tearMap)&&bool(tearBake); // slice 3: attempt -1 = the tear pair
             bool done=false;

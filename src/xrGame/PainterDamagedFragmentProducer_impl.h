@@ -2,7 +2,9 @@
 // Owner-barrier adapter for a completed, immutable CPU separation certificate.
 // The CPU worker owns anatomy, surface and physical-element provenance; this
 // file only maps its checked original-bone-frame payload into native objects.
+#include "PainterFlightTiming.h"
 #include "painter_voxel/PainterDamagedFragment.h"
+#include "painter_voxel/FlightGroup.h"
 #include "painter_voxel/CollisionLimits.h"
 #include "ai/stalker/ai_stalker.h"
 #include "../Include/xrRender/Kinematics.h"
@@ -168,14 +170,15 @@ inline bool submit_cpu(CAI_Stalker& source,const gfy_live::Identity& identity,
     const gfy_live::SeparationOutput& cpu,u16 original_children,
     const gfy_live::SeparationInput& continuation_input,
     const xr_vector<RuntimeSkinBone>& rig,const xr_vector<shared_str>& textures,
-    CPhysicsShell* shell,const char*& reason){
+    CPhysicsShell* shell,const char*& reason,std::shared_ptr<painter_flight::Group> flight={}){
+    painter_flight_perf::Scope flightTime("body_spawn");
     reason="separation_cpu_refused";
     auto* k=smart_cast<IKinematics*>(source.Visual());
     if(!k||!shell||cpu.no_separation||!cpu.error.empty()||
        !(cpu.stamp.owner==identity)||cpu.stamp.expected_generation!=k->LL_RenderGeometryGeneration()||
        cpu.pieces.size()<2||cpu.pieces.size()>13||rig.size()!=k->LL_BoneCount()||
        k->LL_BoneCount()>64)return false;
-    Prepared output;output.stamp=cpu.stamp;output.gore=cpu.gore;output.source_id=source.ID();
+    Prepared output;output.flight=std::move(flight);output.stamp=cpu.stamp;output.gore=cpu.gore;output.source_id=source.ID();
     output.current_owner=identity;
     output.expected_generation=cpu.stamp.expected_generation;
     output.publication_revision=cpu.stamp.revision;
@@ -203,6 +206,7 @@ inline bool submit_cpu(CAI_Stalker& source,const gfy_live::Identity& identity,
                 Msg("[painter_damaged_fragment] id=%u phase=fitted_refused part=stump reason=%s",source.ID(),producer::fitted_refusal());return false;}
         }else{
             auto& fragment=output.pieces.emplace_back();
+            if(output.flight)fragment.flight_visual=piece.flight_visual;
             fragment.ocular_remnant=piece.ocular_remnant;
             fragment.burst_chunk=piece.burst_chunk; // chunknosplash
             fragment.destroy_on_commit=piece.ocular_remnant&&cpu.gore.eye_remnants_mode==0;

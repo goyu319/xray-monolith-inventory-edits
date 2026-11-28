@@ -234,7 +234,9 @@ void CActiveRagdollController::release_joint(joint_state& state)
     // CPhysicsJoint is owned by the shell.  Clear our pointer after disabling
     // it so detach/re-attach and NetRelcase cannot issue commands to a dead
     // joint.
-    if (state.joint)
+    // ragdollswap (2026-11-25): only a joint the shell still has under its bone name is commanded; one gone from the shell
+    // (freed by a sever or a rebuild) is only forgotten
+    if (state.joint && m_shell && state.name && m_shell->get_Joint(state.name) == state.joint)
     {
         for (unsigned char axis = 0; axis < state.axes; ++axis)
             state.joint->SetForceAndVelocity(0.f, 0.f, axis);

@@ -219,9 +219,7 @@ void CAI_Stalker::g_fireParams(const CHudItem* pHudItem, Fvector& P, Fvector& D)
 	{
 	case eBodyStateStand:
 		{
-			// The measured lean eye is the firing origin while moving too.
-			// Use actual smoothed lean, never a merely requested lean target.
-			if (movement().movement_type() == eMovementTypeStand || !fis_zero(painter_lean(), EPS))
+			if (movement().movement_type() == eMovementTypeStand)
 			{
 				P = eye_matrix.c;
 				D = eye_matrix.k;
@@ -1119,8 +1117,6 @@ float CAI_Stalker::missile_throw_force()
 {
 	update_throw_params();
 	float force = m_throw_velocity.magnitude();
-	if (m_painter_throw)
-		return force; // a script-aimed arc only lands where it was aimed at exactly this speed
 
 	::luabind::functor<float> funct;
 	if (ai().script_engine().functor("_G.CAI_Stalker__GetMissileThrowForce", funct))
@@ -1167,73 +1163,15 @@ void CAI_Stalker::throw_target_impl(const Fvector& position, CObject* throw_igno
 
 void CAI_Stalker::throw_target(const Fvector& position, CObject* throw_ignore_object)
 {
-	if (m_painter_throw)
-	{
-		m_painter_throw = m_painter_throw_via_set = false; // the native AI aims again: stock arc and spread
-		m_throw_actual = false;
-	}
 	throw_target_impl(position, throw_ignore_object);
 }
 
 void CAI_Stalker::throw_target(const Fvector& position, u32 const vertex_id, CObject* throw_ignore_object)
 {
-	if (m_painter_throw)
-	{
-		m_painter_throw = m_painter_throw_via_set = false;
-		m_throw_actual = false;
-	}
 	throw_target_impl(position, throw_ignore_object);
 	compute_throw_miss(vertex_id);
 }
 
-void CAI_Stalker::painter_throw(const Fvector& target, const Fvector* via)
-{
-	throw_target_impl(target, nullptr);
-	m_painter_throw_requested = target;
-	m_painter_throw_reason = "no_target";
-	m_painter_throw = true;
-	m_painter_throw_via_set = via != nullptr;
-	if (via)
-		m_painter_throw_via = *via;
-	m_throw_actual = false;
-}
-
-// Door throw candidates: arcs from start to target, scanned by flight time, that cross the doorway plane within 45 cm of
-// the door point (the centre of the opening) at a hand-throw speed (16 m/s or less), gentlest first, as (time, velocity).
-// lateral = how far the door point lies off the vertical plane through start and target.
-static void painter_door_throw_candidates(const Fvector& start, const Fvector& door, const Fvector& target, float gravity,
-                                          xr_vector<std::pair<float, Fvector>>& out, float& lateral)
-{
-	out.clear();
-	lateral = flt_max;
-	Fvector const delta = Fvector().sub(target, start);
-	Fvector h;
-	h.set(delta.x, 0.f, delta.z);
-	float const x_target = h.magnitude();
-	if (x_target < .5f || gravity <= 0.f)
-		return;
-	h.div(x_target);
-	Fvector const to_door = Fvector().set(door.x - start.x, 0.f, door.z - start.z);
-	float const x_door = to_door.dotproduct(h);
-	lateral = _abs(to_door.x * h.z - to_door.z * h.x);
-	if (x_door < .2f || x_door > x_target - .2f) // the doorway must lie between thrower and target
-		return;
-	float const t_min = _sqrt(2.f * delta.magnitude() / gravity);
-	for (int i = 1; i <= 60; ++i)
-	{
-		float const time = t_min * (.15f + .04f * float(i));
-		float const vh = x_target / time;
-		float const vy = delta.y / time + .5f * gravity * time;
-		Fvector const velocity = Fvector().set(h.x * vh, vy, h.z * vh);
-		float const t_door = x_door / vh;
-		float const y_door = start.y + vy * t_door - .5f * gravity * t_door * t_door;
-		if (velocity.magnitude() <= 16.f && _abs(y_door - door.y) <= .45f)
-			out.push_back(std::make_pair(time, velocity));
-	}
-	std::sort(out.begin(), out.end(), [](std::pair<float, Fvector> const& a, std::pair<float, Fvector> const& b) {
-		return a.second.square_magnitude() < b.second.square_magnitude();
-	});
-}
 
 // delete this function!!!!
 bool CAI_Stalker::throw_check_error(
@@ -1334,8 +1272,6 @@ void CAI_Stalker::update_throw_params()
 	if (m_throw_velocity.magnitude() > max_distance)
 	{
 		m_throw_enabled = false;
-		if (m_painter_throw)
-			m_painter_throw_reason = "out_of_range";
 
 #ifdef DEBUG
 		m_throw_picks.clear	();
@@ -1343,87 +1279,6 @@ void CAI_Stalker::update_throw_params()
 		return;
 	}
 
-	if (m_painter_throw)
-	{
-		float const gravity = physics_world()->Gravity();
-		float time = 0.f;
-		if (m_painter_throw_via_set)
-		{
-			// released at hand height: the native 2 m release point is already at lintel height
-			m_throw_position.y = Position().y + 1.6f;
-			m_throw_enabled = false;
-			if (!pMissile)
-			{
-				m_painter_throw_reason = "no_grenade";
-				return;
-			}
-			// the target is re-aimed onto the line from the release point through the door point, as deep past the door as
-			// asked (the caller cannot see the release point, so any lateral offset clips the frame); when that arc hits
-			// something, shallower targets are tried
-			Fvector const& door = m_painter_throw_via;
-			Fvector line = Fvector().set(door.x - m_throw_position.x, 0.f, door.z - m_throw_position.z);
-			float const to_door = line.magnitude();
-			if (to_door < .3f)
-			{
-				m_painter_throw_reason = "door_behind";
-				return;
-			}
-			line.div(to_door);
-			Fvector const asked = m_painter_throw_requested;
-			float depth = Fvector().set(asked.x - door.x, 0.f, asked.z - door.z).dotproduct(line);
-			if (depth < 1.f)
-				depth = _max(1.f, Fvector().set(asked.x - door.x, 0.f, asked.z - door.z).magnitude());
-			float const depths[] = {depth, depth * .75f, depth * .5f, 1.f};
-			Fvector first_target{}, first_velocity{};
-			bool have_first = false;
-			bool any_arc = false;
-			xr_vector<std::pair<float, Fvector>> candidates;
-			for (int d = 0; d < 4; ++d)
-			{
-				if (d && depths[d] >= depths[d - 1] - .1f)
-					continue;
-				Fvector target = Fvector().mad(door, line, depths[d]);
-				target.y = asked.y;
-				m_throw_target_position = target;
-				float lateral = flt_max;
-				painter_door_throw_candidates(m_throw_position, door, target, gravity, candidates, lateral);
-				if (candidates.empty())
-					continue;
-				any_arc = true;
-				if (!have_first)
-				{
-					have_first = true;
-					first_target = target;
-					first_velocity = candidates.front().second;
-				}
-				for (u32 i = 0; i < candidates.size() && i < 8; ++i)
-				{
-					m_throw_velocity = candidates[i].second;
-					check_throw_trajectory(candidates[i].first);
-					if (m_throw_enabled)
-					{
-						m_painter_throw_reason = "ok";
-						return; // exact speed: no random spread
-					}
-				}
-			}
-			m_painter_throw_reason = any_arc ? "blocked" : "no_arc";
-			if (have_first)
-			{
-				m_throw_target_position = first_target; // a valid aim even while blocked
-				m_throw_velocity = first_velocity;
-			}
-			return;
-		}
-		else
-		{
-			time = ThrowMinVelTime(m_throw_velocity, gravity);
-			TransferenceToThrowVel(m_throw_velocity, time, gravity);
-		}
-		check_throw_trajectory(time);
-		m_painter_throw_reason = !pMissile ? "no_grenade" : (m_throw_enabled ? "ok" : "blocked");
-		return; // exact speed: no random spread
-	}
 
 	float time = ThrowMinVelTime(m_throw_velocity, physics_world()->Gravity());
 	TransferenceToThrowVel(m_throw_velocity, time, physics_world()->Gravity());
@@ -1639,84 +1494,4 @@ bool CAI_Stalker::too_far_to_kill_enemy(const Fvector& position)
 #endif
 }
 
-// Console "painter_fire_log 1": one [painter_fire] line per stalker per second while it has a selected enemy, with the
-// native fire checks the AI layer reads through painter_native_fire_flags (log-only, no behaviour change).
-int g_painter_fire_log = 0;
-
-u32 CAI_Stalker::painter_native_fire_flags()
-{
-	if (!g_Alive() || !inventory().ActiveItem())
-		return 0;
-	u32 flags = smart_cast<CWeapon*>(inventory().ActiveItem()) ? 8 : 0;
-	if (fire_make_sense())
-		flags |= 1;
-	if (can_kill_enemy())
-		flags |= 2;
-	if (can_kill_member())
-		flags |= 4;
-	return flags;
-}
-
-// The tactical target may be a different personally visible enemy from
-// native memory's selected one. Keep the native muzzle cone/material/friend
-// checks, but evaluate range and visibility for that exact target. This does
-// not alter native enemy selection or its cached firing verdict.
-u32 CAI_Stalker::painter_target_fire_flags(const CEntityAlive* target)
-{
-    if(!target||target->getDestroy()||!target->g_Alive()||!is_relation_enemy(target)||
-        !memory().visual().visible_now(target)||!g_Alive()||!smart_cast<CWeapon*>(inventory().ActiveItem()))return 0;
-    // Direct native-combat sight is not the legacy floor-gap heuristic.
-    // Keep actual weapon range, material/cone obstruction and friendly checks.
-    auto* weapon=smart_cast<CWeapon*>(inventory().ActiveItem());
-    const float maximum=weapon->GetFireDistance();
-    const float target_distance=Position().distance_to(target->Position());
-    if(!_valid(maximum)||maximum<=0||!_valid(target_distance)||target_distance>maximum)return 8u;
-    if(target==memory().enemy().selected()){
-        // Preserve the stock per-frame cone/material/friend cache. Only the
-        // direct-visible usefulness rule differs from fire_make_sense().
-        const float pick=pick_distance();
-        const bool useful=pick>=g_ai_fire_min_dist&&pick+g_ai_fire_range_extension>=target_distance;
-        return 8u|(useful?1u:0u)|(can_kill_enemy()?2u:0u)|(can_kill_member()?4u:0u);
-    }
-    Fvector position,direction;g_fireParams(nullptr,position,direction);
-    if(!_valid(position)||!_valid(direction)||direction.square_magnitude()<=EPS)return 0;
-    direction.normalize();
-    const float distance=_min(maximum,_max(50.f,position.distance_to(target->Position())+target->Radius()+1.f));
-    float yaw,pitch;direction.getHP(yaw,pitch);
-    const float cone=PI_DIV_8*.125f;
-    bool enemy=false,friend_in_cone=false;float pick=0;
-    collide::rq_results storage;
-    for(int n=0;n<5;++n){
-        Fvector ray=direction;
-        if(n)ray.setHP(yaw+(n==3?-cone:n==4?cone:0.f),pitch+(n==1?-cone:n==2?cone:0.f));
-        collide::ray_defs def(position,ray,distance,CDB::OPT_CULL,collide::rqtBoth);
-        ray_query_param result(this,memory().visual().transparency_threshold(),distance);
-        storage.r_clear();Level().ObjectSpace.RayQuery(storage,def,ray_query_callback,&result,nullptr,this);
-        if(n<3)enemy=enemy||result.m_can_kill_enemy;
-        friend_in_cone=friend_in_cone||result.m_can_kill_member;pick=_max(pick,result.m_pick_distance);
-        if(friend_in_cone)break;
-    }
-    const bool useful=pick>=g_ai_fire_min_dist&&pick+g_ai_fire_range_extension>=target_distance;
-    return 8u|(useful?1u:0u)|(enemy?2u:0u)|(friend_in_cone?4u:0u);
-}
-
-void CAI_Stalker::painter_fire_log()
-{
-	if (!g_Alive() || Device.dwTimeGlobal - m_painter_fire_logged_at < 1000)
-		return;
-	CEntityAlive const* const enemy = memory().enemy().selected();
-	if (!enemy)
-		return;
-	m_painter_fire_logged_at = Device.dwTimeGlobal;
-	u32 const flags = painter_native_fire_flags();
-	Fvector fp, fd;
-	fp.set(Position());
-	fd.set(0.f, 0.f, 1.f);
-	if (inventory().ActiveItem())
-		g_fireParams(0, fp, fd);
-	Msg("[painter_fire] t=%u id=%u name=%s enemy=%u dist=%.1f visible=%u flags=%u verdict=%u fp=%.2f,%.2f,%.2f fd=%.2f,%.2f,%.2f pick=%.1f",
-		Device.dwTimeGlobal, ID(), cName().c_str(), enemy->ID(), Position().distance_to(enemy->Position()),
-		unsigned(memory().visual().visible_right_now(enemy)), flags, unsigned((flags & 3) == 3 && !(flags & 4)),
-		VPUSH(fp), VPUSH(fd), pick_distance());
-}
 

@@ -216,6 +216,7 @@ BOOL R_constant_table::parseConstants(ID3DShaderReflectionConstantBuffer* pTable
 			L.index = r_index;
 			L.cls = r_type;
 			L.size = VarDesc.Size;
+			C->unusedInAllStages = !(VarDesc.uFlags & D3D_SVF_USED);
 			table.push_back(C);
 		}
 		else
@@ -229,6 +230,7 @@ BOOL R_constant_table::parseConstants(ID3DShaderReflectionConstantBuffer* pTable
 			L.index = r_index;
 			L.cls = r_type;
 			L.size = VarDesc.Size;
+			C->unusedInAllStages &= !(VarDesc.uFlags & D3D_SVF_USED);
 		}
 	}
 	return TRUE;
@@ -387,6 +389,9 @@ BOOL R_constant_table::parse(void* _desc, u32 destination)
 			pTable = pReflection->GetConstantBufferByIndex(iBuf);
 			if (pTable)
 			{
+				D3D_SHADER_BUFFER_DESC painterListed;
+				if (FAILED(pTable->GetDesc(&painterListed)) || !painterListed.Size)
+					continue;
 				//	Encode buffer index into destination
 				u32 updatedDest = destination;
 				updatedDest |= iBuf << dest_to_shift_value(destination); /*((destination&RC_dest_pixel)

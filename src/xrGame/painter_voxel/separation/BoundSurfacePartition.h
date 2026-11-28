@@ -77,7 +77,7 @@ struct Stats {
 struct Result {std::map<std::uint32_t,core::JoinResult> meshes;Stats stats;bool deferKeep{},deferred{};std::uint32_t deferredOwner{};
  void keep(std::uint32_t owner,const core::JoinedTriangle&t){if(deferKeep){deferred=true;deferredOwner=owner;}else meshes[owner].triangles.push_back(t);}};
 inline core::JoinedVertex interpolate(const core::JoinedTriangle&t,const std::array<double,3>&b);
-struct Piece {std::map<std::uint16_t,std::uint16_t> constrained_anchors;std::uint32_t volume_component{};std::size_t triangles{};gfy_packed::Mesh mesh;};
+struct Piece {std::map<std::uint16_t,std::uint16_t> constrained_anchors;std::uint32_t volume_component{};std::size_t triangles{};gfy_packed::Mesh mesh;std::shared_ptr<const Grid::FloorTiles> grenadeFloor;};
 struct Packed {std::vector<Piece> pieces;Stats stats;bool garment_roots_validated{};};
 inline double area(const core::JoinedTriangle&t){return length(cross(t.v[1].p-t.v[0].p,t.v[2].p-t.v[0].p))*.5;}
 // An anchor corner that an earlier partition cut on a cell plane returns from its packed float32 row (and the

@@ -8,12 +8,13 @@ namespace body_hit_outcomes {
 struct Tag {std::uint64_t receipt{};std::uint32_t event{},id{65535},bullet{},bone{65535},alive{};};
 using Sink=void(*)(const char*) noexcept;
 inline std::atomic<Sink> sink{nullptr};
+inline int log_on=0; // hitlogquiet: console painter_hit_log 1 writes these lines (off by default: 3+ lines a bullet)
 inline std::atomic<std::uint64_t> next{1};
 inline thread_local Tag current{};
 inline void set_sink(Sink s)noexcept{sink.store(s,std::memory_order_relaxed);}
 inline void report(const char*stage,const char*why,std::uint64_t cookie=0,std::uint64_t sequence=0,Tag tag=current,
  std::uint64_t revision=0,std::size_t pending=0,unsigned inflight=0,std::size_t solid=0,std::size_t mask=0,std::size_t sever=0,unsigned miss=0)noexcept{
- const auto out=sink.load(std::memory_order_relaxed);if(!out)return;
+ if(!log_on)return;const auto out=sink.load(std::memory_order_relaxed);if(!out)return;
  char reason[241]{};if(!why)why="none";unsigned n=0;for(;n<240&&why[n];++n){const unsigned char c=static_cast<unsigned char>(why[n]);reason[n]=(c>=33&&c<=126&&c!='"'&&c!='\\')?char(c):'_';}
  char line[896];std::snprintf(line,sizeof line,"[painter_body_hit] receipt=%llu event=%u id=%u bullet=%u bone=%u alive=%u cookie=%llu sequence=%llu revision=%llu stage=%s reason=%s pending=%llu inflight=%u solid_cells=%llu mask_cells=%llu sever_cells=%llu miss=%u",
  (unsigned long long)tag.receipt,tag.event,tag.id,tag.bullet,tag.bone,tag.alive,(unsigned long long)cookie,(unsigned long long)sequence,(unsigned long long)revision,stage,reason,

@@ -9,7 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
-#include <d3dcompiler.h>
+#include "PainterFixedBloodPrograms.h"
 
 namespace BloodGpuProjection
 {
@@ -866,17 +866,11 @@ struct Backend::State
     HRESULT Initialize(ID3D11Device* newDevice) noexcept
     {
         device = newDevice;
-        const char* entries[] = {"project", "scan", "compact", "skin", "scan_render", "skin_batch", "relocate"};
-        for (unsigned i = 0; i < shaders.size(); ++i)
-        {
-            ID3DBlob *bytecode = nullptr, *errors = nullptr;
-            HRESULT hr = D3DCompile(ShaderSource, sizeof(ShaderSource) - 1, "blood_gpu_projection", nullptr, nullptr,
-                entries[i], "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS |
-                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bytecode, &errors);
-            if (FAILED(hr) && errors) Msg("! Blood projection %s shader: %.240s", entries[i], static_cast<const char*>(errors->GetBufferPointer()));
-            Release(errors);
-            if (SUCCEEDED(hr)) hr = device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shaders[i]);
-            Release(bytecode);
+        using namespace PainterFixedBloodPrograms;
+        const Program programs[] = {Project, Scan, Compact, ProjectSkin, ScanRender, SkinBatch, Relocate};
+        static_assert(sizeof(programs)/sizeof(programs[0]) == std::tuple_size<decltype(shaders)>::value, "projection programs");
+        for (unsigned i = 0; i < shaders.size(); ++i) {
+            const HRESULT hr = acquire(device, programs[i], &shaders[i]);
             if (FAILED(hr)) return hr;
         }
         constexpr UINT sr = D3D11_BIND_SHADER_RESOURCE, ua = D3D11_BIND_UNORDERED_ACCESS;

@@ -2,7 +2,6 @@
 #include "GameObject.h"
 #include "PainterKillcamAim.h"
 #include "painter_voxel/PainterExplosions.h"
-#include "painter_ai/EngineCombatAdapter.h"
 //#include "../Include/xrRender/RenderVisual.h"
 #include "../Include/xrRender/RenderVisual.h"
 #include "../xrphysics/PhysicsShell.h"
@@ -118,7 +117,6 @@ void CGameObject::net_Destroy()
 {
     painter_killcam_aim::retire(*this);
     painter_explosions::retire(*this);
-	painter::combat::engine::object_destroyed(*this);
 #ifdef DEBUG
 	if (psAI_Flags.test(aiDestroy))
 		Msg					("Destroying client object [%d][%s][%x]",ID(),*cName(),this);
@@ -174,6 +172,28 @@ void CGameObject::net_Destroy()
 
 	xr_delete(m_lua_game_object);
 	m_spawned = false;
+}
+
+int painter_fire_burn_trail = 1;
+static void painter_fire_burn_hit(CGameObject& victim, const SHit& h)
+{
+	if (painter_fire_burn_trail <= 0) return;
+	if (h.hit_type != ALife::eHitTypeBurn && h.hit_type != ALife::eHitTypeLightBurn) return;
+	if (!::Render || !(h.power > 0.f) || h.whoID == victim.ID()) return;
+	if (h.who && strstr(h.who->cNameSect().c_str(), "campfire")) return;
+	const Fvector p = victim.Position();
+	if (!_valid(p)) return;
+	static Fvector last[32];
+	static u32 lastAt[32] = {};
+	static u32 next = 0;
+	const u32 now = Device.dwTimeGlobal;
+	for (u32 k = 0; k < 32; ++k)
+		if (lastAt[k] && now - lastAt[k] < 1500 && last[k].distance_to_sqr(p) < 2.f * 2.f) return;
+	last[next] = p;
+	lastAt[next] = now ? now : 1;
+	next = (next + 1) % 32;
+	if (painter_fire_burn_trail >= 2) ::Render->PainterFireIgnite(p, 1.f, 6.f);
+	else ::Render->PainterFireLight(p); // a small flame held there: catches only what can burn
 }
 
 void CGameObject::OnEvent(NET_Packet& P, u16 type)
@@ -239,8 +259,10 @@ void CGameObject::OnEvent(NET_Packet& P, u16 type)
 			SetHitInfo(Hitter, Weapon, HDS.bone(), HDS.p_in_bone_space, HDS.dir);
 			{
 				painter_hit_main::Hit hit_main("received", ID()); // triggerhitch: main-thread time of one received hit
+				if (HDS.ammo.pellet_count > 1 && HDS.ammo.valid()) hit_main.mark_multi_pellet(Device.dwFrame);
 				Hit(&HDS);
 			}
+			painter_fire_burn_hit(*this, HDS); // (Painter fire: burn damage sets the place alight)
 			//---------------------------------------------------------------------------
 			if (GameID() != eGameIDSingle)
 			{

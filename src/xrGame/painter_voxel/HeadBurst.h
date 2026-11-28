@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <numeric>
 #include <set>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "HeadBurstRecord.h"
@@ -27,7 +29,7 @@ inline double strength(const Round&r){const int c=roundClass(r);
 struct Plan {
  Vec site[head_burst_record::maxSites];unsigned group[head_burst_record::maxSites]{};unsigned S=0,nNear=0,groups=1;Vec B{};
  double rf=0,sigma=0,Rcut=0,A1=0,L1=1,A2=0,L2=1,ripR=.0045,dscale=1;std::uint32_t seed=0;Vec exit{},entry{};bool cap=false;
- bool body=false;}; // body: a blast's body burst (bodyPlan; entry = the explosion, exit = the point it hit hardest)
+ bool body=false, bulletBodySurface=false, ballisticBone=false;}; // body: a blast's body burst (bodyPlan; entry = the explosion, exit = the point it hit hardest)
 // The bullet's way out of the head along d from P0 (last tissue before 2 cm of air, at most 20 cm on)
 template<class Tissue>
 inline Vec exitPoint(const Vec&P0,const Vec&d,const Tissue&tissueAt){double last=0;
@@ -155,14 +157,25 @@ inline Plan bodyPlan(const Vec&E,const Vec&B0,double sigma,std::uint64_t seed,co
  p.Rcut=std::min(2.6*p.rf+2*(p.A1+p.A2),.6); // provisional (the labelling sets the exact cut); 0.6 m bounds the labelled box
  return p;}
 
+// bonefix2 (2026-11-20): the bone switches (consoles painter_bone_resist 1/0 and painter_bone_strength 0..100, set by
+// LiveDamageWorker.cpp), read by a crater (BulletBurst.h keepResistingBone) and by a body burst's record: its bone band (header
+// word 51, site 1's unused w) = strength x 0.8 x the blast radius; a piece holding the far part keeps the bone of the fragments'
+// region within it (shaders/r3/painter_vmask_head.h), so ribs, the spine and bone ends stand out of the torn body. A head burst
+// (not body) carries none.
+inline std::atomic<int>& boneResistOn(){static std::atomic<int> v{1};return v;}
+inline std::atomic<int>& boneStrength(){static std::atomic<int> v{70};return v;}
+inline double boneBand(const Plan&p){if(!p.ballisticBone||!boneResistOn().load(std::memory_order_relaxed))return 0;
+ const double s=std::clamp(double(boneStrength().load(std::memory_order_relaxed))/100.,0.,.95);return s*.8*p.rf;}
 // the record of a plan (HeadBurstRecord.h layout)
 inline std::shared_ptr<gfy_packed::TearBlock> record(const Plan&p,double pitch){
  auto B=std::make_shared<gfy_packed::TearBlock>();B->params.assign(4*51,0u);B->params[29]=head_burst_record::MAGIC;
  {const float H=-1.f;std::memcpy(&B->params[7],&H,4);} // a decide-once reader (MaskPieces3 Region) finds no region and no section
  B->header.assign(104,0u);auto F=[&](int i,double v){const float f=float(v);std::memcpy(&B->header[std::size_t(i)],&f,4);};
  F(0,p.B.x);F(1,p.B.y);F(2,p.B.z);F(3,p.Rcut);F(4,p.A1);F(5,1./p.L1);F(6,p.A2);F(7,1./p.L2);F(8,p.ripR);F(9,p.dscale);
- B->header[10]=p.seed;B->header[11]=p.S;B->header[13]=p.groups;B->header[14]=p.body?2u:1u;B->header[15]=0u;
+ B->header[10]=p.seed;B->header[11]=p.S;B->header[13]=p.groups;B->header[14]=p.body?2u:1u;B->header[15]=0u;B->header[27]=p.bulletBodySurface?0x424c4431u:0u;
  for(unsigned i=0;i<p.S;++i){F(44+4*int(i),p.site[i].x);F(45+4*int(i),p.site[i].y);F(46+4*int(i),p.site[i].z);B->header[24+i/8]|=(p.group[i]&15u)<<(4*(i%8));}
+ if(p.ballisticBone&&boneBand(p)>0.)B->header[55]=0x425331u;
+ F(51,boneBand(p)); // bonefix2: the bone band (site 1's w: no reader takes it as a site coordinate; the atlas writes 19, 27, 31)
  B->map.assign(20,0.f);B->map_dim[0]=B->map_dim[1]=1;B->map_pitch=1;B->bake.assign(1,255);B->bake_dim[0]=B->bake_dim[1]=B->bake_dim[2]=1;B->bake_pitch=1;
  for(int k=0;k<3;++k){B->centre[k]=p.B[k];B->normal[k]=k==1;B->u[k]=k==0;B->w[k]=k==2;}
  B->reach=p.Rcut;B->pitch=pitch;B->seed=p.seed;B->n=0;
@@ -171,7 +184,8 @@ inline std::shared_ptr<gfy_packed::TearBlock> record(const Plan&p,double pitch){
 // ---- the burst on the grid
 struct Burst {bool done=false;std::size_t cells=0,mask=0,edgeCells=0,erased=0,labelled=0,tiles=0,samples=0;std::array<std::size_t,64> bySlot{};
  std::set<Cell> dirty;std::vector<ResolvedTunnel> records;const char*refusal=nullptr;double ms=0,labelMs=0,eraseMs=0,repairMs=0;
- std::vector<std::size_t> groupCells;std::size_t mixedTiles=0,crumbs=0,crumbCells=0,preCells=0;double crumbMs=0,preMs=0;Plan plan;};
+ std::vector<std::size_t> groupCells;std::size_t mixedTiles=0,crumbs=0,crumbCells=0,preCells=0;double crumbMs=0,preMs=0;Plan plan;
+ std::size_t boneKept=0,boneShell=0;double boneMs=0;}; // bonefix2: bone the body keeps, near cells cut around it
 // the lowest set bit of w != 0 (de Bruijn)
 inline unsigned ctz64(std::uint64_t w){static const unsigned char tab[64]={0,1,56,2,57,49,28,3,61,58,42,50,38,29,17,4,62,47,59,36,45,43,51,22,53,39,33,30,24,18,12,5,
  63,55,48,27,60,41,37,16,46,35,44,21,52,32,23,11,54,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6};return tab[((w&(~w+1))*0x03f79d71b4ca8b09ull)>>58];}
@@ -336,6 +350,77 @@ inline Burst burst(Grid&g,const std::vector<SeverSegment>&segments,SeverState&st
     if(!big){for(const Cell&c:comp){lab[idx(c.x,c.y,c.z)]=253;eraseBy[0].push_back(c);}++out.crumbs;out.crumbCells+=comp.size();}
     else{for(const Cell&c:comp)seen[idx(c.x,c.y,c.z)]=2;for(const Cell&c:stack)seen[idx(c.x,c.y,c.z)]=2;}}}
   out.crumbMs=core::ms(c0);}
+ {const float bandF=[&]{float f;std::memcpy(&f,&block->header[51],4);return f;}();
+  if((p.ballisticBone||(p.body&&table&&!perCell))&&bandF>0.f&&bandF<1.f){const auto kb0=core::Clock::now();const double band=double(bandF);
+   const std::uint32_t vs=fn.seed^0xB04Eu;const double vk=3.0/band;
+   std::unordered_set<Cell,core::CellHash> keep,shell,broken;TissueLookup tissue{g,table};core::TileCache cache(g);
+   auto kIdx=[&](int x,int y,int z){return (std::size_t(z-tlo[2])*KY+std::size_t(y-tlo[1]))*KX+std::size_t(x-tlo[0]);};
+   auto protect=[&](const Cell&c){
+    if(p.ballisticBone){
+     if(g.bonePreviouslyHit(c)){broken.insert(c);return;}
+     g.noteBoneStrike(c);
+    }
+    keep.insert(c);
+   };
+   std::size_t looked=0;
+   for(const Cell&t:boxTiles){const unsigned tc=tileClass(t.x,t.y,t.z);if(tc==0u||tc==254u)continue;
+    if(tc<254u){bool far=true; // a tile of one near group: skipped when every corner lies farther than the band from any other group
+     for(int c=0;c<8&&far;++c){const int x=t.x+(c&1),y=t.y+((c>>1)&1),z=t.z+(c>>2);
+      if(x<tlo[0]||y<tlo[1]||z<tlo[2]||x>thi[0]+1||y>thi[1]+1||z>thi[2]+1){far=false;break;}far=kM[kIdx(x,y,z)]>band+M8;}
+     if(far)continue;}
+    const auto*tile=cache.find(t);
+    std::array<std::uint64_t,8> bone{};
+    if(table){
+     const auto it=table->find(t);
+     if(it==table->end())continue;
+     for(unsigned w=0;w<8;++w)bone[w]=it->second.bone[w]&it->second.solid[w];
+    }else{
+     // A continued piece can have no station table. Only its own, presently
+     // solid skeletal material participates in the same partition.
+     for(unsigned i=0;i<512;++i){
+      const Cell c{t.x*8+int(i>>6),t.y*8+int((i>>3)&7),t.z*8+int(i&7)};
+      if(g.valid(c)&&g.solidBase(c)&&g.renderMaterial(c)==2u)bone[i>>6]|=std::uint64_t(1)<<(i&63);
+     }
+    }
+    const bool splitTile=table&&g.ownership&&!g.ownership->pureTile(Cell{t.x*8,t.y*8,t.z*8});
+    for(int q=0;q<8;++q)for(std::uint64_t w=bone[std::size_t(q)]&~(tile?tile->removed[std::size_t(q)]:0ull);w;w&=w-1){
+     const unsigned bit=ctz64(w);const Cell c{t.x*8+q,t.y*8+int(bit>>3),t.z*8+int(bit&7u)};if(splitTile&&!g.solidBase(c))continue;
+     const Vec x=g.center(c);double gap;++looked;
+     const unsigned gr=fn.zeroGap(x.x,x.y,x.z,gap);
+     if(gr==0u){if(inBox(c.x,c.y,c.z)&&lab[idx(c.x,c.y,c.z)]==253)protect(c);continue;} // the far part's bone in a crack: not cut
+     const double vary=.825+.175*head_burst_record::Function::vnoise(vs,x.x*vk,x.y*vk,x.z*vk);
+     if(gap<=band*vary)protect(c);}}
+   if(!keep.empty()||!broken.empty()){
+    auto groupOf=[&](const Cell&c)->unsigned{if(inBox(c.x,c.y,c.z)){const auto l=lab[idx(c.x,c.y,c.z)];if(l<=253)return l;
+      const unsigned bc=blockG[bIdx((c.x-ox)/4,(c.y-oy)/4,(c.z-oz)/4)];if(bc<254)return bc;}
+     const Vec q=g.center(c);return fn.label(q.x,q.y,q.z);};
+    static const int nb6[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    for(const Cell&c:keep)for(const auto&s:nb6){const Cell n{c.x+s[0],c.y+s[1],c.z+s[2]};
+     if(keep.count(n)||broken.count(n)||!g.valid(n)||!tissue.solid(n)||cache.removed(n))continue;
+     const unsigned gn=groupOf(n);if(gn!=0u&&gn!=253u)shell.insert(n);}
+    // the crack lists without the kept bone, the shell after each list's cracks (before the crumbs)
+    for(std::size_t ch=0;ch<W;++ch){std::vector<Cell> next;next.reserve(eraseBy[ch].size());std::size_t cracks=0;
+     for(std::size_t i=0;i<eraseBy[ch].size();++i){const Cell&c=eraseBy[ch][i];if(keep.count(c)||broken.count(c))continue;next.push_back(c);if(i<crackN[ch])++cracks;}
+     eraseBy[ch].swap(next);crackN[ch]=cracks;}
+    std::vector<Cell> sh(shell.begin(),shell.end());std::sort(sh.begin(),sh.end(),[](const Cell&a,const Cell&b){return a.z!=b.z?a.z<b.z:(a.y!=b.y?a.y<b.y:a.x<b.x);});
+    eraseBy[0].insert(eraseBy[0].begin()+std::ptrdiff_t(crackN[0]),sh.begin(),sh.end());crackN[0]+=sh.size();
+    // A repeat removes this bone permanently. Put it outside the list of
+    // restored crack-face samples, so the negative space survives the split.
+    std::vector<Cell> chipped(broken.begin(),broken.end());
+    std::sort(chipped.begin(),chipped.end(),[](const Cell&a,const Cell&b){
+     return a.z!=b.z?a.z<b.z:(a.y!=b.y?a.y<b.y:a.x<b.x);
+    });
+    eraseBy[0].insert(eraseBy[0].end(),chipped.begin(),chipped.end());
+    for(const Cell&c:chipped)if(inBox(c.x,c.y,c.z))lab[idx(c.x,c.y,c.z)]=253;
+    for(const Cell&c:keep)if(inBox(c.x,c.y,c.z))lab[idx(c.x,c.y,c.z)]=0;
+    for(const Cell&c:sh)if(inBox(c.x,c.y,c.z))lab[idx(c.x,c.y,c.z)]=253;
+    // a fragment's sample point in kept bone would give the body that fragment's group: such samples go
+    {auto&sec=block->section;std::vector<float> kept;kept.reserve(sec.size());const double inv=1./pitch;
+     for(std::size_t i=0;i+3<sec.size();i+=4){const Cell c{int(std::floor((sec[i]-g.origin.x)*inv)),int(std::floor((sec[i+1]-g.origin.y)*inv)),int(std::floor((sec[i+2]-g.origin.z)*inv))};
+      if(sec[i+3]!=0.f&&keep.count(c))continue;kept.insert(kept.end(),sec.begin()+std::ptrdiff_t(i),sec.begin()+std::ptrdiff_t(i)+4);}
+     sec.swap(kept);}}
+   out.boneKept=keep.size();out.boneShell=shell.size();out.boneMs=core::ms(kb0);
+   if(std::getenv("GFY_M3_LOG"))std::cerr<<"bone_band band_mm="<<band*1000<<" bone_cells_looked="<<looked<<" kept="<<keep.size()<<" shell="<<shell.size()<<" repeat_broken="<<broken.size()<<" ms="<<out.boneMs<<std::endl;}}
  // the erase (journaled, in order), then the repair every cut gets
  std::vector<Cell> boundary;std::set<Cell> touched;std::size_t solid=0;
  // the crack cells erased here go into the record (after the group samples; header word 12 = the samples' float count, words 16-18

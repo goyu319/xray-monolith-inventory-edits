@@ -9,6 +9,10 @@
 #include "../../build_config_defines.h"
 
 #include "ftreevisual.h"
+#if RENDER==R_R4
+#include "PainterFire.h"
+#include "PainterSpruceCard.h"
+#endif
 
 shared_str m_xform;
 shared_str m_xform_v;
@@ -151,6 +155,20 @@ struct FTreeVisual_setup
 void FTreeVisual::Render(float LOD)
 {
 	PROF_EVENT("FTreeVisual::Render");
+#if RENDER==R_R4
+    // Assign every drawn tree so consecutive healthy and burned instances may share a pass.
+    bool separateWood=false;
+    float thermal=0.f;
+    const float painterLeaf=PainterFire::TreeBurnAmount(this,&separateWood,PainterFire::thermalViewPossible()?&thermal:nullptr);
+    RCache.set_c("painter_leaf_state",painterLeaf,separateWood?1.f:0.f,thermal,0.f);
+    if(R_constant* wood=RCache.get_c("painter_wood_state")){
+        float scorch=0.f,heat=0.f;
+        // Consecutive tree instances share materials, including after the master is disabled.
+        if(ps_painter_fire && ps_painter_fire_burnt && painterLeaf>0.f)
+            PainterFire::TreeWoodBurn(this,scorch,heat);
+        RCache.set_c(wood,scorch,heat,thermal,0.f);
+    }
+#endif
 	const bool svp = Device.m_SecondViewport.IsSVPFrame(); // pip this viewport's prev-wind slot
 	static FTreeVisual_setup current_tvs[2], prev_tvs[2];
 	FTreeVisual_setup& tvs = current_tvs[svp];
@@ -299,6 +317,16 @@ void FTreeVisual_ST::Render(float LOD)
 {
 	inherited::Render(LOD);
 	RCache.set_Geometry(rm_geom);
+#if RENDER==R_R4
+    const auto* compact=(ps_painter_fire && ps_painter_fire_burnt && !PainterSpruceCard::burned.empty() &&
+                         PainterFire::TreeBurnAmount(this)>=.16f) ?
+        PainterSpruceCard::query(shader._get(),p_rm_Vertices,p_rm_Indices,vBase,vCount,iBase,dwPrimitives):nullptr;
+    if(compact) {
+        RCache.set_Indices(compact->indices);
+        RCache.Render(D3DPT_TRIANGLELIST,vBase,0,vCount,compact->first,compact->triangles);
+    }
+    else
+#endif
 	RCache.Render(D3DPT_TRIANGLELIST, vBase, 0, vCount, iBase, dwPrimitives);
 	RCache.stat.r.s_flora.add(vCount);
 }
@@ -348,6 +376,16 @@ void FTreeVisual_PM::Render(float LOD)
 	VERIFY(lod_id>=0 && lod_id<int(pSWI->count));
 	FSlideWindow& SW = pSWI->sw[lod_id];
 	RCache.set_Geometry(rm_geom);
+#if RENDER==R_R4
+    const auto* compact=(ps_painter_fire && ps_painter_fire_burnt && !PainterSpruceCard::burned.empty() &&
+                         PainterFire::TreeBurnAmount(this)>=.16f) ?
+        PainterSpruceCard::query(shader._get(),p_rm_Vertices,p_rm_Indices,vBase,SW.num_verts,iBase+SW.offset,SW.num_tris):nullptr;
+    if(compact) {
+        RCache.set_Indices(compact->indices);
+        RCache.Render(D3DPT_TRIANGLELIST,vBase,0,SW.num_verts,compact->first,compact->triangles);
+    }
+    else
+#endif
 	RCache.Render(D3DPT_TRIANGLELIST, vBase, 0, SW.num_verts, iBase + SW.offset, SW.num_tris);
 	RCache.stat.r.s_flora.add(SW.num_verts);
 }

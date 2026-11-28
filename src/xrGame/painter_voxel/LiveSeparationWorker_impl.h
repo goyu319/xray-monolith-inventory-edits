@@ -2088,6 +2088,19 @@ inline std::shared_ptr<SeparationOutput> prepare(const Asset&asset,const Grid&gr
   catch(const std::exception&e){accessoryPartition={};gearMeshes={};deferredEyeSurfaces.clear();gearSkipped=e.what();} // ownersafe: pieces without gear surfaces
   lowpoly_pieces::Stats lp;mask_pieces::Stats mp;const bool maskPieces=extras.lowpoly->mask_volume&&!extras.lowpoly->analytic_channels;
   mask_pieces3::Stats m3;bool tearPieces=maskPieces&&mask_pieces3::eligible(*extras.lowpoly,sgrid,pieceVolume,ids,m3);
+  if(auto* pass=mask_pieces3::head_burst_pieces::FlightPass::current(); pass && !pass->surfaces){
+   pass->fitted.clear();
+   for(const auto id:ids){
+    const auto& parts=partitions.at(id);bool fitted=!parts.empty();
+    for(const auto& part:parts){
+     const auto bone=part.bone;
+     const auto n=pieceOwners.find(bone);const auto count=remainingByElement.find(bone);const auto orig=map->original_cells.find(bone);
+     if(keepsShape(id,bone,parts.size())||(parts.size()>1&&(n==pieceOwners.end()||count==remainingByElement.end()||
+        orig==map->original_cells.end()||(n->second==1&&count->second==orig->second&&!adopters.count(bone))))){fitted=false;break;}
+    }
+    if(fitted)pass->fitted.insert(id);
+   }
+  }
   try{if(tearPieces){try{surfaces.pieces=mask_pieces3::build(*extras.lowpoly,sgrid,pieceVolume,ids,whole,asset.original_children,anchorable,regionFrontier,m3,
     extras.piece?&extras.piece->marks:nullptr,&pieceMarks,asset.gear_cells.get());} // slices 3 + 4: the tears' sides, no ownership field; cutfix: gear cells
     catch(const lowpoly_pieces::EmptyPieces&){throw;}catch(const std::bad_alloc&){throw;}
@@ -2408,6 +2421,7 @@ inline std::shared_ptr<SeparationOutput> prepare(const Asset&asset,const Grid&gr
    if(extras.semantic_groups){seed->components.push_back(piece.component);for(const auto&g:*extras.semantic_groups)if(g.second==piece.component)seed->components.push_back(g.first);
     if(seed->components.size()==1)seed->components.clear();else std::sort(seed->components.begin(),seed->components.end());}
    if(surfaceIndex<pieceMarks.size())seed->marks=std::move(pieceMarks[surfaceIndex]);
+   seed->grenadeFloor=std::move(surface.grenadeFloor);
    seed->faces.assign(asset.source.f.size(),0);std::array<char,64> used{};
    for(const auto&child:piece.mesh.children){
     for(const auto&v:child.vertices)for(unsigned w=0;w<4;++w)if(gfy_signed_hw::dependency(v.weight,w,child.skin_owned?0.:negligible_skin_weight)&&v.bone[w]<64)used[v.bone[w]]=1;
@@ -2478,7 +2492,7 @@ std::shared_ptr<const SeparationOutput>DamageSnapshot::prepare_separation(const 
  const separation_detail::PieceContext context{impl_->piece.get(),impl_->history,impl_->sever,impl_->gore};
  // cutends v2 (2026-11-16): a separated piece's birth mesh is its publication before this damage - the burst split's give-back reads
  // it (HeadBurstPieces.h hostBefore), on this thread, for this prepare only
- struct CeHostBefore {explicit CeHostBefore(const gfy_packed::Mesh*m){separation_detail::mask_pieces3::head_burst_pieces::hostBefore()=m;}~CeHostBefore(){separation_detail::mask_pieces3::head_burst_pieces::hostBefore()=nullptr;}} ceHostBefore(impl_->piece_mesh.get());
+ struct CeHostBefore {const gfy_packed::Mesh* previous;explicit CeHostBefore(const gfy_packed::Mesh*m):previous(separation_detail::mask_pieces3::head_burst_pieces::hostBefore()){separation_detail::mask_pieces3::head_burst_pieces::hostBefore()=m;}~CeHostBefore(){separation_detail::mask_pieces3::head_burst_pieces::hostBefore()=previous;}} ceHostBefore(impl_->piece_mesh.get());
  try{out=separation_detail::prepareSnapshot(impl_->asset,impl_->grid,impl_->geometry?&impl_->geometry->mesh:impl_->piece_mesh.get(),
                                             impl_->stamp,input,checkpoint,nullptr,&context);}
  catch(const std::bad_alloc&){out.reset();memoryCounters.separation_oom.fetch_add(1,std::memory_order_relaxed);failure->error=outOfMemoryText;out=failure;}
@@ -2486,7 +2500,64 @@ std::shared_ptr<const SeparationOutput>DamageSnapshot::prepare_separation(const 
  catch(...){out.reset();try{failure->error="unknown_separation_failure";}catch(...){failure->error=outOfMemoryText;}out=failure;}
  out->worker_ms=core::ms(started);return out;
 }
-struct SeparationPreparation::Impl {Stamp stamp;SeparationJobProgress progress;mutable std::mutex mutex;std::shared_ptr<const SeparationOutput>output;};
+#include "FlightSilhouette.h"
+std::shared_ptr<const SeparationOutput> DamageSnapshot::prepare_separation_flight(const SeparationInput& input,
+ const SeparationCheckpoint& checkpoint,const std::function<void(std::shared_ptr<const SeparationOutput>)>& on_preview)const noexcept {
+ using FlightPass=separation_detail::mask_pieces3::head_burst_pieces::FlightPass;
+ if(!input.allow_flight_preview || !on_preview || std::getenv("GFY_COMPONENT_SESSIONS") || FlightPass::current())
+  return prepare_separation(input,checkpoint);
+ bool earlyPublished=false;FlightPass trial;
+ struct Scope {explicit Scope(FlightPass& pass){FlightPass::current()=&pass;}~Scope(){FlightPass::current()=nullptr;}} scope(trial);
+ trial.admit=[&]{
+  const auto early=prepare_separation(input,{});
+  if(!trial.consumed || !early || !early->error.empty() || early->no_separation || early->pieces.size()<2 || sep::cancelRequested())return;
+  auto owned=std::const_pointer_cast<SeparationOutput>(early);
+  for(auto& p:owned->pieces)if(p.component!=owned->source_component){
+   if(p.ocular_remnant || !p.seed || p.elements.empty())return;
+   if(trial.fitted.count(p.component) && std::any_of(p.elements.begin(),p.elements.end(),
+     [](const SeparationElement& e){return e.retain_original_shape;}))return;
+   p.flight_visual=flight_silhouette::make(p);
+   if(!p.flight_visual)return;
+  }
+  if(!sep::cancelRequested()){on_preview(early);earlyPublished=true;}
+ };
+ auto exact=prepare_separation(input,checkpoint);
+ if(earlyPublished || !exact || !exact->error.empty() || exact->no_separation || exact->pieces.size()<2 ||
+    exact->pieces.size()>13 || sep::cancelRequested())return exact;
+ try{
+  // Mixed tears and native skin can require a complete field before shell admission.
+  // These shells launch at normal readiness; their GPU detail still swaps one at a time.
+  std::vector<std::shared_ptr<const gfy_packed::Mesh>> visuals(exact->pieces.size());
+  for(std::size_t i=0;i<exact->pieces.size();++i){
+   const auto& p=exact->pieces[i];if(p.component==exact->source_component)continue;
+   if(p.ocular_remnant || !p.seed || p.elements.empty())return exact;
+   visuals[i]=flight_silhouette::make(p);if(!visuals[i])return exact;
+  }
+  if(sep::cancelRequested())return exact;
+  auto owned=std::const_pointer_cast<SeparationOutput>(exact);
+  for(std::size_t i=0;i<visuals.size();++i)owned->pieces[i].flight_visual=std::move(visuals[i]);
+  owned->flight_exact_backed=true;
+  on_preview(exact);
+ }catch(...){/* Final native geometry is always publishable independently of the proxy. */}
+ return exact;
+}
+struct SeparationPreparation::Impl {
+ Stamp stamp;SeparationJobProgress progress;mutable std::mutex mutex;
+ std::shared_ptr<const SeparationOutput>output,flight;
+ std::shared_ptr<const DamageSnapshot>snapshot;std::shared_ptr<const SeparationInput>retry_input;
+};
+std::shared_ptr<const SeparationOutput> SeparationPreparation::preview()const{
+ std::lock_guard<std::mutex> lock(impl_->mutex);
+ return impl_->progress.canceled()?std::shared_ptr<const SeparationOutput>{}:impl_->flight;
+}
+std::shared_ptr<SeparationPreparation> SeparationPreparation::retry_exact()const noexcept{
+ try{
+  if(impl_->progress.canceled()||!impl_->snapshot||!impl_->retry_input)return {};
+  SeparationInput input=*impl_->retry_input;input.allow_flight_preview=false;
+  return prepare_separation_async(impl_->snapshot,std::move(input));
+ }catch(...){return {};}
+}
+
 SeparationPreparation::SeparationPreparation(std::shared_ptr<Impl>state):impl_(std::move(state)){}
 SeparationPreparation::~SeparationPreparation(){cancel();}
 const Stamp&SeparationPreparation::stamp()const noexcept{return impl_->stamp;}
@@ -2501,7 +2572,7 @@ std::shared_ptr<SeparationPreparation>prepare_separation_async(std::shared_ptr<c
   struct Service {
    // failure: preallocated at submission, used if the worker cannot even
    // allocate its own report (see DamageSnapshot::prepare_separation).
-   struct Job {std::shared_ptr<const DamageSnapshot>snapshot;SeparationInput input;std::shared_ptr<SeparationPreparation::Impl>state;std::shared_ptr<SeparationOutput>failure;};
+   struct Job {std::shared_ptr<const DamageSnapshot>snapshot;std::shared_ptr<const SeparationInput> input;std::shared_ptr<SeparationPreparation::Impl>state;std::shared_ptr<SeparationOutput>failure;};
    // A blast splits many bodies at once (grenade into 10 NPCs: 21 of 27 splits refused by a 2-deep, single-thread
    // queue): three workers (each still bounded by sep::max_job_threads helpers), 32 queued (ten bodies can queue an
    // early split and a later one each). GFY_SEP_SERVICE_THREADS overrides the worker count (1-16, measurements).
@@ -2519,7 +2590,9 @@ std::shared_ptr<SeparationPreparation>prepare_separation_async(std::shared_ptr<c
      // P1.5: the job's cancel flag is visible to every stage (and to the helper
      // threads of sep::parallel); P1.3: warm builds yield while it runs.
      const sep::CancelScope cancelScope(job.state->progress.cancel_flag());const sep::ActiveJob activeJob;
-     std::shared_ptr<const SeparationOutput>result=job.snapshot->prepare_separation(job.input,[&](const char*phase,std::uint32_t component,std::uint16_t bone){job.state->progress.checkpoint(phase,component,bone);});
+     std::shared_ptr<const SeparationOutput>result=job.snapshot->prepare_separation_flight(*job.input,[&](const char*phase,std::uint32_t component,std::uint16_t bone){job.state->progress.checkpoint(phase,component,bone);},
+      [&](std::shared_ptr<const SeparationOutput> early){std::lock_guard<std::mutex> lock(job.state->mutex);
+       if(!job.state->progress.canceled())job.state->flight=std::move(early);});
      if(!result){job.failure->error=outOfMemoryText;result=job.failure;}
      job.state->progress.finish();
      std::lock_guard<std::mutex>lock(job.state->mutex);job.state->output=std::move(result);
@@ -2530,11 +2603,12 @@ std::shared_ptr<SeparationPreparation>prepare_separation_async(std::shared_ptr<c
   (void)separation_detail::pristineCache();(void)separation_detail::mapCache();
   (void)separation_detail::tileBaseCache();(void)separation_detail::decodedCache();
   static Service& service=::gfy_live::core::worker_quit::immortal<Service>(0);auto state=std::make_shared<SeparationPreparation::Impl>();state->stamp=snapshot->stamp(); // quitfix: never destroyed
+  state->snapshot=snapshot;state->retry_input=std::make_shared<const SeparationInput>(std::move(input));
   auto failure=std::make_shared<SeparationOutput>();failure->stamp=state->stamp;
   auto handle=std::shared_ptr<SeparationPreparation>(new SeparationPreparation(state));
   {std::lock_guard<std::mutex>lock(service.mutex);
    service.jobs.erase(std::remove_if(service.jobs.begin(),service.jobs.end(),[](const auto&job){return job.state->progress.canceled();}),service.jobs.end());
-   need(service.jobs.size()<service.depth,"separation_queue_full");service.jobs.push_back({std::move(snapshot),std::move(input),state,std::move(failure)});}
+   need(service.jobs.size()<service.depth,"separation_queue_full");service.jobs.push_back({std::move(snapshot),state->retry_input,state,std::move(failure)});}
   service.wake.notify_one();return handle;
  }catch(const std::bad_alloc&){fail(outOfMemoryText);return {};}catch(const std::exception&e){fail(e.what());return {};}catch(...){fail("unknown_separation_queue_failure");return {};}
 }

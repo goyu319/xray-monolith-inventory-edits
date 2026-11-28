@@ -57,7 +57,20 @@ void CBlender_Compile::r_dx10Texture(LPCSTR ResourceName, LPCSTR texture)
 	R_ASSERT(C->type == RC_dx10texture);
 	u32 stage = C->samp.index;
 
+#ifdef USE_DX11
+    if (0==strcmp(ResourceName,"s_painter_leaf_wood")) {
+        xr_string companion = "$user$leafwood\\";
+        companion += TexName;
+        passTextures.push_back(mk_pair(stage,ref_texture(DEV->_CreateTexture(companion.c_str()))));
+        return;
+    }
+#endif
 	passTextures.push_back(mk_pair(stage, ref_texture(DEV->_CreateTexture(TexName))));
+#ifdef USE_DX11
+    // The companion is requested only by patched thermal consumers.
+    if (0 == strcmp(ResourceName, "s_heat") && ctable.get("s_painter_fire_heat"))
+        r_dx10Texture("s_painter_fire_heat", "$user$painter_fire_heat");
+#endif
 }
 
 void CBlender_Compile::i_dx10Address(u32 s, u32 address)

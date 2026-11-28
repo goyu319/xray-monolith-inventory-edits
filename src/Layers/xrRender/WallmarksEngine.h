@@ -12,6 +12,9 @@ namespace WallmarksEngine
 class CSkeletonWallmark;
 class CKinematics;
 struct BloodGpuWallmarkState;
+#ifdef USE_DX11
+class PainterStaticBloodOwner;
+#endif
 
 class CWallmarksEngine
 {
@@ -28,6 +31,12 @@ public:
 		float m_fTimeEnd;
         bool m_thermal_blood=false;
         BloodThermalStamp m_thermal_stamp;
+#ifdef USE_DX11
+        struct Receiver { Fvector p[3]; };
+        xr_vector<Receiver> snapshotReceivers;
+        u64 snapshotId=0;
+        bool snapshotOverflow=false;
+#endif
 
 		IC float TimeStart() { return m_fTimeStart; }
 		IC float TimeEnd() { return m_fTimeEnd; }
@@ -57,6 +66,12 @@ private:
     ref_geom hGeomMasked;
 #endif
 	BloodGpuWallmarkState* gpu_skinning = nullptr;
+#ifdef USE_DX11
+    friend class PainterStaticBloodOwner;
+    PainterStaticBloodOwner* staticSnapshots=nullptr;
+    u64 nextSnapshotId=0;
+    void observeSnapshot(wm_slot*,IRender_Sector*,const static_entry&);
+#endif
 
 	Fvector sml_normal;
 	CFrustum sml_clipper;
@@ -99,10 +114,14 @@ public:
 
     void AddSkeletonBloodWallmark(const Fmatrix*,CKinematics*,ref_shader&,const Fvector&,const Fvector&,
         float,float,bool,const BloodThermalStamp&);
+    bool HasSkeletonWallmarks(const CKinematics* obj);
     void RemoveSkeletonWallmarksFromObject(CKinematics* obj);
     void CollectSkeletonWallmarks(CKinematics* obj, xr_vector<intrusive_ptr<CSkeletonWallmark>>& output);
 
     void UpdateWallmarks();
+#ifdef USE_DX11
+    void WarmStaticSnapshots();
+#endif
 
 	// render
 	void Render();

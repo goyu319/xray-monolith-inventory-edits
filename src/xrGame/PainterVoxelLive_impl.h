@@ -2,6 +2,9 @@
 // Explicit native hit diagnostic. CPU worker is compiled separately with /EHsc.
 // No helper calls a prepared state; accepted fire-wound SHit events drive jobs.
 #include <deque>
+#include <chrono>
+#include "PainterBurnHost.h"
+#include "painter_voxel/PainterPieceContinuation.h"
 #include "painter_voxel/PainterExplosions.h"
 #include "../Layers/xrRender/BloodNativeProfile.h"
 #include "../Layers/xrRender/PainterHitMain.h" // triggerhitch
@@ -47,6 +50,10 @@ float painter_body_burst_chance=0.35f;
 int painter_damage_mode=0;
 float painter_body_blowout_frequency=1.f;
 int painter_body_blowout_chunks=1;
+// boneresist (2026-11-19): console painter_bone_resist 1 / 0, saved in user.ltx - the Painter menu's check box
+int painter_bone_resist=1;
+// bonefix2 (2026-11-20): console painter_bone_strength 0..100, saved in user.ltx - the Painter menu's slider
+int painter_bone_strength=70;
 inline int painter_voxel_effective_quality(){return painter_voxel_cell_mm==1?1:0;}
 int painter_voxel_live_result=0,painter_voxel_live_owner=65535,painter_voxel_live_revision=0;
 // Wake-up link between a kernel session and its engine owner. The pool thread
@@ -62,9 +69,11 @@ struct PainterVoxelLiveOwner {
     IKinematics* visual=nullptr;CPhysicsShell* shell=nullptr;
     u64 sequence=0,geometry=0;DWORD thread=0;
     u16 original_children=0;
+    bool burn_prime_wanted=false,burn_prime_ready=false,burn_prime_queued=false;
     bool separation_ready=false;
     gfy_live::SeparationInput separation_input;
     std::shared_ptr<gfy_live::SeparationPreparation> separation_job;
+    u64 flight_attempted_revision=0;
     u64 separation_checked_revision=0;
     u32 separation_native_retries=0; // retries after a transient native refusal (moved/stale/busy), bounded
     u32 separation_cancel_retries=0; // R33: retries after a staged split was canceled at commit (pose mismatch, resample, swap not ready...), bounded
@@ -138,6 +147,7 @@ std::unique_ptr<gfy_live::Pool> pool;
 // services and the disposer are stopped and joined while everything their jobs use still exists. Before, their destructors
 // joined them at process exit, where a job in flight could wait for ever on a worker pool that was already gone.
 inline void quit_workers()noexcept{
+    painter_burn_host::quit();
     if(pool)pool->quit();
     gfy_live::quit_workers();
     if(auto* disposer=disposerSlot())disposer->quit();
@@ -639,6 +649,9 @@ bool CCharacterPhysicsSupport::BindPainterVoxelLive(bool target)
         {static std::set<std::string> gear_body_logged;const std::string note=gfy_live::gear_body_note(asset); // gearbody: one line per prepared outfit
          if(!note.empty()&&gear_body_logged.insert(std::string(*m_EntityAlife.cNameVisual())+"|"+note).second)
              Msg("[painter_gear_body] model=%s %s",*m_EntityAlife.cNameVisual(),note.c_str());}
+        {static std::set<std::string> field_align_logged;const std::string note=gfy_live::field_align_note(asset); // fieldalign: one line per lined-up outfit
+         if(!note.empty()&&field_align_logged.insert(std::string(*m_EntityAlife.cNameVisual())).second)
+             Msg("[painter_voxel_live] model=%s phase=cut_field_lined_up %s",*m_EntityAlife.cNameVisual(),note.c_str());}
         owner->worker=pool->attach(asset,owner->identity);if(!owner->worker){if(!xr_strcmp(gfy_live::last_failure(),"owner_capacity"))return busy();if(out_of_memory(gfy_live::last_failure()))return memory_busy("attach");return reject(gfy_live::last_failure());}
         {
             // Wake-driven publication: when a job's output is ready the pool thread queues this owner's barrier
@@ -656,7 +669,7 @@ bool CCharacterPhysicsSupport::BindPainterVoxelLive(bool target)
                     Device.seqParallelBeforRenderPending.push_back(callback);
             });
         }
-        m_painter_voxel_bind_requested=false;m_painter_voxel_live=std::move(owner);state(0,m_EntityAlife.ID(),0);
+        m_painter_voxel_bind_requested=false;m_painter_voxel_live=std::move(owner);painter_burn_host::bind(m_EntityAlife,m_painter_voxel_live->identity,m_painter_voxel_live->worker,false);state(0,m_EntityAlife.ID(),0);
         const bool bound_target=m_painter_voxel_bind_target;m_painter_voxel_bind_target=false;
         if(selected.fullbody&&!selected.separation_ready)
             Msg("[painter_damaged_fragment] id=%u phase=unavailable reason=%s",
@@ -702,6 +715,7 @@ void CCharacterPhysicsSupport::CancelPainterVoxelLive()
     if(m_painter_voxel_live){
         if(!m_painter_voxel_live->committed_effects.empty())
             Msg("[painter_voxel_live] id=%u phase=wound_blood_invalidated reason=owner_canceled receipts=%u",m_EntityAlife.ID(),unsigned(m_painter_voxel_live->committed_effects.size()));
+        painter_burn_host::forget(m_EntityAlife,m_painter_voxel_live->worker);
         link=m_painter_voxel_live->ready_link;m_painter_voxel_live->worker->cancel();}
     m_painter_voxel_live.reset();m_painter_voxel_queued=false;
     auto callback=xr_make_delegate(this,&CCharacterPhysicsSupport::ApplyPainterVoxelLive);
@@ -733,7 +747,7 @@ bool CCharacterPhysicsSupport::UnbindPainterVoxelLive()
 }
 void CCharacterPhysicsSupport::CapturePainterVoxelHit(const SHit& hit)
 {
-    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s",s);});
+    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s host_us=%lld",s,static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));});
     body_hit_outcomes::Scope trace_scope(m_EntityAlife.ID(),hit.BulletID,hit.bone(),m_EntityAlife.g_Alive(),true);
     painter_voxel_native::SlowScope slow("capture",m_EntityAlife.ID());
     painter_hit_main::PartScope hit_main_capture(painter_hit_main::Capture); // triggerhitch
@@ -1031,6 +1045,8 @@ void CCharacterPhysicsSupport::QueuePainterVoxelLive()
     if(m_painter_voxel_live&&m_painter_voxel_live->shader_warm_requested&&Device.m_geometry_publish_thread&&GetCurrentThreadId()==Device.m_geometry_publish_thread)
         if(auto*k=smart_cast<IKinematics*>(m_EntityAlife.Visual())){m_painter_voxel_live->shader_warm_requested=false;WarmPainterVoxelShaders(k);}
     if(!m_painter_voxel_live||m_painter_voxel_queued)return;
+    if(m_painter_voxel_live->burn_prime_wanted && !m_painter_voxel_live->burn_prime_queued && !m_painter_voxel_live->burn_prime_ready)
+        PrimePainterBurnGeometry(m_painter_voxel_live->identity.spawn_cookie);
     const auto& owner=*m_painter_voxel_live;
     bool separation_due=false;
     if(owner.separation_ready&&!m_EntityAlife.g_Alive()&&
@@ -1220,7 +1236,9 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
         stage_ms=stage_timer.GetElapsed_ms_f();
         if(staged){owner.stage=staged;owner.stage_out=out;owner.stage_frame=Device.dwFrame;owner.stage_barrier_ms=stage_ms;owner.stage_wait.Start();}
     }
-    if(out&&owner.stage&&!owner.stage->Ready()){out.reset(); // still preparing: nothing visible changes
+    const bool stageReady=!owner.stage||owner.stage->Ready();
+    PainterBurnPublication burnPublication(out&&!out->no_geometry_change&&stageReady?k:nullptr);
+    if(out&&(!stageReady||!burnPublication.ready())){out.reset(); // still preparing: nothing visible changes
         // Look again at the next drain (up to three per frame, device.cpp) instead of at the next frame's
         // in_UpdateCL poll: a push from inside a drain would run in this same drain, so it goes to the next list.
         xrCriticalSectionGuard guard(&Device.seqParallelBeforRenderCS);
@@ -1277,7 +1295,7 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
         CTimer ack_timer;ack_timer.Start();
         bool required=bool(out->mesh.analytic_channels)||bool(out->mesh.skin_ownership);
         for(const auto&child:out->mesh.children)required=required||child.skin_clip||child.skin_owned;
-        if(!accepted&&required&&out->error.empty()&&out->stamp.owner==owner.identity&&
+        if(!accepted&&required&&!out->burn_surface_prime&&out->error.empty()&&out->stamp.owner==owner.identity&&
            out->stamp.expected_generation==k->LL_RenderGeometryGeneration()){
             // No fallback to the old dense geometry path: a refused low-poly wound is a defect to fix.
             // The exact candidate is held (damage kept, never replayed or discarded) and reported loudly.
@@ -1288,6 +1306,13 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
             return;
         }
         owner.worker->acknowledge_output(out,accepted,k->LL_RenderGeometryGeneration());
+        burnPublication.release();
+        if(accepted&&!out->no_geometry_change)painter_burn_host::refresh(m_EntityAlife,owner.worker);
+        if(out->burn_surface_prime)owner.burn_prime_queued=false;
+        if(owner.burn_prime_wanted && accepted && !out->no_geometry_change && out->mesh.mask_volume) {
+            bool any=false,all=true;for(const auto& c:out->mesh.children)if(!c.material&&!c.indices.empty()){any=true;all=all&&c.skin_clip;}
+            owner.burn_prime_ready=any&&all;
+        }
         if(!out->accessory_skipped.empty())Msg("[painter_voxel_live] id=%u phase=accessory_skipped revision=%llu accepted=%u %s",
             m_EntityAlife.ID(),out->stamp.revision,unsigned(accepted),out->accessory_skipped.c_str()); // ownersafe
         ack_ms=ack_timer.GetElapsed_ms_f();
@@ -1339,6 +1364,11 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
         if(accepted&&(out->numerical_open_edges||out->interior_sheet_junctions))
             Msg("[painter_voxel_live] id=%u phase=geometry_precision residual_edges=%llu residual_length_m=%.12f interior_sheets=%llu",m_EntityAlife.ID(),u64(out->numerical_open_edges),out->numerical_open_length_m,u64(out->interior_sheet_junctions));
         if(!accepted)return;owner.geometry=k->LL_RenderGeometryGeneration();
+        if(out->burn_surface_prime){
+            owner.separation_checked_revision=std::max(owner.separation_checked_revision,out->stamp.revision);
+            if(pool)pool->dispatch(owner.worker,owner.geometry);
+            return;
+        }
         // A queued or rejected cut cannot advance Butcher's joint damage.
         // Death-only eligibility and thresholds remain Lua policy.
         ::luabind::functor<bool> joint_damage;
@@ -1367,6 +1397,14 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
         const auto queued_stamp=owner.separation_job->stamp();
         const auto progress=owner.separation_job->progress();
         auto completed=owner.separation_job->completed();
+        std::shared_ptr<painter_flight::Group> flight;
+        if((!completed||(completed->error.empty()&&!completed->no_separation))&&owner.flight_attempted_revision!=queued_stamp.revision&&
+           queued_stamp.owner==owner.identity&&queued_stamp.expected_generation==owner.geometry){
+            if(auto early=owner.separation_job->preview();early&&k->LL_FlightPreviewAllowed()){
+                completed=std::move(early);owner.flight_attempted_revision=queued_stamp.revision;
+                flight=std::make_shared<painter_flight::Group>();flight->job=owner.separation_job;
+            }
+        }
         const bool stale_same_owner=queued_stamp.owner==owner.identity&&queued_stamp.expected_generation!=owner.geometry;
         if(stale_same_owner&&!completed){
             // Newer wounds were published while this check runs: let it finish (a cut found on an older revision is
@@ -1417,7 +1455,8 @@ void CCharacterPhysicsSupport::ApplyPainterVoxelLive()
                         *m_EntityAlife.cast_stalker(),owner.identity,*result,
                         owner.original_children,owner.separation_input,
                         owner.exact_rig,owner.tissue_textures,
-                        m_pPhysicsShell,why);
+                        m_pPhysicsShell,why,flight);
+                    if(!staged&&flight){owner.separation_job=flight->job;return;}
                     if(!staged)PainterHoldRelease("native_refused"); // R63: a retry runs on the moving body, as before
                     Msg("[painter_damaged_fragment] id=%u phase=%s revision=%llu reason=%s worker_ms=%.1f t=%u tc=%u lowpoly=%s",
                         m_EntityAlife.ID(),staged?"staged_hidden":"native_refused",
@@ -1554,6 +1593,13 @@ void CCharacterPhysicsSupport::PainterSwapFittedShell(CPhysicsShell* prepared,
     }else prepared->SetIgnoreDynamic();
     prepared->SetIgnoreSmall();
     if(m_weapon_attach_bone)PainterReleaseWeaponCollision();
+#ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE
+    // ragdollswap (2026-11-25): the active ragdoll holds the old shell and its joints. Let it go while they still exist:
+    // destroy_physics_shell below frees them, and the controller's next detach (level unload when a save loads, object
+    // destroy, visual change) wrote to the freed joints - a crash after every sever. A fitted stump is not a whole stalker:
+    // it is not attached again.
+    m_active_ragdoll_controller.detach();
+#endif
     expected->EnabledCallbacks(FALSE);
     m_pPhysicsShell=prepared;
     // Collision ownership is encoded by the prepared shell. The partitioned
@@ -1593,6 +1639,47 @@ bool painter_voxel_handles_wound(u16 id,u16 bone)
 void CCharacterPhysicsSupport::ApplyPainterPieceContinuation()
 {
     if(auto* source=m_EntityAlife.cast_stalker())painter_piece_continuation::poll(*source);
+}
+// Called by the burn bridge on the main owner lane, after a real accepted surface contact.
+bool CCharacterPhysicsSupport::BindExistingBurnReceiver()
+{
+    if (!m_painter_voxel_live || m_EntityAlife.getDestroy()) return false;
+    auto& owner=*m_painter_voxel_live;
+    if (!owner.worker || !owner.visual || smart_cast<IKinematics*>(m_EntityAlife.Visual())!=owner.visual ||
+        owner.visual->LL_RenderGeometryGeneration()!=owner.geometry) return false;
+    painter_burn_host::bind(m_EntityAlife,owner.identity,owner.worker,false,true);
+    return true;
+}
+bool CCharacterPhysicsSupport::PrimePainterBurnGeometry(u64 spawn_cookie)
+{
+    using namespace painter_voxel_native;
+    if (!spawn_cookie || !m_painter_voxel_live || !pool || m_EntityAlife.getDestroy()) return false;
+    auto& owner=*m_painter_voxel_live;
+    if (owner.identity.spawn_cookie!=spawn_cookie || !owner.worker || !owner.visual ||
+        smart_cast<IKinematics*>(m_EntityAlife.Visual())!=owner.visual ||
+        owner.visual->LL_RenderGeometryGeneration()!=owner.geometry) return false;
+    if (owner.separation_job||owner.stage||owner.sever_revision>owner.separation_checked_revision)return false;
+    auto current=owner.worker->published_burn_surface();
+    if(!current)return false;
+    if(!current->needs_burn_prime()){owner.burn_prime_ready=true;return true;}
+    owner.burn_prime_ready=false;
+    owner.burn_prime_wanted=true;
+    if (!owner.burn_prime_queued && pool->prime_burn_geometry(owner.worker,owner.geometry,owner.sequence+1)) {
+        ++owner.sequence;
+        owner.burn_prime_queued=true;
+    }
+    return owner.burn_prime_queued;
+}
+
+bool PainterPrimeBurnGeometry(u16 id,u64 spawn_cookie)
+{
+    if (!g_pGameLevel) return false;
+    auto* object=Level().Objects.net_Find(id);
+    if(auto* holder=smart_cast<CPhysicsShellHolder*>(object))
+        if(painter_piece_continuation::prime_burn_geometry(*holder,spawn_cookie))return true;
+    auto* npc=smart_cast<CAI_Stalker*>(object);
+    return npc && npc->character_physics_support() &&
+        npc->character_physics_support()->PrimePainterBurnGeometry(spawn_cookie);
 }
 bool painter_voxel_live_bind(u16 id)
 {

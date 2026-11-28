@@ -300,6 +300,15 @@ void CRenderTarget::accum_volumetric_lv(light* L)
 		L->m_volumetric_intensity = Falloff;
 		L->flags.bVolumetric = Falloff <= 0 ? false : true;
 	}
+	// firebeams: a fire lamp's shafts follow the fire menu - strength from the fog and the fire's smoke, a short reach
+	if (L->m_parent && L->m_parent->flags.bFireSource)
+	{
+		const float fade = 1.f - std::min(std::max((L->vis.distance - 20) * 0.01f, 0.0f), 1.0f);
+		L->m_volumetric_intensity = L->m_parent->fire_beam * fade;
+		L->m_volumetric_distance = L->m_parent->fire_beam_reach;
+		L->flags.bVolumetric = L->m_volumetric_intensity > 0.f;
+		if (!L->flags.bVolumetric) return;
+	}
 
 	if (!L->flags.bVolumetric){
         if(debug)++debug->skipped[unsigned(ps_ssfx_volumetric.x>0?Skip::DistanceFade:Skip::DisabledInAccumulator)];
@@ -412,6 +421,15 @@ void CRenderTarget::accum_volumetric(light* L)
 		float Falloff = ps_ssfx_volumetric.y - std::min(std::max((L->vis.distance - 20) * 0.01f, 0.0f), 1.0f) * ps_ssfx_volumetric.y;
 		L->m_volumetric_intensity = Falloff;
 		L->flags.bVolumetric = Falloff <= 0 ? false : true;
+	}
+	// firebeams: a fire lamp's shafts follow the fire menu - strength from the fog and the fire's smoke, a short reach
+	if (L->m_parent && L->m_parent->flags.bFireSource)
+	{
+		const float fade = 1.f - std::min(std::max((L->vis.distance - 20) * 0.01f, 0.0f), 1.0f);
+		L->m_volumetric_intensity = L->m_parent->fire_beam * fade;
+		L->m_volumetric_distance = L->m_parent->fire_beam_reach;
+		L->flags.bVolumetric = L->m_volumetric_intensity > 0.f;
+		if (!L->flags.bVolumetric) return;
 	}
 
 	//if (L->flags.type != IRender_Light::SPOT) return;

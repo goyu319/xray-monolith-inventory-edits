@@ -475,17 +475,7 @@ _value_type CStalkerPropertyEvaluatorShouldThrowGrenade::evaluate()
 	if (m_storage->property(eWorldPropertyStartedToThrowGrenade))
 		return (true);
 
-	// Explicit, expiring script request; scripts retain ownership and lifecycle.
-	// No hook means the original cover and visibility policy remains unchanged.
-	bool tactical_request = false;
-	if (object().g_Alive() && object().human_being() && object().can_throw_grenades())
-	{
-		::luabind::functor<bool> request;
-		if (ai().script_engine().functor("_G.CAI_Stalker__TacticalGrenadeRequested", request))
-			tactical_request = request(object().lua_game_object());
-	}
-
-	if (!tactical_request && !m_storage->property(eWorldPropertyInCover) && !m_storage->property(eWorldPropertyPositionHolded) && !m_storage
+	if (!m_storage->property(eWorldPropertyInCover) && !m_storage->property(eWorldPropertyPositionHolded) && !m_storage
 		->property(eWorldPropertyEnemyDetoured))
 		return (false);
 
@@ -505,7 +495,7 @@ _value_type CStalkerPropertyEvaluatorShouldThrowGrenade::evaluate()
 	if (!enemy->human_being())
 		return (false);
 
-	if (!tactical_request && object().memory().visual().visible_now(enemy))
+	if (object().memory().visual().visible_now(enemy))
 		return (false);
 
 	// do not throw grenades when object is not in our memory (how this can be?)

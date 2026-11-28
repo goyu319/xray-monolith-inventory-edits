@@ -800,7 +800,7 @@ inline std::shared_ptr<SeparationOutput> separation_detail::prepareSnapshot(cons
    for(std::size_t i=first;i<last;++i)try{auto&piece=out->pieces[i];const auto pieceStarted=core::Clock::now();
     auto seed=std::const_pointer_cast<PieceSeed>(piece.seed);need(bool(seed),"separation_piece_seed_missing");
     auto owned=earlyOwner[i]?std::move(earlyOwner[i]->value):(seed->components.empty()?component_detail::ownerAndTopology(*builtVolume,piece.component):component_detail::ownerAndTopology(*builtVolume,seed->components));
-    Grid g;g.size=base.size;g.origin=base.origin;g.pitch=base.pitch;g.base=base.base;g.anatomy=base.anatomy;g.material_slots=base.material_slots;g.ownership=std::move(owned.first);
+    Grid g;g.size=base.size;g.origin=base.origin;g.pitch=base.pitch;g.base=base.base;g.anatomy=base.anatomy;g.material_slots=base.material_slots;g.boneStrikes=base.boneStrikes;g.ownership=std::move(owned.first);
     const auto&comp=builtVolume->components[piece.component];Cell lo{comp.lo[0]>>3,comp.lo[1]>>3,comp.lo[2]>>3},hi{comp.hi[0]>>3,comp.hi[1]>>3,comp.hi[2]>>3};
     if(!seed->components.empty())for(const auto id:seed->components){const auto&member=builtVolume->components[id];for(unsigned a=0;a<3;++a){(&lo.x)[a]=std::min((&lo.x)[a],member.lo[a]>>3);(&hi.x)[a]=std::max((&hi.x)[a],member.hi[a]>>3);}}
     for(const auto&ch:piece.mesh.children)for(const auto&v:ch.vertices){const Cell c{int(std::floor((v.surface[0]-base.origin.x)/base.pitch))>>3,int(std::floor((v.surface[1]-base.origin.y)/base.pitch))>>3,int(std::floor((v.surface[2]-base.origin.z)/base.pitch))>>3};
@@ -881,6 +881,15 @@ inline std::shared_ptr<SeparationOutput> separation_detail::prepareSnapshot(cons
      std::cerr<<"ISLAND_CONSERVATION owner="<<piece.component<<" cells="<<piece.cells<<" actual_components="<<rebuilt.components.size()-1<<" topology_exact=1 members=";
      for(const auto id:seed->components)std::cerr<<id<<":"<<builtVolume->components[id].cells<<",";std::cerr<<std::endl;
 #endif
+    }
+    // The display map comes from this child's final published mask, never the parent's map.
+    // The packer only uses entries that also exist in this cropped physical grid.
+    g.visibleFloor=std::move(seed->grenadeFloor);
+    g.lodAttached=base.lodAttached&&piece.component==out->source_component;
+    if(g.lodAttached){
+     g.blowoutTags=base.blowoutTags;
+     if(piece.mesh.mask_volume)
+      piece.mesh.removal_field=painter_detail::publishBlowoutTags(g,std::move(piece.mesh.removal_field));
     }
     seed->asset=asset;seed->parent=stamp;seed->grid=std::make_shared<const Grid>(std::move(g));
     seed->topology=std::make_shared<const gfy_connectivity::Topology>(std::move(owned.second));

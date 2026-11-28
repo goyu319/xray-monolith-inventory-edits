@@ -1,6 +1,7 @@
 #pragma once
 #include "SkeletonCustom.h"
 #include "../../Include/xrRender/RuntimeSkinGeometry.h"
+namespace PainterBurnGpu { struct Map; }
 struct RuntimeRequiredFields;
 struct RuntimeGeometryPacket
 {
@@ -9,8 +10,10 @@ struct RuntimeGeometryPacket
     xr_vector<xr_vector<CBoneData::FacesVec>> faces;
     u64 owner_cookie = 0, damage_revision = 0, geometry_generation = 0;
     bool separation_packet = false;
+    bool flight_preview = false, flight_detail = false;
     std::shared_ptr<RuntimeRequiredFields> required_fields;
 #ifdef USE_DX11
+    std::unordered_map<const CSkeletonX*,std::shared_ptr<PainterBurnGpu::Map>> burnFaces;
     std::shared_ptr<PainterBloodInstance> blood_cells; // shared rest-cell lineage, committed with geometry
 #endif
     RuntimeGeometryPacket* next_retired = nullptr;
@@ -60,6 +63,7 @@ struct RuntimeStagedChild
     xr_string shader, texture; // non-empty overrides the original material
     const gfy_packed::Child* source = nullptr; // owned by RuntimeGeometryStage::packed
     // Produced by Run().
+    std::shared_ptr<PainterBurnGpu::Map> burnFaces;
     bool built = false, projection_attempted = false;
     ref_smem<vertBoned4W> vertices;
     ref_smem<u16> bones_used, indices;
@@ -88,9 +92,11 @@ public:
     std::shared_ptr<RuntimeRequiredFields> required_fields;
     RuntimeGeometryStage* queue_next = nullptr; // executor FIFO (intrusive, no allocation)
     LARGE_INTEGER submitted{};
+    std::shared_ptr<const painter_burn::SourceFaces> burnSource;
     const void* owner_model = nullptr; // identity only, never dereferenced off the barrier
     u64 owner_cookie = 0, expected_generation = 0, damage_revision = 0;
     bool separation_packet = false, published_gap = false;
+    bool flight_preview = false, flight_detail = false;
     u16 bone_count = 0;
     unsigned registers = 0;
     size_t originals_count = 0, count = 0;

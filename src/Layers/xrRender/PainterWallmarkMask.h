@@ -1,6 +1,7 @@
 #pragma once
 #ifdef USE_DX11
 #include "PainterRemovalGpu.h"
+#include "PainterBloodOwner.h"
 #include "PainterWallmarkOwnership.h"
 #include "ResourceManager.h"
 #include "PainterSoftShader.h"
@@ -57,6 +58,11 @@ inline bool Prepare(CResourceManager&resources,const std::shared_ptr<PainterRemo
                 if(withTear&&!xr_strcmp(*c->name,"s_tear_map"))binding=&withTear->map;
                 if(withTear&&!xr_strcmp(*c->name,"s_tear_bake"))binding=&withTear->bake;
                 if(binding){if(c->type!=RC_dx10texture){reason="wallmark_mask_resource_type";return false;}textures.emplace_back(c->samp.index,*binding);++bindings;continue;}
+                // The installed decal pass may shade blood without using the SSS console vector.
+                if (!xr_strcmp(*c->name,"ssfx_blood_decals") && c->type==RC_float) {
+                    c->handler=PainterBloodDecalControls();
+                    continue;
+                }
                 auto*prior=old->constants?old->constants->get(*c->name):nullptr;
                 if(!prior||prior->type!=c->type){reason="wallmark_mask_constant";return false;}
                 c->handler=prior->handler;

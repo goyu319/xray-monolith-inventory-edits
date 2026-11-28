@@ -1,6 +1,7 @@
 // body_hit_outcomes_v1
 #pragma once
 #include "painter_voxel/PainterPieceContinuation.h"
+#include <chrono>
 #include "PainterDamagedFragmentProducer_impl.h"
 #include "CharacterPhysicsSupport.h"
 #include "ai/stalker/ai_stalker.h"
@@ -17,6 +18,8 @@
 #include <set>
 #include <memory>
 #include <cmath>
+#include "PainterBurnHost.h"
+void PainterSubmitLocalThermal(CObject&,const SHit&);
 #include "PainterCommittedEffects_impl.h"
 #include "PainterCranialRemnants_impl.h"
 
@@ -35,7 +38,10 @@ inline void hook_part_session(gfy_live::Session& session,const std::shared_ptr<P
         if(std::find(Device.seqParallelBeforRenderPending.begin(),Device.seqParallelBeforRenderPending.end(),callback)==Device.seqParallelBeforRenderPending.end())
             Device.seqParallelBeforRenderPending.push_back(callback);});
 }
+#include "FlightDetail_impl.h"
 struct Owner {
+    std::unique_ptr<flight_detail::Pending> flight;
+    u64 flight_attempted_revision=0;
     CPhysicsShellHolder* object=nullptr;
     CCharacterPhysicsSupport* source_support=nullptr;
     CPhysicsSkeletonObject* fragment=nullptr;
@@ -132,6 +138,7 @@ void restamp(gfy_packed::Mesh& mesh,u64 cookie,u64 generation,u64 revision){
         mesh.skin_ownership=std::move(field);
     }
 }
+#include "FlightAdopt_impl.h"
 void cancel_split(Owner& entry){
     auto it=splits.find(entry.object->ID());
     if(it==splits.end())return;
@@ -152,7 +159,8 @@ void cancel_split(Owner& entry){
 }
 void split_canceled(Owner& entry,const char* why){
     Msg("[painter_piece_continuation] id=%u phase=split_canceled reason=%s",entry.object->ID(),why);cancel_split(entry);}
-bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> result){
+bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> result,std::shared_ptr<painter_flight::Group> flight){
+    painter_flight_perf::Scope flightTime("piece_spawn");
     const auto& cpu=*result;
     // splitfix: every refusal names itself (the caller's split_refused summary line follows it)
     const u64 refusedRevision=cpu.stamp.revision;
@@ -163,6 +171,7 @@ bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> 
     auto req=std::make_shared<painter_damaged_fragment::Prepared>();
     req->stamp=cpu.stamp;req->current_owner=entry.identity;
     req->gore=cpu.gore;
+    req->flight=std::move(flight);
     req->expected_generation=entry.geometry;
     req->publication_revision=cpu.stamp.revision;
     req->continuation_input=entry.input;
@@ -182,6 +191,7 @@ bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> 
                 Msg("[painter_piece_continuation] id=%u phase=fitted_refused part=stump reason=%s",entry.object->ID(),painter_damaged_fragment::producer::fitted_refusal());return false;}
         }else{
             auto& fragment=req->pieces.emplace_back();
+            if(req->flight)fragment.flight_visual=piece.flight_visual;
             fragment.component_id=piece.component;fragment.mesh=piece.mesh;fragment.seed=piece.seed;
             fragment.ocular_remnant=piece.ocular_remnant;
             fragment.burst_chunk=piece.burst_chunk; // chunknosplash
@@ -243,6 +253,7 @@ bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> 
         stage->name="painter_damaged_"+std::to_string(++painter_damaged_fragment::serial);
         if(painter_damaged_fragment::serial==u64(-1))return refuse("piece_serial");
         batch.child_cookies[i]=++next_piece_cookie;
+        if(req->pieces[i].flight_visual)stage->render.proxy=painter_flight::proxy_packet(*req->pieces[i].flight_visual,req->original_roles.size(),batch.child_cookies[i],req->publication_revision);
         restamp(req->pieces[i].mesh,batch.child_cookies[i],0,req->publication_revision);
         painter_damaged_fragment::named.emplace(stage->name,stage);
         batch.stages.push_back(stage);
@@ -280,12 +291,13 @@ bool start_split(Owner& entry,std::shared_ptr<const gfy_live::SeparationOutput> 
 bool poll_split(Owner& entry){
     auto it=splits.find(entry.object->ID());
     if(it==splits.end())return false;
+    painter_flight_perf::Scope flightTime("piece_commit");
     auto& batch=it->second;auto& object=*entry.object;
     auto& req=*batch.request;auto* k=entry.visual;
     painter_commit_parts::part("ps_check"); // piececommit
     const bool expired=painter_damaged_fragment::fragment_spawn_expired(
         Device.dwTimeGlobal,batch.started_at,painter_damaged_fragment::spawn_timeout_ms);
-    if(!valid_owner(entry)||!separation_allowed(object)||expired){
+    if(!valid_owner(entry)||!separation_allowed(object)||expired||(req.flight&&!k->LL_FlightPreviewAllowed())){
         Msg("[painter_piece_continuation] id=%u phase=split_canceled expired=%u",object.ID(),unsigned(expired));
         cancel_split(entry);return false;
     }
@@ -300,10 +312,10 @@ bool poll_split(Owner& entry){
         if(!ticket.mesh)return false;
         RuntimeSkinUpdate header;header.owner_cookie=owner_cookie;
         header.expected_geometry_generation=expected;header.damage_revision=req.publication_revision;
-        header.separation_packet=true;header.exact_rig=entry.rig;
+        header.separation_packet=true;header.flight_preview=bool(ticket.proxy);header.exact_rig=entry.rig;
         int outcome=RuntimeStageOutcome::unavailable;
-        ticket.handle=owner.LL_StageRuntimeGeometry(header,ticket.mesh,"models\\model","wm\\painter_stump_limb",
-            entry.textures.empty()?nullptr:&entry.textures,owner_cookie,outcome);
+        ticket.handle=owner.LL_StageRuntimeGeometry(header,ticket.display(),"models\\model","wm\\painter_stump_limb",
+            entry.textures.empty()?nullptr:&entry.textures,owner_cookie,outcome,k->LL_PainterBurnStageSource());
         ticket.attempted=true;
         return ticket.handle||outcome==RuntimeStageOutcome::unavailable;
     };
@@ -317,6 +329,8 @@ bool poll_split(Owner& entry){
         render_ready=stage->render.ready()&&render_ready;
     }
     if(!render_ready)return false;
+    PainterBurnPublication burnPublication(k);
+    if(!burnPublication.ready())return false;
     painter_commit_parts::part("ps_bones");
     std::vector<Fmatrix> model(entry.rig.size()),palette(entry.rig.size());
     {xrCriticalSectionGuard guard(&k->UCalc_Mutex);
@@ -383,12 +397,12 @@ bool poll_split(Owner& entry){
         painter_commit_parts::part("ps_piece_adopt");
         RuntimeSkinUpdate update;
         update.owner_cookie=batch.child_cookies[stage->index];
-        update.expected_geometry_generation=0;
+        update.expected_geometry_generation=0;update.flight_preview=bool(stage->render.proxy);
         update.damage_revision=req.publication_revision;
         update.separation_packet=true;update.exact_rig=entry.rig;
         okay=stage->render.handle?
             child->LL_PrepareStagedRuntimeGeometry(stage->render.handle,update,update.owner_cookie,object.Visual(),&stage->client->XFORM()):
-            (AppendPackedRuntimeChildren(*stage->render.mesh,update,"models\\model","wm\\painter_stump_limb",entry.textures.empty()?nullptr:&entry.textures)&&
+            (AppendPackedRuntimeChildren(*stage->render.display(),update,"models\\model","wm\\painter_stump_limb",entry.textures.empty()?nullptr:&entry.textures)&&
              child->LL_PrepareRuntimeGeometryWithDonor(update,update.owner_cookie,object.Visual(),&stage->client->XFORM()));
         if(!okay&&!*why)why="piece_render_prepare";
     }
@@ -423,8 +437,10 @@ bool poll_split(Owner& entry){
     bool reserved_all=true;
     for(const auto& stage:batch.stages){
         auto identity=entry.identity;identity.spawn_cookie=batch.child_cookies[stage->index];
+        const auto& part=req.pieces[stage->index];
+        painter_flight::Member flight{req.flight,part.component_id,req.original_roles,part.children};
         reserved_all=reserve(*stage->client,req.pieces[stage->index].seed,stage->render.mesh,
-            std::move(identity),1,entry.input,entry.rig,entry.textures,entry.original_children,req.publication_revision);
+            std::move(identity),1,entry.input,entry.rig,entry.textures,entry.original_children,req.publication_revision,req.flight?&flight:nullptr);
         if(!reserved_all)break;
     }
     if(!reserved_all){Msg("[painter_piece_continuation] id=%u phase=split_canceled reason=piece_reserve",object.ID());discard_all();return false;}
@@ -476,6 +492,7 @@ bool poll_split(Owner& entry){
     entry.seed=req.stump_seed;entry.birth=batch.stump_render->mesh;
     entry.first_revision=entry.sequence=entry.sever_revision=entry.checked_revision=req.publication_revision;
     entry.session=std::move(replacement_session);entry.ready_link=std::move(replacement_link);
+    painter_burn_host::bind(object,entry.identity,entry.session,true);
     painter_commit_parts::part("ps_activate");
     unsigned bound=0;
     for(const auto& stage:batch.stages){
@@ -491,6 +508,8 @@ bool poll_split(Owner& entry){
         painter_piece_continuation::set_collision_group(*stage->client,split_group);
         painter_damaged_fragment::named.erase(stage->name);
     }
+    if(painter_burn_host::active()){std::vector<CObject*> parts; for(const auto& s:batch.stages)parts.push_back(s->client);painter_burn_host::split(object,parts);}
+    burnPublication.release();
     painter_commit_parts::part("ps_routes");
     grenade_ticket.commit();retry_grenade_routes();
     entry.cancel_retries=0; // R33
@@ -511,6 +530,8 @@ bool publish(Owner& entry,const std::shared_ptr<const gfy_live::Output>& out){
     bool accepted=false;CTimer timer;timer.Start();const char* path="sync";RuntimeStageTiming timing;
     RuntimeSkinUpdate update;update.owner_cookie=entry.identity.spawn_cookie;update.expected_geometry_generation=out->stamp.expected_generation;
     update.damage_revision=out->stamp.revision;update.exact_rig=entry.rig;
+    PainterBurnPublication burnPublication(current&&!out->no_geometry_change&&(!entry.stage||entry.stage->Ready())?k:nullptr);
+    if(!burnPublication.ready())return false;
     if(current&&out->no_geometry_change)accepted=true;
     else if(current){
         if(!entry.stage){int outcome=RuntimeStageOutcome::unavailable;
@@ -524,7 +545,9 @@ bool publish(Owner& entry,const std::shared_ptr<const gfy_live::Output>& out){
         }else{if(!entry.stage->Ready())return false;path="offthread";
             accepted=k->LL_InstallStagedRuntimeGeometry(entry.stage,update,entry.identity.spawn_cookie);timing=entry.stage->Timing();entry.drop_stage();}
     }
+    burnPublication.release();
     entry.session->acknowledge_output(out,accepted,k->LL_RenderGeometryGeneration());
+    if(accepted&&!out->no_geometry_change)painter_burn_host::refresh(object,entry.session);
     Msg("[painter_piece_continuation] id=%u phase=%s revision=%llu events=%llu triangles=%llu worker_ms=%.1f install_ms=%.2f path=%s reason=%s admit_ms=%.2f wrap_ms=%.2f wallmarks_ms=%.2f commit_ms=%.2f children=%u marks=%u t=%u",
         object.ID(),accepted?(out->no_geometry_change?"no_op":"committed"):"rejected",out->stamp.revision,u64(out->batch_events),u64(out->triangles),
         out->worker_ms,timer.GetElapsed_ms_f(),path,out->error.empty()?(current?"none":"stale_generation"):out->error.c_str(),
@@ -542,6 +565,7 @@ bool publish(Owner& entry,const std::shared_ptr<const gfy_live::Output>& out){
             u64(out->geometry_batch_splits),u64(out->deferred_events),out->geometry_batch_reason.c_str());
     if(!accepted)return true;
     entry.geometry=k->LL_RenderGeometryGeneration();
+    if(out->burn_surface_prime)return true;
     painter_explosions::accepted(object,*out);
     if(!out->no_geometry_change)painter_cranial_remnants::committed(object,out->joints,out->impacts,out->cranial,out->stamp.revision);
     if(!out->no_geometry_change)entry.damage_revision=out->stamp.revision;
@@ -554,7 +578,7 @@ bool reserve(CPhysicsShellHolder& object,std::shared_ptr<const gfy_live::PieceSe
     std::shared_ptr<const gfy_packed::Mesh> published,gfy_live::Identity identity,std::uint64_t generation,
     const gfy_live::SeparationInput& input,const xr_vector<RuntimeSkinBone>& rig,
     const xr_vector<shared_str>& textures,std::uint16_t original_children,
-    std::uint64_t published_revision)try{
+    std::uint64_t published_revision,const painter_flight::Member* flight)try{
     auto* k=smart_cast<IKinematics*>(object.Visual());
     if(!seed||!published||!k||!generation||!object.PPhysicsShell()||!object.PPhysicsShell()->isFullActive()||
        !original_children||rig.size()!=k->LL_BoneCount()||owners.find(object.ID())!=owners.end())return false;
@@ -567,9 +591,11 @@ bool reserve(CPhysicsShellHolder& object,std::shared_ptr<const gfy_live::PieceSe
     entry->rig=rig;entry->textures=textures;entry->original_children=original_children;
     entry->first_revision=published_revision;entry->thread=GetCurrentThreadId();
     entry->seed=std::move(seed);entry->birth=std::move(published);
+    if(flight){entry->flight=std::make_unique<flight_detail::Pending>();entry->flight->member=*flight;}
     auto* pool=painter_voxel_live_pool();
     entry->session=pool?pool->attach_piece(entry->seed,entry->identity,entry->birth,entry->first_revision,generation):std::shared_ptr<gfy_live::Session>();
     if(!entry->session)return false;
+    if(flight)entry->session->hold_flight_birth();
     entry->ready_link=std::make_shared<PartReadyLink>();entry->ready_link->source_support=entry->source_support;entry->ready_link->fragment=entry->fragment;
     hook_part_session(*entry->session,entry->ready_link);
     if(!painter_explosions::register_target(object,entry->identity)){entry->session->cancel();return false;}
@@ -583,6 +609,13 @@ bool activate(CPhysicsShellHolder& object,std::uint64_t generation){
        generation!=entry->geometry||!object.PPhysicsShell()||!object.PPhysicsShell()->isFullActive())return false;
     if(!entry->session||!entry->ready_link)return false;
     entry->shell=object.PPhysicsShell();entry->active=true;
+    if(entry->flight){
+        entry->flight->firstFrame=Device.dwFrame;
+        const auto& parent=entry->flight->member.group->job->stamp();
+        Msg("[painter_flight] id=%u phase=proxy_visible component=%u parent_cookie=%llu parent_revision=%llu child_cookie=%llu frame=%u t=%u",object.ID(),entry->flight->member.component,parent.owner.spawn_cookie,parent.revision,entry->identity.spawn_cookie,Device.dwFrame,Device.dwTimeGlobal);
+        queue(object);
+    }
+    painter_burn_host::bind(object,entry->identity,entry->session,true);
     entry->sequence=entry->sever_revision=entry->checked_revision=entry->first_revision;
     Msg("[painter_piece_continuation] id=%u phase=attached revision=%llu generation=%llu triangles=%llu",object.ID(),entry->first_revision,generation,
         [&]{u64 n=0;for(const auto& c:entry->birth->children)n+=c.indices.size()/3;return n;}());
@@ -609,6 +642,7 @@ void forget(CPhysicsShellHolder& object){
     auto it=owners.find(object.ID());
     if(it==owners.end()||it->second->object!=&object)return;
     auto& entry=*it->second;
+    painter_burn_host::forget(object,entry.session);
     if(!entry.committed_effects.empty())
         Msg("[painter_piece_continuation] id=%u phase=wound_blood_invalidated reason=owner_canceled receipts=%u",object.ID(),unsigned(entry.committed_effects.size()));
     cancel_split(entry);
@@ -634,14 +668,38 @@ void forget(CPhysicsShellHolder& object){
     }
     owners.erase(it);
 }
+bool prime_burn_geometry(CPhysicsShellHolder& object,u64 cookie){
+    auto* entry=find(object);
+    if(!entry||!entry->active||!entry->session||entry->identity.spawn_cookie!=cookie||
+       !valid_owner(*entry)||entry->job||entry->flight||entry->stage||
+       splits.find(object.ID())!=splits.end())return false;
+    auto prior=entry->session->published_burn_surface();
+    if(!prior)return false;
+    if(!prior->needs_burn_prime())return true;
+    auto* pool=painter_voxel_live_pool();
+    if(!pool||!pool->prime_burn_geometry(entry->session,entry->geometry,entry->sequence+1))return false;
+    ++entry->sequence;
+    queue(object);
+    return true;
+}
+bool bind_burn_receiver(CPhysicsShellHolder& object){
+    auto* entry=find(object);
+    if(!entry||!entry->active||!entry->session||object.getDestroy()||!entry->visual||
+       entry->visual!=smart_cast<IKinematics*>(object.Visual())||
+       entry->geometry!=entry->visual->LL_RenderGeometryGeneration())return false;
+    painter_burn_host::bind(object,entry->identity,entry->session,true,true);
+    return true;
+}
 bool owns(const CPhysicsShellHolder& object,std::uint16_t bone){
     auto* entry=find(object);
     return entry&&entry->active&&entry->visual==smart_cast<IKinematics*>(object.Visual())&&bone<entry->rig.size();
 }
 bool capture(CPhysicsShellHolder& object,const SHit& hit){
-    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s",s);});
+    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s host_us=%lld",s,static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));});
     body_hit_outcomes::Scope trace_scope(object.ID(),hit.BulletID,hit.bone(),false,true);
     auto* entry=find(object);if(!entry||!entry->active)return false;
+    if((hit.type()==ALife::eHitTypeBurn||hit.type()==ALife::eHitTypeLightBurn) && entry->session && valid_owner(*entry))
+        PainterSubmitLocalThermal(object,hit);
     const bool meleeHit=hit.type()!=ALife::eHitTypeFireWound&&painter_melee_event::eligible(hit); // melee (2026-11-12, value 3 only)
     if((hit.type()!=ALife::eHitTypeFireWound&&!meleeHit)||!valid_owner(*entry)||!entry->session||
        hit.bone()>=entry->rig.size()||!std::isfinite(hit.damage())||hit.damage()<=0.f){body_hit_outcomes::report("not_queued",(hit.type()!=ALife::eHitTypeFireWound&&!meleeHit)?"piece_hit_type":!valid_owner(*entry)?"piece_owner_invalid":!entry->session?"piece_no_session":hit.bone()>=entry->rig.size()?"piece_bone_range":"piece_nonpositive_power");return true;}
@@ -684,7 +742,7 @@ void retry_grenade_routes(){
 void queue(CPhysicsShellHolder& object){
     auto* entry=find(object);
     if(!entry||!entry->active||entry->queued)return;
-    const bool work=entry->job||splits.find(object.ID())!=splits.end()||!entry->committed_effects.empty()||entry->stage||
+    const bool work=entry->flight||entry->job||splits.find(object.ID())!=splits.end()||!entry->committed_effects.empty()||entry->stage||
         (entry->session&&entry->session->pending())||entry->sever_revision>entry->checked_revision||painter_cranial_remnants::has_pending(object)||painter_explosions::pending(object)||painter_explosions::route_pending(object);
     if(!work)return;
     entry->queued=true;
@@ -705,7 +763,7 @@ void poll(CPhysicsShellHolder& object){
     struct RequeueAtExit {CPhysicsShellHolder& object;~RequeueAtExit(){
         try{auto* e=find(object);
             if(!e||!e->active||e->queued||object.getDestroy())return;
-            if(!e->job&&splits.find(object.ID())==splits.end())return;
+            if(!e->flight&&!e->job&&splits.find(object.ID())==splits.end())return;
             xr_delegate<void()> callback;
             if(e->source_support)callback=xr_make_delegate(e->source_support,&CCharacterPhysicsSupport::ApplyPainterPieceContinuation);
             else if(e->fragment)callback=xr_make_delegate(e->fragment,&CPhysicsSkeletonObject::ApplyPainterPieceContinuation);
@@ -728,10 +786,24 @@ void poll(CPhysicsShellHolder& object){
     if(!entry->committed_effects.empty()&&!painter_committed_effects::drain(object,entry->committed_effects,false))return;
     if(splits.find(object.ID())!=splits.end()){painter_commit_parts::part("pc_split_commit");poll_split(*entry);return;}
     painter_commit_parts::part("pc_check");
+    if(entry->flight&&poll_detail(*entry))return;
     if(!entry->session)return;
     auto* k=entry->visual;
     // A finished separation of this piece: the new parts spawn, this object keeps the largest.
-    if(entry->job&&!painter_explosions::first_incomplete(object))if(auto result=entry->job->completed()){
+    std::shared_ptr<const gfy_live::SeparationOutput> result;
+    std::shared_ptr<painter_flight::Group> flight;
+    if(entry->job&&!painter_explosions::first_incomplete(object)){
+        result=entry->job->completed();
+        const auto& stamp=entry->job->stamp();
+        if((!result||(result->error.empty()&&!result->no_separation))&&entry->flight_attempted_revision!=stamp.revision&&stamp.owner==entry->identity&&
+           stamp.expected_generation==entry->geometry){
+            if(auto early=entry->job->preview();early&&k->LL_FlightPreviewAllowed()){
+                result=std::move(early);entry->flight_attempted_revision=stamp.revision;
+                flight=std::make_shared<painter_flight::Group>();flight->job=entry->job;
+            }
+        }
+    }
+    if(result){
         entry->job.reset();const auto& r=*result;
         const bool stale_cut=r.error.empty()&&!r.no_separation&&r.stamp.owner==entry->identity&&r.pieces.size()>=2&&
             r.stamp.expected_generation!=entry->geometry;
@@ -743,7 +815,8 @@ void poll(CPhysicsShellHolder& object){
         else if(r.no_separation)Msg("[painter_piece_continuation] id=%u phase=still_connected revision=%llu worker_ms=%.1f t=%u",object.ID(),r.stamp.revision,r.worker_ms,Device.dwTimeGlobal);
         else if(r.stamp.owner==entry->identity&&r.stamp.expected_generation==entry->geometry&&r.pieces.size()>=2){
             painter_commit_parts::part("pc_split_start");
-            const bool staged=start_split(*entry,result);
+            const bool staged=start_split(*entry,result,flight);
+            if(!staged&&flight){entry->job=flight->job;return;}
             Msg("[painter_piece_continuation] id=%u phase=%s revision=%llu pieces=%u worker_ms=%.1f t=%u lowpoly=%s",object.ID(),staged?"split_staged":"split_refused",
                 r.stamp.revision,unsigned(r.pieces.size()),r.worker_ms,Device.dwTimeGlobal,r.lowpoly_summary.c_str());
             if(staged)return;}

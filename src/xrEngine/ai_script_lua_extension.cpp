@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include "stdafx.h"
 #include "ai_script_lua_extension.h"
+#include "../xrCore/ShaderSourceCRC.h"
 #include "ai_script_space.h"
 
 #ifdef XRRENDER_R4_EXPORTS
@@ -284,6 +285,16 @@ bool bfDoFile(CLuaVirtualMachine* tpLuaVM, LPCSTR caScriptName, LPCSTR caNameSpa
 	string_path l_caLuaFileName;
 	IReader* l_tpFileReader = FS.r_open(caScriptName);
 	R_ASSERT(l_tpFileReader);
+	{
+		// source edits (configs/painter_source_edits) apply to the installed script
+		const void* edited = nullptr;
+		u32 editedSize = 0;
+		if (painterSourceEdits(caScriptName, l_tpFileReader->pointer(), l_tpFileReader->length(), edited, editedSize))
+		{
+			FS.r_close(l_tpFileReader);
+			l_tpFileReader = xr_new<IReader>(const_cast<void*>(edited), int(editedSize));
+		}
+	}
 	strconcat(sizeof(l_caLuaFileName), l_caLuaFileName, "@", caScriptName);
 
 	if (!bfLoadBuffer(tpLuaVM, static_cast<LPCSTR>(l_tpFileReader->pointer()), (size_t)l_tpFileReader->length(),

@@ -88,7 +88,119 @@ struct Grid {
     std::shared_ptr<const material_volume::Sparse> anatomy;
     std::shared_ptr<const std::vector<std::uint16_t>> material_slots;
     std::shared_ptr<const PieceOwnership> ownership;
-    std::unordered_map<Cell,Tile,CellHash>tiles;
+    using FloorTiles=std::unordered_map<Cell,Tile,CellHash>;
+// Included by Grid. Damage cells retain the identity of the first round that loaded them.
+    struct BoneShot {
+        std::uint64_t id{};
+        bool local{};
+        std::uint64_t owner{};
+        bool operator==(const BoneShot& other) const {
+            return id == other.id && local == other.local && owner == other.owner;
+        }
+    };
+    struct BoneContactTile {
+        Tile all;
+        std::vector<std::pair<BoneShot,Tile>> first;
+    };
+    using BoneBucket = std::unordered_map<Cell,BoneContactTile,CellHash>;
+    struct BoneBuckets { std::array<std::shared_ptr<BoneBucket>,32> pages; };
+    std::shared_ptr<BoneBuckets> boneStrikes;
+    BoneShot boneShot;
+    const BoneContactTile* boneContacts(Cell k) const {
+        if (!boneStrikes) return nullptr;
+        const auto& page=boneStrikes->pages[CellHash{}(k)%32];
+        if (!page) return nullptr;
+        const auto it=page->find(k);
+        return it==page->end() ? nullptr : &it->second;
+    }
+    std::uint64_t boneStrikeWord(Cell k,unsigned word) const {
+        const auto* tile=boneContacts(k);
+        return tile ? tile->all.removed[word] : 0;
+    }
+    bool bonePreviouslyHit(Cell c) const {
+        if (!boneShot.id) return false;
+        const auto* tile=boneContacts(tileKey(c));
+        const auto bit=local(c);
+        const auto mask=std::uint64_t(1)<<(bit%64);
+        if (!tile || !(tile->all.removed[bit/64]&mask)) return false;
+        for (const auto& first:tile->first)
+            if (first.first==boneShot) return !(first.second.removed[bit/64]&mask);
+        return true;
+    }
+    void noteBoneStrike(Cell c) {
+        if (!boneShot.id) return;
+        const auto k=tileKey(c);
+        const auto bit=local(c);
+        const auto mask=std::uint64_t(1)<<(bit%64);
+        if (boneStrikeWord(k,bit/64)&mask) return;
+        if (!boneStrikes) boneStrikes=std::make_shared<BoneBuckets>();
+        else if (!boneStrikes.unique()) boneStrikes=std::make_shared<BoneBuckets>(*boneStrikes);
+        auto& page=boneStrikes->pages[CellHash{}(k)%32];
+        if (!page) page=std::make_shared<BoneBucket>();
+        else if (!page.unique()) page=std::make_shared<BoneBucket>(*page);
+        auto& tile=(*page)[k];
+        auto it=std::find_if(tile.first.begin(),tile.first.end(),[&](const auto& e){return e.first==boneShot;});
+        if (it==tile.first.end()) it=tile.first.emplace(tile.first.end(),boneShot,Tile{});
+        it->second.removed[bit/64]|=mask;
+        tile.all.removed[bit/64]|=mask;
+    }
+    FloorTiles tiles;
+    bool lodAttached = true;
+    std::shared_ptr<const FloorTiles> blowoutTags;
+
+    // The outer hit journal may already contain the bullet tunnel. A nested journal
+    // gives the crater its own before-image even when the two touch the same tile.
+    template<class Cut> auto captureBulletCut(Cut&& cut){
+        if(!lodAttached)return cut();
+        std::unordered_map<Cell,std::pair<bool,Tile>,CellHash> before;
+        auto* parent=journal;
+        journal=&before;
+        try {
+            auto result=cut();
+            journal=parent;
+            if(result.done&&!result.refusal){
+                std::shared_ptr<FloorTiles> next;
+                for(const auto& entry:before){
+                    const auto* current=findTile(entry.first);
+                    if(!current)continue;
+                    Tile delta;std::uint64_t any=0;
+                    for(unsigned word=0;word<8;++word){
+                        const auto old=entry.second.first?entry.second.second.removed[word]:0;
+                        delta.removed[word]=current->removed[word]&~old;
+                        any|=delta.removed[word];
+                    }
+                    if(!any)continue;
+                    if(!next)next=blowoutTags?std::make_shared<FloorTiles>(*blowoutTags):std::make_shared<FloorTiles>();
+                    // Untracked cells keep full detail if the optional map fills.
+                    if(next->size()>=8192&&next->find(entry.first)==next->end())continue;
+                    auto& saved=(*next)[entry.first];
+                    for(unsigned word=0;word<8;++word)saved.removed[word]|=delta.removed[word];
+                }
+                if(next)blowoutTags=std::move(next);
+            }
+            if(parent)parent->merge(before);
+            return result;
+        } catch(...) {
+            journal=parent;
+            if(parent)parent->merge(before);
+            throw;
+        }
+    }
+
+    // Cosmetic cells of an irregular crater that retain their original material.
+    // Physics, damage admission and connectivity read only tiles.
+    std::shared_ptr<const FloorTiles> visibleFloor;
+    static void applyDisplayTile(Tile& physical,const Tile& relief){
+        for(unsigned i=0;i<8;++i)physical.removed[i]&=~relief.removed[i];
+    }
+    // These are copies made for publication. Foreign and ownership marks are added afterwards.
+    void applyDisplayFloor(FloorTiles& display)const{
+        if(!visibleFloor)return;
+        for(const auto& item:*visibleFloor){
+            auto found=display.find(item.first);
+            if(found!=display.end())applyDisplayTile(found->second,item.second);
+        }
+    }
     // Undo journal (optional): the prior state of every tile erase() first touches (existed?, tile). Lets a
     // failed cut roll back without copying the whole grid.
     std::unordered_map<Cell,std::pair<bool,Tile>,CellHash>* journal{};
@@ -118,7 +230,7 @@ struct Grid {
 };
 // A copy-on-write view of `base` (Grid::overlay_base): the same lattice, anatomy and ownership, no tiles of its own.
 inline Grid overlayOf(const Grid& base){Grid g;g.size=base.size;g.origin=base.origin;g.pitch=base.pitch;g.base=base.base;g.anatomy=base.anatomy;
-    g.material_slots=base.material_slots;g.ownership=base.ownership;g.overlay_base=&base;return g;}
+    g.material_slots=base.material_slots;g.ownership=base.ownership;g.boneStrikes=base.boneStrikes;g.boneShot=base.boneShot;g.overlay_base=&base;return g;}
 // GFY_TEAR_OVERLAY=0: the parallel tear lanes copy the whole grid as before (A/B measurements; results are identical).
 inline bool tearOverlayEnabled(){static const bool on=[]{const char* e=std::getenv("GFY_TEAR_OVERLAY");return !e||std::atoi(e)!=0;}();return on;}
 Grid loadGrid(const std::string& path){

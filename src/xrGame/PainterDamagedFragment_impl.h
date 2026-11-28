@@ -1,11 +1,14 @@
+#include "PainterFlightTiming.h"
+#include "PainterBurnHost.h"
 // Compiled once by PhysicsSkeletonObject.cpp. Hidden native fragment staging;
 // a failed or stale ticket never changes the original corpse.
 #include "painter_voxel/PainterDamagedFragment.h"
+#include "painter_voxel/FlightGroup.h"
 #include "painter_voxel/FragmentSpawnLifetime.h"
 #include "painter_voxel/FragmentNativeAdmission.h"
 #include "painter_voxel/CollisionLimits.h"
 #include "painter_voxel/PainterPieceContinuation.h"
-#include "painter_voxel/SkinEdge.h" // maskdecal: the cut ends' skin edges
+#include "painter_voxel/SkinEdgeWork.h" // maskdecal: the cut ends' skin edges
 #include "PainterCommitParts.h" // piececommit
 #include "../Include/xrRender/RuntimeSkinGeometry.h"
 #include "../Include/xrRender/RuntimeGeometryStage.h"
@@ -16,7 +19,6 @@
 #include "../xrphysics/ExtendedGeom.h"
 #include "painter_voxel/PainterExplosions.h"
 #include "ai/stalker/ai_stalker.h"
-#include "painter_ai/EngineCombatAdapter.h"
 #include "CharacterPhysicsSupport.h"
 #include "level.h"
 #include "ai_object_location.h"
@@ -84,6 +86,8 @@ void apply_piece_contact(CPhysicsShell& shell,IKinematics* k,u16 root,CPhysicsSh
 // Cancel/release on failure, despawn and commit; never retain a model pointer
 // for worker access and never wait for the worker on the game thread.
 struct RenderTicket {
+    std::shared_ptr<const gfy_packed::Mesh> proxy;
+    std::shared_ptr<const gfy_packed::Mesh> display()const{return proxy?proxy:mesh;}
     IRuntimeGeometryStage* handle=nullptr;
     std::shared_ptr<const gfy_packed::Mesh> mesh;
     bool attempted=false;
@@ -103,6 +107,7 @@ struct Stage {
     CPhysicsShell* pose_source=nullptr;
     bool spawned=false, failed=false, canceled=false;
     RenderTicket render;
+    std::shared_ptr<skin_edge::Work> edge_body_work,edge_piece_work;
     std::shared_ptr<const gfy_packed::Mesh> edge_body,edge_piece; // maskdecal: the cut ends' packed meshes, until the commit
 };
 // Reserve immutable native-born all-parts evidence before the visual/physics transaction.
@@ -143,6 +148,18 @@ struct Batch {
 // (PainterCommittedEffects_impl.h) and taken by the commit of the separation it causes (the bone of the piece; the only one armed)
 struct CutArm {u16 bone=BI_NONE;Fvector point,axis;u32 at=0;};
 std::map<u16,std::vector<CutArm>> cut_arms;
+// Read-only counterpart of take_cut: no expiration erasure or consumption before commit.
+bool peek_cut(u16 source_id,u16 bone,CutArm& out){
+    const auto it=cut_arms.find(source_id);if(it==cut_arms.end())return false;
+    const auto& list=it->second;const u32 now=Device.dwTimeGlobal;
+    const CutArm* latest=nullptr;const CutArm* sole=nullptr;std::size_t remaining=0;
+    for(const auto& cut:list)if(now-cut.at<=20000u){++remaining;sole=&cut;if(cut.bone==bone)latest=&cut;}
+    if(!latest&&remaining==1)latest=sole;if(!latest)return false;out=*latest;return true;
+}
+skin_edge::WorkKey edge_work_key(u16 bone,const CutArm& cut){
+    skin_edge::WorkKey key;key.root_bone=bone;key.cut_bone=cut.bone;key.at=cut.at;
+    key.point={cut.point.x,cut.point.y,cut.point.z};key.axis={cut.axis.x,cut.axis.y,cut.axis.z};return key;
+}
 bool take_cut(u16 source_id,u16 bone,CutArm& out){
     const auto it=cut_arms.find(source_id);if(it==cut_arms.end())return false;
     auto& list=it->second;const u32 now=Device.dwTimeGlobal;
@@ -185,14 +202,21 @@ std::vector<SeverNotice> committed_notices(const Prepared& request,
             CutArm cut;
             if(take_cut(request.source_id,piece.root_bone,cut)){
                 const double c[3]={cut.point.x,cut.point.y,cut.point.z},a[3]={cut.axis.x,cut.axis.y,cut.axis.z};
-                const auto body=skin_edge::measure(*stage->edge_body,piece.root_bone,c,a),tip=skin_edge::measure(*stage->edge_piece,piece.root_bone,c,a);
+                const auto owner_start=std::chrono::steady_clock::now();const auto key=edge_work_key(piece.root_bone,cut);
+                const auto* cached_body=stage->edge_body_work?stage->edge_body_work->Find(*stage->edge_body,key):nullptr;
+                const auto* cached_tip=stage->edge_piece_work?stage->edge_piece_work->Find(*stage->edge_piece,key):nullptr;
+                skin_edge::Result body_fallback,tip_fallback;
+                const auto& body=cached_body?*cached_body:(body_fallback=skin_edge::measure(*stage->edge_body,piece.root_bone,c,a));
+                const auto& tip=cached_tip?*cached_tip:(tip_fallback=skin_edge::measure(*stage->edge_piece,piece.root_bone,c,a));
+                const double owner_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-owner_start).count();
                 notice.edge_bone=piece.root_bone;
                 for(const auto& q:body.points){Fvector v;v.set(q[0],q[1],q[2]);notice.edge_body.push_back(v);}
                 for(const auto& q:tip.points){Fvector v;v.set(q[0],q[1],q[2]);notice.edge_piece.push_back(v);}
-                Msg("[painter_damaged_fragment] id=%u phase=skin_edge bone=%s body_sectors=%u body_back_mm=%.1f piece_sectors=%u piece_back_mm=%.1f tested=%u ms=%.2f",
+                Msg("[painter_damaged_fragment] id=%u phase=skin_edge bone=%s body_sectors=%u body_back_mm=%.1f piece_sectors=%u piece_back_mm=%.1f tested=%u ms=%.2f worker_cached=%u owner_ms=%.3f",
                     unsigned(request.source_id),notice.bone.c_str(),unsigned(body.points.size()),1000*skin_edge::median(body.back),
-                    unsigned(tip.points.size()),1000*skin_edge::median(tip.back),body.tested+tip.tested,body.ms+tip.ms);
+                    unsigned(tip.points.size()),1000*skin_edge::median(tip.back),body.tested+tip.tested,body.ms+tip.ms,unsigned(bool(cached_body))+unsigned(bool(cached_tip)),owner_ms);
             }
+            stage->edge_body_work.reset();stage->edge_piece_work.reset();
             stage->edge_body.reset();stage->edge_piece.reset();
         }
         notices.push_back(std::move(notice));
@@ -208,7 +232,6 @@ void notify_committed(CPhysicsShellHolder& original,const std::vector<SeverNotic
         // Physical separation has committed at the owner-thread geometry
         // publish barrier. Capture actual visual witnesses before Lua effects.
         painter_commit_parts::part("notify_sever"); // piececommit
-        painter::combat::engine::notify_committed_sever(original,notice.revision,notice.component);
         painter_commit_parts::part("notify_lua");
         try {
             ::luabind::functor<void> callback;
@@ -579,18 +602,34 @@ bool submit(CAI_Stalker& source,const gfy_live::Identity& identity,
     batch->thread=GetCurrentThreadId();batch->started_at=Device.dwTimeGlobal;
     // The renderer may drop its last reference on its worker. Give it ONLY
     // plain packed geometry, never Prepared (shared_str/native session owners).
-    batch->render.mesh=std::make_shared<const gfy_packed::Mesh>(std::move(batch->request->stump));
+    auto body_packet=std::make_shared<gfy_packed::Mesh>(std::move(batch->request->stump));
+    body_packet->post_work.reset();batch->render.mesh=body_packet;
+    std::vector<skin_edge::WorkKey> body_keys;
     for(std::size_t i=0;i<batch->request->pieces.size();++i){
         const auto& part=batch->request->pieces[i];
         if(part.destroy_on_commit)continue;
         auto stage=std::make_shared<Stage>();stage->request=batch->request;stage->index=i;
-        stage->render.mesh=std::make_shared<const gfy_packed::Mesh>(std::move(batch->request->pieces[i].mesh));
+        auto piece_packet=std::make_shared<gfy_packed::Mesh>(std::move(batch->request->pieces[i].mesh));
+        piece_packet->post_work.reset();stage->render.mesh=piece_packet;
+        CutArm edge_cut;
+        if(peek_cut(source.ID(),part.root_bone,edge_cut)){
+            const auto key=edge_work_key(part.root_bone,edge_cut);body_keys.push_back(key);
+            stage->edge_piece_work=std::make_shared<skin_edge::Work>(piece_packet.get(),std::vector<skin_edge::WorkKey>{key});
+            piece_packet->post_work=stage->edge_piece_work;
+        }
+        if(part.flight_visual)stage->render.proxy=painter_flight::proxy_packet(*part.flight_visual,
+            prepared.original_roles.size(),prepared.stamp.owner.spawn_cookie+i+1,prepared.stamp.revision,piece_packet);
         stage->name="painter_damaged_"+std::to_string(++serial);
         if(serial==u64(-1)){reason="fragment_serial_exhausted";cancel(source.ID());return false;}
         stage->pose_source=source_shell;
         stage->pose_owner=&source;
         named.emplace(stage->name,stage);batch->stages.push_back(stage);
     }
+    if(!body_keys.empty()){
+        auto body_work=std::make_shared<skin_edge::Work>(body_packet.get(),std::move(body_keys));
+        body_packet->post_work=body_work;
+        for(const auto& stage:batch->stages)if(stage->edge_piece_work)stage->edge_body_work=body_work;
+    } // All keys and metadata frozen before any renderer queue submission; no const-object mutation.
     batches.emplace(source.ID(),batch);
     for(const auto& stage:batch->stages){stage->edge_body=batch->render.mesh;stage->edge_piece=stage->render.mesh;} // maskdecal: skin edges at the commit
     for(const auto& stage:batch->stages){
@@ -652,6 +691,7 @@ int begin_spawn(CPhysicsSkeletonObject& piece,CSE_Abstract* se,SPainterDamagedFr
 }
 bool build_shell(CPhysicsSkeletonObject& piece,SPainterDamagedFragmentData* data){
     if(!data||!data->stage||data->stage->canceled)return false;
+    painter_flight_perf::Scope flightTime("spawn_shell");
     const auto& part=data->stage->request->pieces[data->stage->index];
     auto* k=smart_cast<IKinematics*>(piece.Visual());if(!k)return false;
     auto* source=data->stage->pose_owner;
@@ -694,6 +734,7 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
     CPhysicsShell* source_shell)
 {
     auto it=batches.find(source.ID());if(it==batches.end())return false;
+    painter_flight_perf::Scope flightTime("body_commit");
     painter_commit_parts::Resume resume_part("fragment_poll");painter_commit_parts::part("fp_check"); // piececommit: the parts of this commit
     auto& batch=*it->second;auto* k=smart_cast<IKinematics*>(source.Visual());
     if(!Device.IsGeometryPublishBarrier()||GetCurrentThreadId()!=batch.thread)return false;
@@ -710,6 +751,7 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
        k->LL_RenderGeometryGeneration()!=generation||rig.size()!=batch.rig.size()){
         return reject("source_identity_or_generation");
     }
+    if(req.flight&&!k->LL_FlightPreviewAllowed())return reject("flight_donor_changed");
     if(fragment_spawn_expired(Device.dwTimeGlobal,batch.started_at,spawn_timeout_ms)){
         Msg("[painter_damaged_fragment] id=%u phase=staging_timeout revision=%llu",
             source.ID(),req.stamp.revision);
@@ -723,10 +765,10 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
         if(!ticket.mesh)return false;
         RuntimeSkinUpdate header;header.owner_cookie=owner_cookie;
         header.expected_geometry_generation=expected;header.damage_revision=req.stamp.revision;
-        header.separation_packet=true;header.exact_rig=batch.rig;
+        header.separation_packet=true;header.flight_preview=bool(ticket.proxy);header.exact_rig=batch.rig;
         int outcome=RuntimeStageOutcome::unavailable;
-        ticket.handle=owner.LL_StageRuntimeGeometry(header,ticket.mesh,
-            "models\\model","wm\\painter_stump_limb",batch.textures.empty()?nullptr:&batch.textures,owner_cookie,outcome);
+        ticket.handle=owner.LL_StageRuntimeGeometry(header,ticket.display(),
+            "models\\model","wm\\painter_stump_limb",batch.textures.empty()?nullptr:&batch.textures,owner_cookie,outcome,k->LL_PainterBurnStageSource());
         ticket.attempted=true;
         return ticket.handle||outcome==RuntimeStageOutcome::unavailable;
     };
@@ -744,6 +786,8 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
         render_ready=stage->render.ready()&&render_ready;
     }
     if(!render_ready)return false;
+    PainterBurnPublication burnPublication(k);
+    if(!burnPublication.ready())return false;
     // All heavy render preparation is ready. Resample the current pose now,
     // then keep the existing native shell/mark/geometry transaction unchanged.
     painter_commit_parts::part("fp_bones");
@@ -845,12 +889,12 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
         painter_commit_parts::part("fp_piece_adopt");
         RuntimeSkinUpdate update;update.owner_cookie=cookie+stage->index+1;
         update.expected_geometry_generation=0;update.damage_revision=req.stamp.revision;
-        update.separation_packet=true;
+        update.separation_packet=true;update.flight_preview=bool(stage->render.proxy);
         update.exact_rig=batch.rig;
         const bool rendered=stage->render.handle?
             child->LL_PrepareStagedRuntimeGeometry(stage->render.handle,update,update.owner_cookie,
                 source.Visual(),&stage->client->XFORM()):
-            (AppendPackedRuntimeChildren(*stage->render.mesh,update,"models\\model","wm\\painter_stump_limb",
+            (AppendPackedRuntimeChildren(*stage->render.display(),update,"models\\model","wm\\painter_stump_limb",
                 batch.textures.empty()?nullptr:&batch.textures)&&
              child->LL_PrepareRuntimeGeometryWithDonor(update,update.owner_cookie,
                 source.Visual(),&stage->client->XFORM()));
@@ -896,11 +940,11 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
     std::vector<CPhysicsShellHolder*> reserved;
     auto reserve_owner=[&](CPhysicsShellHolder& target,
         std::shared_ptr<const gfy_live::PieceSeed> seed,std::shared_ptr<const gfy_packed::Mesh> published,
-        gfy_live::Identity owner,u64 projected_generation){
+        gfy_live::Identity owner,u64 projected_generation,const painter_flight::Member* flight=nullptr){
         if(!painter_piece_continuation::reserve(target,std::move(seed),std::move(published),
             std::move(owner),projected_generation,req.continuation_input,
             batch.rig,batch.textures,u16(req.original_roles.size()),
-            req.stamp.revision)){
+            req.stamp.revision,flight)){
             Msg("[painter_damaged_fragment] id=%u phase=continuation_reserve_refused target=%u shell_full_active=%u revision=%llu",
                 source.ID(),target.ID(),unsigned(target.PPhysicsShell()&&target.PPhysicsShell()->isFullActive()),req.stamp.revision);
             return false;
@@ -913,8 +957,10 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
         if(!reserved_all)break;
         auto child_identity=req.stamp.owner;
         child_identity.spawn_cookie+=stage->index+1;
+        const auto& part=req.pieces[stage->index];
+        painter_flight::Member flight{req.flight,part.component_id,req.original_roles,part.children};
         reserved_all=reserve_owner(*stage->client,
-            req.pieces[stage->index].seed,stage->render.mesh,std::move(child_identity),1);
+            req.pieces[stage->index].seed,stage->render.mesh,std::move(child_identity),1,req.flight?&flight:nullptr);
     }
     if(!reserved_all){
         for(auto* owner:reserved)painter_piece_continuation::abandon(*owner);
@@ -988,6 +1034,8 @@ bool poll(CAI_Stalker& source,const gfy_live::Identity& identity,u64 generation,
         support->PainterHoldRelease("sever_committed",target);}
     if(!stump_bound||!fragments_bound) // the parts stand; a part without a session just takes no more wounds
         Msg("[painter_damaged_fragment] id=%u phase=continuation_unbound stump=%u fragments=%u",source.ID(),unsigned(stump_bound),unsigned(fragments_bound));
+    if(painter_burn_host::active()){std::vector<CObject*> parts; for(const auto& s:batch.stages)parts.push_back(s->client);painter_burn_host::split(source,parts);}
+    burnPublication.release();
     painter_commit_parts::part("fp_routes");
     grenade_ticket.commit();
     painter_piece_continuation::retry_grenade_routes();

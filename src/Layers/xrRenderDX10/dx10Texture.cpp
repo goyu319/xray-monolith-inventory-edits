@@ -16,6 +16,7 @@
 #include <memory>
 #ifdef USE_DX11
 #include "../xrRender/PainterBloodTextureSource.h"
+#include "../xrRender/PainterLeafCompanion.h"
 #endif
 
 // #include "std_classes.h"
@@ -958,7 +959,8 @@ _DDS:
 				       0
 			       ), fn);
 #ifdef USE_DX11
-			PainterBloodTextureSource::remember(pTexture2D, fn, S->pointer(), S->length(), IMG, LoadInfo);
+            PainterLeafContent::attach(pTexture2D,S->pointer(),S->length());
+            PainterBloodTextureSource::remember(pTexture2D, fn, S->pointer(), S->length(), IMG, LoadInfo);
 #endif
 			FS.r_close(S);
 			mip_cnt = IMG.MipLevels;

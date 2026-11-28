@@ -414,8 +414,12 @@ void CSkeletonX_PM::Render(float LOD)
 		inherited1::last_lod = lod_id;
 	}
 	VERIFY(lod_id>=0 && lod_id<int(nSWI.count));
+#if defined(USE_DX11) && RENDER==R_R4
+    // Keep the inherited LOD for other passes. The fitted replacement uses fixed children.
+    if(lod_id!=0 && Parent && Parent->HasPainterBurnBinding() && Parent->PainterBurnNeedsFullWitness(this,shader._get()))lod_id=0;
+#endif
 	FSlideWindow& SW = nSWI.sw[lod_id];
-	_Render(rm_geom, vBase, SW.num_verts, SW.offset, SW.num_tris);
+	_Render(rm_geom, vBase, SW.num_verts, SW.offset, SW.num_tris, lod_id==0?0u:~0u);
 }
 
 void CSkeletonX_ST::Render(float LOD)
@@ -423,7 +427,10 @@ void CSkeletonX_ST::Render(float LOD)
 	PROF_EVENT("CSkeletonX_ST::Render");
 	// vBase/iBase: this child's rows inside its buffers (0 for OGF children,
 	// the packet offsets for runtime children sharing one VB/IB per publication).
-	_Render(rm_geom, vBase, vCount, iBase, dwPrimitives);
+    _Render(rm_geom, vBase, vCount, iBase, dwPrimitives, 0u);
+#ifdef USE_DX11
+    if (Parent && Parent->FlightDrawPending() && dwPrimitives) Parent->RecordFlightDraw();
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////

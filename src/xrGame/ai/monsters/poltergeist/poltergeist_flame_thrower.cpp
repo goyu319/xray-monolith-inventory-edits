@@ -9,6 +9,19 @@
 #include "../../../actor.h"
 #include "../../../actorEffector.h"
 #include "../ai_monster_effector.h"
+#include "../../../../xrEngine/Render.h"
+
+// Painter fire: the place sets alight - the ground within 6 m under `at` (it floats) (the spreading fire's own ignition)
+static void painter_pyro_ignite(Fvector at, float radius, float seconds)
+{
+	if (!::Render) return;
+	collide::rq_result down;
+	const Fvector dn = {0.f, -1.f, 0.f};
+	at.y += .3f;
+	if (!Level().ObjectSpace.RayPick(at, dn, 6.3f, collide::rqtStatic, down, NULL)) return;
+	at.y -= down.range - .2f;
+	::Render->PainterFireIgnite(at, radius, seconds);
+}
 
 CPolterFlame::CPolterFlame(CPoltergeist* polter) : inherited(polter)
 {
@@ -99,6 +112,7 @@ void CPolterFlame::create_flame(const CObject* target_object)
 	element->time_last_hit = 0;
 
 	Fvector target_point = get_head_position(const_cast<CObject*>(target_object));
+	element->target_pos = target_point;
 	element->target_dir.sub(target_point, element->position);
 	element->target_dir.normalize();
 
@@ -122,6 +136,16 @@ void CPolterFlame::select_state(SFlameElement* elem, EFlameState state)
 	case eFire:
 		// start fire particles
 		elem->particles_object = m_object->PlayParticles(m_particles_fire, elem->position, elem->target_dir,FALSE);
+		if (elem->target_dir.square_magnitude() > 1.e-6f && m_length > 0.f)
+		{
+			float reach = _min(m_length, elem->position.distance_to(elem->target_pos));
+			collide::rq_result rq;
+			if (Level().ObjectSpace.RayPick(elem->position, elem->target_dir, reach, collide::rqtStatic, rq, NULL)) reach = rq.range;
+			Fvector at;
+			at.mad(elem->position, elem->target_dir, reach);
+			painter_pyro_ignite(at, 2.5f, 15.f);
+			painter_pyro_ignite(elem->position, 1.5f, 10.f);
+		}
 		break;
 	case eStop:
 		// stop fire particles
@@ -163,7 +187,21 @@ void CPolterFlame::update_schedule()
 			if (elem->time_started + m_time_fire_play < time()) select_state(elem, eStop);
 			else
 			{
-				// check if we need test hit to enemy
+				// One source-side exposure for the actual active segment, independent of the player's health-hit cooldown.
+                if(!painter_burn_source::enabled())elem->painter_burn_clock.stop();
+                else if(OnServer() && !Device.dwPrecacheFrame && m_hit_value>0.f && m_length>0.f &&
+                   std::isfinite(m_hit_value) && std::isfinite(m_length) &&
+                   painter_burn_source::finite(elem->position) && painter_burn_source::finite(elem->target_dir) &&
+                   elem->target_dir.square_magnitude()>1.e-12f){
+                    painter_burn_source::Event e;
+                    if(elem->painter_burn_clock.take(Device.dwTimeGlobal,e)){
+                        e.cause=painter_burn_source::Cause::Flame;e.shape=painter_burn_source::Shape::Segment;e.emitterId=m_object->ID();
+                        e.centre=elem->position;e.direction=elem->target_dir;e.direction.normalize();
+                        e.reach=m_length;e.power=m_hit_value;e.attenuation=1.f;
+                        painter_burn_source::submit(e);
+                    }
+                }
+                // check if we need test hit to enemy
 				if (elem->time_last_hit + m_hit_delay < time())
 				{
 					// test hit
@@ -216,6 +254,15 @@ void CPolterFlame::update_schedule()
 		),
 		m_flames.end()
 	);
+
+	// (Painter fire, 2026-11-22) while it is alive and the player is near, the ground under it catches every 2.5 s: it leaves
+	// fire wherever it goes
+	if (m_object->g_Alive() && Actor() && time() >= m_painter_trail_at &&
+		Actor()->Position().distance_to(m_object->Position()) < 40.f)
+	{
+		m_painter_trail_at = time() + 2500;
+		painter_pyro_ignite(m_object->Position(), 1.6f, 12.f);
+	}
 
 	bool const detected = m_object->get_current_detection_level() >= m_object->get_detection_success_level();
 

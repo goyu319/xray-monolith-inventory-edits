@@ -118,6 +118,7 @@ struct ECORE_API R_constant : public xr_resource
 {
 	shared_str name; // HLSL-name
 	u16 type; // float=0/integer=1/boolean=2
+	bool unusedInAllStages = false; // true only when bytecode reflection proves it
 	u32 destination; // pixel/vertex/(or both)/sampler
 
 	R_constant_load ps;
@@ -165,7 +166,7 @@ struct ECORE_API R_constant : public xr_resource
 
 	IC BOOL equal(R_constant& C)
 	{
-		return (0 == xr_strcmp(name, C.name)) && (type == C.type) && (destination == C.destination) && ps.equal(C.ps) &&
+		return (0 == xr_strcmp(name, C.name)) && (type == C.type) && (unusedInAllStages == C.unusedInAllStages) && (destination == C.destination) && ps.equal(C.ps) &&
 			vs.equal(C.vs) && samp.equal(C.samp) && handler == C.handler;
 	}
 

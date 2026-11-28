@@ -19,6 +19,32 @@
 #include <iostream>
 #include <string>
 
+#include "PainterBurnTrace.h"
+#include <atomic>
+
+static std::atomic<bool> burnTraceEnabled{false};
+namespace {
+std::atomic<unsigned> fireMaster{1}, bodyMaster{0};
+bool setMaster(std::atomic<unsigned>& stamp, bool enabled) noexcept {
+    unsigned old=stamp.load(std::memory_order_acquire);
+    do {
+        if ((old & 1u)==unsigned(enabled)) return false;
+    } while (!stamp.compare_exchange_weak(old,old+1u,std::memory_order_acq_rel));
+    return true;
+}
+}
+XRCORE_API unsigned PainterFireMasterStamp() noexcept {return fireMaster.load(std::memory_order_acquire);}
+XRCORE_API unsigned PainterBodyMasterStamp() noexcept {return bodyMaster.load(std::memory_order_acquire);}
+XRCORE_API bool PainterSetFireMaster(bool on) noexcept {return setMaster(fireMaster,on);}
+XRCORE_API bool PainterSetBodyMaster(bool on) noexcept {return setMaster(bodyMaster,on);}
+
+XRCORE_API bool PainterBurnTraceEnabled() noexcept {
+    return burnTraceEnabled.load(std::memory_order_relaxed);
+}
+XRCORE_API void PainterSetBurnTrace(bool enabled) noexcept {
+    burnTraceEnabled.store(enabled,std::memory_order_relaxed);
+}
+
 XRCORE_API xrCore Core;
 extern XRCORE_API u32 build_id;
 extern XRCORE_API LPCSTR build_date;

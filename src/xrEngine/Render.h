@@ -4,6 +4,9 @@
 #include "../xrCDB/frustum.h"
 #include "../xrCDB/ISpatial.h"
 #include "vis_common.h"
+#include <memory>
+namespace painter_burn {struct Delta;struct SourceFaces;}
+
 //#include "IRenderDetailModel.h"
 
 #include "../Include/xrAPI/xrAPI.h"
@@ -317,6 +320,24 @@ public:
 	CFrustum ViewBase;
 public:
 	// feature level
+    virtual bool PainterBurnPublish(std::shared_ptr<const painter_burn::Delta>){return false;}
+    virtual void PainterBurnClock(u32){}
+    virtual u32 PainterBurnEpoch() const{return 0;}
+    // Painter fire: a fire bottle broke here - the renderer plays its baked burst and burning pool. False = not drawn.
+    virtual bool PainterFireBottle(const Fvector& position, float seconds, u32 seed){return false;}
+    virtual bool PainterFireBottleThrown(const Fvector& position, float seconds, u32 seed, const Fvector& flew){return false;}
+    // Painter fire: burning fuel lands here; the fire spreads from it over what can burn. False = nothing started.
+    virtual bool PainterFireIgnite(const Fvector& position, float radius, float seconds){return false;}
+    // Painter fire: this body burns for at least `seconds` from now and carries the body fire. False = not drawn.
+    virtual bool PainterFireBody(u16 id, float seconds){return false;}
+    // Painter fire: how hot the spreading fire is at a place, 0 no fire .. 1 a big one.
+    virtual float PainterFireHeat(const Fvector& position){return 0.f;}
+    // firesoundspots: the fires being lit now (one per fire: place, size), at most `max`; their number
+    virtual u32 PainterFireSpots(Fvector* positions, float* sizes, u32 max){return 0;}
+    // Painter fire: a small flame is held to the ground here (a match, a lighter). False = fire is switched off.
+    virtual bool PainterFireLight(const Fvector& position){return false;}
+    // Painter fire: the nearest place where the spreading fire burns, within `radius`. False = none.
+    virtual bool PainterFireNear(const Fvector& position, float radius, Fvector& nearest){return false;}
 	virtual GenerationLevel get_generation() = 0;
 
 	virtual bool is_sun_static() = 0;
@@ -468,6 +489,9 @@ public:
 	virtual ~IRender_interface();
 protected:
 	virtual void ScreenshotImpl(ScreenshotMode mode, LPCSTR name, CMemoryWriter* memory_writer) = 0;
+public:
+    virtual bool PainterFireBottleContact(const Fvector& position,float seconds,u32 seed,const Fvector& flew,const Fvector& hit){return PainterFireBottleThrown(position,seconds,seed,flew);}
+    virtual void OnPlayableLevel() {}
 };
 
 //extern ENGINE_API IRender_interface* Render;

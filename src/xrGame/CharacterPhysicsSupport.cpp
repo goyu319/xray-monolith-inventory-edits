@@ -1,5 +1,6 @@
 // body_hit_outcomes_v1
 #include "stdafx.h"
+#include <chrono>
 
 #include "CharacterPhysicsSupport.h"
 #include "weapon_grip_kinematics.h"
@@ -1362,11 +1363,15 @@ void CCharacterPhysicsSupport::KillHit(SHit& H)
 	}
 }
 
+#include "customzone.h"
+#include "ai/monsters/poltergeist/poltergeist.h"
+#include "PainterBurnDirect.inl"
+
 const u32 hit_valide_time = 1000;
 
 void CCharacterPhysicsSupport::in_Hit(SHit& H, bool is_killing)
 {
-    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s",s);});
+    body_hit_outcomes::set_sink(+[](const char*s)noexcept{Msg("%s host_us=%lld",s,static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()));});
     body_hit_outcomes::Scope hit_trace(m_EntityAlife.ID(),H.BulletID,H.bone(),m_EntityAlife.g_Alive());
 	m_sv_hit = H;
 	m_hit_valide_time = Device.dwTimeGlobal + hit_valide_time;
@@ -1374,6 +1379,7 @@ void CCharacterPhysicsSupport::in_Hit(SHit& H, bool is_killing)
 		{body_hit_outcomes::report("not_queued",m_EntityAlife.use_simplified_visual()?"simplified_visual":"physics_removed");return;}
     // in_Die(true) replays m_sv_hit for shell creation. Only PHHit receipt
     // owns a damage event; never carve a second time for the fatal replay.
+    if (!is_killing && painter_burn_source::thermal(H.type())) PainterSubmitLocalThermal(m_EntityAlife,H);
     if (!is_killing) CapturePainterVoxelHit(H);
     else body_hit_outcomes::report("not_queued","death_shell_replay_not_new_hit");
 #ifdef PAINTER_ACTIVE_RAGDOLL_NATIVE

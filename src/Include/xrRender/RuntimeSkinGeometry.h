@@ -30,6 +30,7 @@ struct RuntimeSkinUpdate
 {
     u64 owner_cookie, expected_geometry_generation, damage_revision;
     bool separation_packet = false;
+    bool flight_preview = false, flight_detail = false;
     xr_vector<RuntimeSkinBone> exact_rig;
     xr_vector<RuntimeSkinChild> replaced_children;
 };

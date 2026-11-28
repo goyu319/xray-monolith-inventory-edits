@@ -198,6 +198,18 @@ namespace WallmarksEngine
     };
 }
 
+#ifdef USE_DX11
+#include "PainterStaticBloodOwner.h"
+void CWallmarksEngine::WarmStaticSnapshots(){if(!g_dedicated_server)painter_static_blood_gpu::warm_programs();}
+void CWallmarksEngine::observeSnapshot(wm_slot* slot,IRender_Sector* sector,const static_entry& entry){
+    if(!ps_blood_snapshots||!entry.W->m_thermal_blood)return;
+    try{
+        if(!staticSnapshots)staticSnapshots=new PainterStaticBloodOwner(*this);
+        staticSnapshots->add(slot,sector,entry);
+    }catch(...){/* The individual wallmark remains registered. */}
+}
+#endif
+
 // #include "xr_effsun.h"
 
 constexpr const float W_DIST_FADE = 15.f;
@@ -238,12 +250,16 @@ CWallmarksEngine::CWallmarksEngine()
         {0,24,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,1},
         {0,36,D3DDECLTYPE_FLOAT2,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,2},D3DDECL_END()};
     hGeomMasked.create(declaration,RCache.Vertex.Buffer(),nullptr);
+    WarmStaticSnapshots();
 #endif
 }
 
 CWallmarksEngine::~CWallmarksEngine()
 {
     clear();
+#ifdef USE_DX11
+    delete staticSnapshots;staticSnapshots=nullptr;painter_static_blood_gpu::clear_programs();
+#endif
     hGeom.destroy();
 #ifdef USE_DX11
     hGeomMasked.destroy();PainterWallmarkMask::Clear();
@@ -252,6 +268,11 @@ CWallmarksEngine::~CWallmarksEngine()
 
 void CWallmarksEngine::clear()
 {
+
+#ifdef USE_DX11
+    xrCriticalSectionGuard clearGuard(lock);
+    if(staticSnapshots)staticSnapshots->reset(true);
+#endif
     ResetGpuWallmarks();
     large_wallmark_vertices.clear_and_free();
     slot_index.clear();
@@ -279,6 +300,8 @@ void CWallmarksEngine::ResetGpuWallmarks(bool keep_device_state)
 {
 #ifdef USE_DX11
     xrCriticalSectionGuard guard(lock);
+    if(staticSnapshots)staticSnapshots->reset(false);
+    if(keep_device_state)painter_static_blood_gpu::clear_programs();
     if (keep_device_state)
     {
         if (gpu_skinning) RCache.set_Vertices(RCache.Vertex.Buffer(), hGeom->vb_stride);
@@ -379,6 +402,9 @@ CWallmarksEngine::static_wallmark* CWallmarksEngine::static_wm_allocate()
 	}
 
 	W->m_thermal_blood=false;
+#ifdef USE_DX11
+    W->snapshotId=++nextSnapshotId;W->snapshotReceivers.clear();W->snapshotOverflow=false;
+#endif
     W->m_thermal_stamp={};
 	W->m_fTimeStart = RDEVICE.fTimeGlobal;
 	W->m_fTimeEnd = ps_r__WallmarkTTL * 15.f;
@@ -389,6 +415,10 @@ CWallmarksEngine::static_wallmark* CWallmarksEngine::static_wm_allocate()
 // destroy
 void CWallmarksEngine::static_wm_destroy(CWallmarksEngine::static_wallmark* W)
 {
+
+#ifdef USE_DX11
+    if(staticSnapshots)staticSnapshots->forget(W->snapshotId);
+#endif
 	static_pool.push_back(W);
 }
 
@@ -433,6 +463,15 @@ void CWallmarksEngine::RecurseTri(u32 t, Fmatrix& mView, CWallmarksEngine::stati
 
 	if (P)
 	{
+
+#ifdef USE_DX11
+        if(ps_blood_snapshots && W.m_thermal_blood && !W.snapshotOverflow){
+            if(W.snapshotReceivers.size()<128){
+                static_wallmark::Receiver r{{v_data[v_ids[0]],v_data[v_ids[1]],v_data[v_ids[2]]}};
+                W.snapshotReceivers.push_back(r);
+            }else{W.snapshotReceivers.clear();W.snapshotOverflow=true;}
+        }
+#endif
 		// Create vertices and triangulate poly (tri-fan style triangulation)
 		FVF::LIT V0, V1, V2;
 		Fvector UV;
@@ -570,7 +609,11 @@ void CWallmarksEngine::AddWallmark_internal(CDB::TRI* pTri, const Fvector* pVert
 		const float expire = W->TimeEnd() == -1.f ? std::numeric_limits<float>::infinity() : W->TimeStart() + W->TimeEnd();
 		if (slot)
 		{
-			StaticWMVec& sector_items = slot->static_items[S];
+			
+#ifdef USE_DX11
+            if(staticSnapshots)staticSnapshots->beforeReplace(slot,S,W->bounds.P);
+#endif
+            StaticWMVec& sector_items = slot->static_items[S];
 			for (auto& entry : sector_items)
 			{
 				if (entry.P.similar(W->bounds.P, 0.02f))
@@ -578,6 +621,9 @@ void CWallmarksEngine::AddWallmark_internal(CDB::TRI* pTri, const Fvector* pVert
 					// replace
 					static_wm_destroy(entry.W);
 					entry = {W->bounds.P, W->bounds.R, expire, W};
+#ifdef USE_DX11
+                    observeSnapshot(slot,S,entry);
+#endif
 					return;
 				}
 			}
@@ -589,6 +635,9 @@ void CWallmarksEngine::AddWallmark_internal(CDB::TRI* pTri, const Fvector* pVert
 
 		// no similar - register _new_
 		slot->static_items[S].push_back({W->bounds.P, W->bounds.R, expire, W});
+#ifdef USE_DX11
+        observeSnapshot(slot,S,slot->static_items[S].back());
+#endif
 
 	}
 	//else
@@ -705,6 +754,14 @@ ICF void FlushStream(ref_geom hGeom, ref_shader shader, u32& w_offset, FVF::LIT*
 	}
 }
 
+bool CWallmarksEngine::HasSkeletonWallmarks(const CKinematics* obj)
+{
+    xrCriticalSectionGuard guard(lock);
+    for (const wm_slot* slot : marks)
+        for (const auto& mark : slot->skeleton_items)
+            if (mark && mark->Parent()==obj) return true;
+    return false;
+}
 void CWallmarksEngine::CollectSkeletonWallmarks(CKinematics* obj, xr_vector<intrusive_ptr<CSkeletonWallmark>>& output)
 {
     xrCriticalSectionGuard g(lock);
@@ -731,6 +788,7 @@ void CWallmarksEngine::RemoveSkeletonWallmarksFromObject(CKinematics* obj)
 // demonized: Remove expired wallmarks before rendering
 void CWallmarksEngine::UpdateWallmarks()
 {
+    xrCriticalSectionGuard snapshotGuard(lock);
     if (marks.empty())
         return;
 
@@ -780,6 +838,12 @@ void CWallmarksEngine::UpdateWallmarks()
 float r_wallmarks_ssa_k = 0.5f;
 void CWallmarksEngine::Render()
 {
+#ifdef USE_DX11
+    if(!r_wallmarks_static && !r_wallmarks_dynamic){
+        xrCriticalSectionGuard guard(lock);
+        if(staticSnapshots)staticSnapshots->tick();
+    }
+#endif
 #ifdef USE_DX11
     if ((r_blood_gpu == 0 || !r_wallmarks_dynamic) && gpu_skinning) ResetGpuWallmarks();
 #endif
@@ -886,6 +950,12 @@ void CWallmarksEngine::Render()
         BloodNativeProfile::Scope profileLock(BloodNativeProfile::Stage::RenderLockWait);
         xrCriticalSectionGuard g(lock); // Physics may add wallmarks in parallel with rendering
         profileLock.Stop();
+#ifdef USE_DX11
+        if(staticSnapshots){
+            try{staticSnapshots->tick();}
+            catch(...){staticSnapshots->reset(false);}
+        }
+#endif
 
 #ifdef USE_DX11
         if (r_blood_gpu && r_wallmarks_dynamic && !gpu_skinning)
@@ -1164,6 +1234,9 @@ void CWallmarksEngine::Render()
                 RImplementation.Target->rt_Heat->pRT : nullptr,1);
 #endif
             bool static_empty = !r_wallmarks_static || slot->static_items.empty();
+#ifdef USE_DX11
+            if(r_wallmarks_static && staticSnapshots && staticSnapshots->has(slot))static_empty=false;
+#endif
             bool skeleton_empty = !r_wallmarks_dynamic || slot->skeleton_items.empty();
             if (static_empty && skeleton_empty)
                 continue;
@@ -1530,6 +1603,16 @@ void CWallmarksEngine::Render()
             {
                 BloodNativeProfile::Scope profileStatic(BloodNativeProfile::Stage::RenderStatic);
                 PROF_EVENT("STATIC_WALLMARKS");
+#ifdef USE_DX11
+                if(staticSnapshots && staticSnapshots->has(slot)){
+                    staticSnapshots->draw(slot,ssaCLIP,[&](wm_slot* source,static_wallmark* W){
+                        u32 offset=0;FVF::LIT* end=nullptr;FVF::LIT* begin=nullptr;
+                        BeginStream(hGeom,offset,end,begin);
+                        static_wm_render(W,end);
+                        FlushStream(hGeom,source->shader,offset,end,begin,FALSE);
+                    });
+                }
+#endif
                 for (auto& [sector, static_vec] : slot->static_items)
                 {
                     if (!RImplementation.GMBase.is_sector_visible(static_cast<CSector*>(sector)))

@@ -11,6 +11,7 @@
 #include "svp_lens_lighting.h"
 #include "svp_stats.h" // pip combine sub timers for the breakdown panel
 #include "../xrRender/SkeletonX.h"
+#include "../xrRender/PainterFire.h"
 
 #define STENCIL_CULL 0
 
@@ -695,6 +696,31 @@ void CRenderTarget::phase_combine()
 		svp_copy_end(SVP_CP_SCENE);
 	}
 
+	// firerework: the fire's own smoky air over the lit world - before the transparent things and the flames
+	if (PainterFire::AirWanted())
+	{
+		PIX_EVENT(painter_fire_air);
+		if (!RImplementation.o.dx10_msaa)
+			u_setrt(rt_Generic_0, 0, 0, HW.pBaseZB);
+		else
+			u_setrt(rt_Generic_0_r, 0, 0, RImplementation.Target->rt_MSAADepth->pZRT);
+		RCache.set_CullMode(CULL_NONE);
+		RCache.set_Stencil(FALSE);
+		const float aw = float(RenderScreenWidth()), ah = float(RenderScreenHeight());
+		u32 airOffset = 0;
+		FVF::TL* apv = (FVF::TL*)RCache.Vertex.Lock(4, g_combine->vb_stride, airOffset);
+		apv->set(0, ah, EPS_S, 1.0f, 0xffffffff, 0.0f, 1.0f); apv++;
+		apv->set(0, 0, EPS_S, 1.0f, 0xffffffff, 0.0f, 0.0f); apv++;
+		apv->set(aw, ah, EPS_S, 1.0f, 0xffffffff, 1.0f, 1.0f); apv++;
+		apv->set(aw, 0, EPS_S, 1.0f, 0xffffffff, 1.0f, 0.0f); apv++;
+		RCache.Vertex.Unlock(4, g_combine->vb_stride);
+		if (PainterFire::RenderAir())
+		{
+			RCache.set_Geometry(g_combine);
+			RCache.Render(D3DPT_TRIANGLELIST, airOffset, 0, 4, 0, 2);
+		}
+	}
+
 	// Forward rendering
 	tm_beg(svp_stats::SEC_C_FWD);
 	{
@@ -777,6 +803,7 @@ void CRenderTarget::phase_combine()
 			) && !_menu_pp
 		)		
 			bDistort = FALSE;
+		if (RImplementation.o.distortion_enabled && PainterFire::HazeWanted()) bDistort = TRUE; // hot air over the Painter fires
 		if (bDistort)
 		{
 			PIX_EVENT(render_distort_objects);
@@ -797,6 +824,7 @@ void CRenderTarget::phase_combine()
 			RCache.set_ColorWriteEnable();
 			//CHK_DX(HW.pDevice->Clear	( 0L, NULL, D3DCLEAR_TARGET, color_rgba(127,127,0,127), 1.0f, 0L));
 			RImplementation.GMBase.r_dsgraph_render_distort();
+			PainterFire::RenderHaze();
 			if (g_pGamePersistent) g_pGamePersistent->OnRenderPPUI_PP(); // PP-UI
 			// pip the composited lens must not warp, stamp the mask neutral over its footprint
 			if (ps_r__svp_distort_guard && Device.true_pip_on && this == RImplementation.TargetMain

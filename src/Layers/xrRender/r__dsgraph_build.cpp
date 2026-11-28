@@ -9,6 +9,22 @@
 #include "flod.h"
 #include "particlegroup.h"
 #include "FTreeVisual.h"
+#if RENDER == R_R4
+#include "PainterFire.h"
+// trees that burnt (PainterFire): their leaf parts are not drawn, their far pictures are not used
+static inline bool PainterLeavesGone(dxRender_Visual* v)
+{
+	return PainterFire::bareCount.load(std::memory_order_relaxed) && (v->Type == MT_TREE_ST || v->Type == MT_TREE_PM) &&
+		PainterFire::LeavesGone(v);
+}
+static inline bool PainterLodGone(dxRender_Visual* v)
+{
+	return PainterFire::bareCount.load(std::memory_order_relaxed) && PainterFire::LodGone(v);
+}
+#else
+static inline bool PainterLeavesGone(dxRender_Visual*) { return false; }
+static inline bool PainterLodGone(dxRender_Visual*) { return false; }
+#endif
 
 using namespace R_dsgraph;
 
@@ -34,6 +50,7 @@ ICF float CalcSSA(float& distSQ, Fvector& C, dxRender_Visual* V)
 
 ICF bool R4FullDetailRejectStatic(dxRender_Visual* pVisual, bool normalPhase)
 {
+	// Authored foliage keeps its branches and original passes as the leaves burn.
 #if RENDER == R_R4
 	if (ps_r4_full_detail_distance_scale >= 1.f || !normalPhase ||
 		pVisual->flags.test(IRenderVisualFlags::eIgnoreOptimization) || !g_pGamePersistent ||
@@ -825,6 +842,13 @@ void CDSGraphManager::add_Static(IRenderVisual* piVisual, CFrustum& frustum, u32
 			// Add all children, perform tests
 			add_leafs_Static(pV->children);
 		}
+#if RENDER==R_R4
+        else if(PainterFire::TreeBurnAmount(pVisual)>0.f)
+        {
+            // As the original leafy atlas thins, reveal its own child geometry and any still-healthy sibling.
+            add_leafs_Static(pV->children);
+        }
+#endif
 	}break;
 
 	case MT_TREE_ST:
@@ -941,6 +965,13 @@ void CDSGraphManager::add_Static_MultiFrustum(IRenderVisual* piVisual, const xr_
 		{
 			add_leafs_Static(pV->children);
 		}
+#if RENDER==R_R4
+        else if(PainterFire::TreeBurnAmount(pVisual)>0.f)
+        {
+            // As the original leafy atlas thins, reveal its own child geometry and any still-healthy sibling.
+            add_leafs_Static(pV->children);
+        }
+#endif
 	}break;
 
 	case MT_TREE_ST:
@@ -997,6 +1028,13 @@ void CDSGraphManager::add_leaf_Static(dxRender_Visual* pVisual)
 			// Add all children, doesn't perform any tests
 			add_leafs_Static(pV->children);
 		}
+#if RENDER==R_R4
+        else if(PainterFire::TreeBurnAmount(pVisual)>0.f)
+        {
+            // As the original leafy atlas thins, reveal its own child geometry and any still-healthy sibling.
+            add_leafs_Static(pV->children);
+        }
+#endif
 	}break;
 
 	case MT_TREE_PM:

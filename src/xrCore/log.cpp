@@ -27,6 +27,27 @@ BOOL logTimestamps = FALSE;
 enum Console_mark;
 extern bool is_console_mark(Console_mark type);
 
+XRCORE_API int g_painter_log = 0;
+XRCORE_API int& PainterLogQuietDepth()
+{
+	static thread_local int depth = 0;
+	return depth;
+}
+static bool PainterLogLine(LPCSTR m)
+{
+	while (*m == '!' || *m == '*' || *m == '~' || *m == '#' || *m == '-' || *m == ' ' || *m == '\t')
+		++m;
+	if (*m != '[')
+		return false;
+	static const char* const tags[] = {"[painter", "[Painter", "[PAINTER", "[blood_", "[BLOOD", "[Blood]", "[butcher_",
+		"[runtime_", "[short_range_blood", "[AR3]", "[CCAL]", "[GROUND]", "[MOTOR_TEST]", "[FLUID]", "[dlss_menu]", "[DLSS]",
+		"[FSR3]", "[Upscaler]", "[DETAILS] Grass", "[SVP-", "[PIP-", "[DT-", "[SHADER-WARMUP]", "[Physical glass", "[scope-glass]"};
+	for (const char* tag : tags)
+		if (!strncmp(m, tag, strlen(tag)))
+			return true;
+	return false;
+}
+
 void Log(const char* s)
 {
     theLogger->SimpleMessage(s);
@@ -174,6 +195,8 @@ void xrLogger::SimpleMessage(LPCSTR Message, u32 MessageSize /*= 0*/)
 {
 	if (!Message)
 		return;
+	if (!g_painter_log && (PainterLogQuietDepth() > 0 || PainterLogLine(Message)))
+		return; // Painter: written only after the player opted in (see PainterLogLine)
 
 	switch (MessageSize)
 	{

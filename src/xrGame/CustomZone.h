@@ -1,6 +1,7 @@
 #pragma once
 
 #include "space_restrictor.h"
+#include "PainterBurnSourceEvent.h"
 #include "../xrEngine/feel_touch.h"
 #include "script_export_space.h"
 
@@ -37,6 +38,8 @@ struct SZoneObjectInfo
 class CCustomZone : public CSpaceRestrictor,
                     public Feel::Touch
 {
+	u32 m_painter_fire_at = 0; // Painter fire: when an eruption may set its place alight again
+
 private:
 	typedef CSpaceRestrictor inherited;
 
@@ -59,6 +62,11 @@ public:
 
 	virtual void UpdateCL();
 	virtual void UpdateWorkload(u32 dt);
+    // 0 follows native thermal primary/secondary emissions, 1 is continuously lit, 2 is off.
+    virtual unsigned PainterThermalMode() const {return 0;}
+    void PainterEmitThermal(float strength,bool impulse);
+    painter_burn_source::Gate m_painter_burn_clock;
+    xr_vector<std::pair<u16,u64>> m_painter_fire_occupants;
 	virtual void shedule_Update(u32 dt);
 	virtual void enter_Zone(SZoneObjectInfo& io);
 	virtual void exit_Zone(SZoneObjectInfo& io);

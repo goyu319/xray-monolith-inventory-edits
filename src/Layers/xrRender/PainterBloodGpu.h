@@ -1,5 +1,6 @@
 #pragma once
 #ifdef USE_DX11
+#include "PainterBodyTess.h"
 #include "BloodCellLayer.h"
 #include "PainterBloodUpload.h"
 #include "PainterBloodPrograms.h"
@@ -118,9 +119,17 @@ inline bool clone(const ref_shader& source,Gpu& gpu,ref_shader& result,xr_string
             // Shadows and pre-passes preserve their complete original pass.
             if(ps=="dumb"||ps.find("shadow")!=xr_string::npos||ps.find("_atoc")!=xr_string::npos){e.passes.push_back(op);continue;}
             if(op->vs->skinning>=0&&vs.size()>2&&vs[vs.size()-2]=='_'&&vs.back()>='0'&&vs.back()<='4')vs.resize(vs.size()-2);
+            std::string nv=vs.c_str(),np=ps.c_str();
+            const auto stages=painter_body_tess::fromPass(*op,nv,np);
+            if(stages==painter_body_tess::Result::Unsupported){
+                static int said=0;
+                if(said<8){++said;Msg("! [blood_bake] a pass of the body cannot carry blood: vs=%s ps=%s hs=%s bones=%d",*op->vs->cName,*op->ps->cName,
+                    op->hs&&op->hs->cName.size()?*op->hs->cName:"-",op->vs->skinning);}
+                why="blood_unsupported_shader_stage";return false;}
+            vs=nv.c_str();ps=np.c_str();
             const xr_string vertex="painter_blood_"+vs,pixel="painter_blood_"+ps;
-            if((op->gs&&op->gs->gs)||(op->hs&&op->hs->sh)||(op->ds&&op->ds->sh)||(op->cs&&op->cs->sh)){why="blood_unsupported_shader_stage";return false;}
             SPass p;p.state=op->state;p.C=op->C;p.gs=op->gs;p.hs=op->hs;p.ds=op->ds;p.cs=op->cs;
+            painter_body_tess::triangleStages(p,*DEV,stages);
             // shaderslim: a pass the removal clone created blood-capable (the tear exterior, the shared interior: painter_blood_*) keeps
             // its two programs - only the body's blood is bound below; any other pass takes the blood alias of its programs
             if(ps.find("painter_blood_")==0){p.vs=op->vs;p.ps=op->ps;}
@@ -141,7 +150,7 @@ inline bool clone(const ref_shader& source,Gpu& gpu,ref_shader& result,xr_string
                 if(!xr_strcmp(*c->name,"painter_blood_target")){c->handler=&target();continue;}
                 if(!xr_strcmp(*c->name,"ssfx_blood_decals")){c->handler=PainterBloodDecalControls();continue;}
                 auto* old=op->constants?op->constants->get(*c->name):nullptr;
-                if(!old||old->type!=c->type){why="blood_constant_contract";return false;}c->handler=old->handler;
+                if(!old||old->type!=c->type){{static int said=0;if(said<8){++said;Msg("! [blood_bake] the blood program needs the shader value '%s', which the body's own shader %s (another mod's shader files in the game?)",*c->name,old?"has as another type":"does not have");}}why="blood_constant_contract";return false;}c->handler=old->handler;
                 if(c->type==RC_sampler&&c->samp.index!=old->samp.index){why="blood_sampler_contract";return false;}
                 if(c->type==RC_dx10texture){bool found=false;if(op->T)for(const auto& b:*op->T)if(b.first==old->samp.index){textures.emplace_back(c->samp.index,b.second);found=true;break;}
                     if(!found){why="blood_source_texture";return false;}}

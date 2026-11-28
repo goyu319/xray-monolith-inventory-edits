@@ -2,6 +2,9 @@
 #pragma hdrstop
 
 #include "../xrRender/ResourceManager.h"
+#ifdef USE_DX11
+#include "../xrRender/PainterLeafViewKey.h"
+#endif
 
 void fix_texture_name(LPSTR fn);
 
@@ -232,6 +235,10 @@ void CTexture::surface_set(ID3DBaseTexture* surf)
 	_RELEASE(m_pSRView);
 
 	pSurface = surf;
+#ifdef USE_DX11
+    _RELEASE(painterLeafView);
+    painterLeafView=PainterLeafContent::viewOf(surf);
+#endif
 
 	if (pSurface)
 	{
@@ -303,6 +310,15 @@ ID3DBaseTexture* CTexture::surface_get()
 	return pSurface;
 }
 
+#ifdef USE_DX11
+void __stdcall CTexture::apply_leaf_wood(u32 stage)
+{
+    // Shader lists keep this proxy and its exact source alive. Native s_base binds the diffuse.
+    CTexture* source=painterLeafSource._get();
+    SRVSManager.SetPSResource(stage,source ? source->painterLeafView : nullptr);
+}
+#endif
+
 void CTexture::ApplySwap()
 {
 	// Render-thread only (called from CResourceManager::ApplyTextureSwaps(), at frame start).
@@ -354,6 +370,9 @@ void CTexture::surface_swap(CTexture& other)
 
 void CTexture::PostLoad()
 {
+#ifdef USE_DX11
+    if (painterLeafSource._get()) {bind=xr_make_delegate(this,&CTexture::apply_leaf_wood);return;}
+#endif
 	// Phase 2: classify once per load. DEV->ClassifyTexture() lazy-loads tex_residency.ltx on
 	// its own first call; safe here since nothing on this thread already holds creationGuard.
 	if (ResClass == -2)
@@ -457,6 +476,7 @@ void CTexture::ProcessStaging()
 	}
 
 #ifdef USE_DX11
+    if (painterLeafView) pTargetSurface->SetPrivateDataInterface(PainterLeafContent::woodViewKey,painterLeafView);
     PainterBloodTextureSource::propagate(pSurface, pTargetSurface);
 #endif
 	HW.pContext->CopyResource(pTargetSurface, pSurface);
@@ -899,6 +919,10 @@ void CTexture::Load()
 #endif
 		//pSurface = ::RImplementation.texture_load	(*cName,mem);
 		pSurface = ::RImplementation.texture_load(*cName, mem, true, (int)RequestedLod);
+#ifdef USE_DX11
+        _RELEASE(painterLeafView);
+        painterLeafView=PainterLeafContent::viewOf(pSurface);
+#endif
 
 		if (GetUsage() == D3D_USAGE_STAGING)
 		{
@@ -985,6 +1009,9 @@ void CTexture::Unload()
 #endif // DEBUG
 	_RELEASE(pSurface);
 	_RELEASE(m_pSRView);
+#ifdef USE_DX11
+    _RELEASE(painterLeafView);
+#endif
 
 	xr_delete(pAVI);
 	xr_delete(pTheora);

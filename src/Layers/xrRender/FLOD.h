@@ -30,6 +30,9 @@ public:
 		Fvector2 t1;
 		u32 rgbh0;
 		u32 rgbh1;
+#if RENDER==R_R4
+	float painterBurn,painterThermal;
+#endif
 	};
 
 	ref_geom geom;

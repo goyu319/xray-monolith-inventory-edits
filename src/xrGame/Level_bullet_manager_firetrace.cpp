@@ -4,6 +4,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
+#include "../xrEngine/Render.h"
 #include "Level_Bullet_Manager.h"
 #include "entity.h"
 #include "../xrEngine/gamemtllib.h"
@@ -255,10 +256,29 @@ void CBulletManager::FireShotmark(SBullet* bullet, const Fvector& vDir, const Fv
 	}
 }
 
+// Painter fire (2026-11-22): a burning round (a flamethrower's) sets alight what it hits - once a second at most for any one
+// place 1.5 m across
+static void painter_fire_round(const Fvector& p)
+{
+	if (!::Render || !_valid(p)) return;
+	static Fvector last[24];
+	static u32 lastAt[24] = {};
+	static u32 next = 0;
+	const u32 now = Device.dwTimeGlobal;
+	for (u32 i = 0; i < 24; ++i)
+		if (lastAt[i] && now - lastAt[i] < 1000 && last[i].distance_to_sqr(p) < 1.5f * 1.5f) return;
+	last[next] = p;
+	lastAt[next] = now ? now : 1;
+	next = (next + 1) % 24;
+	::Render->PainterFireIgnite(p, .9f, 6.f);
+}
+
 void CBulletManager::StaticObjectHit(CBulletManager::_event& E)
 {
 	//	Fvector hit_normal;
 	FireShotmark(&E.bullet, E.bullet.dir, E.point, E.R, E.tgt_material, E.normal);
+	if (E.bullet.hit_type == ALife::eHitTypeBurn || E.bullet.hit_type == ALife::eHitTypeLightBurn)
+		painter_fire_round(E.point);
 	//	ObjectHit	(&E.bullet,					E.point, E.R, E.tgt_material, hit_normal);
 }
 

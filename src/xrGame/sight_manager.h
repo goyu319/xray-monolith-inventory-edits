@@ -76,8 +76,6 @@ private:
 	float m_max_right_angle;
 	bool m_enabled;
 	bool m_turning_in_place;
-	u32 m_painter_look_logged_at; // painter_look_log: last [painter_look] line for this NPC (1 Hz)
-	u32 m_painter_pose_logged_at; // painter_pose_log: last [painter_pose] line for this NPC (1 Hz)
 
 private:
 	bool aim_target(Fvector& my_position, Fvector& aim_target, const CGameObject* object) const;

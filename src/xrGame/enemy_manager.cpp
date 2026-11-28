@@ -149,8 +149,12 @@ bool CEnemyManager::useful(const CEntityAlive* entity_alive) const
 
 	const auto invoke_callback = [this, entity_alive]()
 	{
-
+		const u16 target_id = entity_alive->ID();
+		const u64 birth = entity_alive->PainterBirthCookie();
 		const bool result = m_useful_callback(m_object->lua_game_object(), entity_alive->lua_game_object());
+		// BloodEngine: Lua can release or replace the target during the call
+		if (Level().Objects.net_Find(target_id) != entity_alive || entity_alive->PainterBirthCookie() != birth)
+			return false;
 
 	return result;
 	};

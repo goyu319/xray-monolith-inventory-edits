@@ -311,6 +311,9 @@ public:
 	IC void set_xform_project(const Fmatrix& M);
 
 	IC void set_xform_world_prev(const Fmatrix& M);
+	// Forget the bound texture lists, so that the next draw binds them again (after the surface of a bound
+	// CTexture was replaced).
+	void InvalidateTextures();
 	IC void set_xform_view_prev(const Fmatrix& M);
 	IC void set_xform_project_prev(const Fmatrix& M);
 
@@ -349,6 +352,9 @@ public:
 	ICF void set_Format(IDirect3DVertexDeclaration9* _decl);
 #endif	//	USE_DX10
 
+#if defined(USE_DX11) && RENDER==R_R4
+    ID3D11PixelShader* painterBoundPS()const{return ps;}
+#endif
 	ICF void set_PS(ID3DPixelShader* _ps, LPCSTR _n = 0);
 	ICF void set_PS(ref_ps& _ps) { set_PS(_ps->ps, _ps->cName.c_str()); }
 

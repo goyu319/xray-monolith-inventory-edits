@@ -56,6 +56,11 @@ IC void hud_light_restore(xr_map<light*, std::pair<Fvector, Fvector>>& saved_pos
 		L->direction = saved.second.second;
 	}
 }
+#ifdef USE_DX11
+// firerework: lights in the fire's smoky air (PainterFire_impl.h AirLight)
+namespace PainterFire { bool AirLight(const Fvector& position); }
+static xr_vector<light*> painterAirBeams; // the shadowed spot lights given shafts for the group of lights being drawn
+#endif
 
 void CRender::render_lights(light_Package& LP)
 {
@@ -237,6 +242,17 @@ void CRender::render_lights(light_Package& LP)
 						}
 					}
 
+#ifdef USE_DX11
+					// firerework: a shadowed spot light (a flashlight, a lamp) standing in the fire's smoky air shows its shafts in it
+					// while it stands there - its own setting is given back once this group of lights is drawn (a fire's lamps
+					// keep their own shafts)
+					if (!L->flags.bVolumetric && L->flags.bShadow && L->flags.type == IRender_Light::SPOT &&
+						!(L->m_parent && L->m_parent->flags.bFireSource) && PainterFire::AirLight(L->position))
+					{
+						L->flags.bVolumetric = TRUE;
+						painterAirBeams.push_back(L);
+					}
+#endif
 					bool bDeffered_Shadows = L->GMLight.RGraph.mapStaticPasses[0][0].size() || L->GMLight.RGraph.mapDynamicPasses[0][0].size();
 					bool bForward_Shadows = L->GMLight.RGraph.mapStaticPasses[1][0].size() || L->GMLight.RGraph.mapDynamicPasses[1][0].size() || L->GMLight.RGraph.mapStaticSorted.Sorted.size() || L->GMLight.RGraph.mapDynamicSorted.Sorted.size();
 					if (bDeffered_Shadows || bForward_Shadows)
@@ -331,6 +347,10 @@ void CRender::render_lights(light_Package& LP)
 
 				L_spot_s.clear();
 			}
+#ifdef USE_DX11
+			for (light* B : painterAirBeams) B->flags.bVolumetric = FALSE; // firerework: their own setting back
+			painterAirBeams.clear();
+#endif
 		}
 	}
 

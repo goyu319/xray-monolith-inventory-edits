@@ -17,6 +17,7 @@
 #include "../Layers/xrRender/xrRender_console.h"
 
 #include "PainterKillcamAim.h"
+#include "painter_hit_ammo.h"
 #include "level.h"
 #include "HUDManager.h"
 #include "inventory.h"
@@ -206,9 +207,10 @@ void CWeapon::FireTrace(const Fvector& native_point, const Fvector& native_direc
 
 	bool SendHit = SendHitAllowed(H_Parent());
 	//выстерлить пулю (с учетом возможной стрельбы дробью)
-	for (int i = 0; i < l_cartridge.param_s.buckShot; ++i)
 	{
-		FireBullet(P, D, fire_disp, l_cartridge, H_Parent()->ID(), ID(), SendHit, iAmmoElapsed);
+		const painter_cartridge::Scope fired(&l_cartridge);
+		for (int i = 0; i < l_cartridge.param_s.buckShot; ++i)
+			FireBullet(P, D, fire_disp, l_cartridge, H_Parent()->ID(), ID(), SendHit, iAmmoElapsed);
 	}
 
 	StartShotParticles();

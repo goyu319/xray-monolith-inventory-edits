@@ -71,7 +71,10 @@ struct Dent {float centre[3]{},radius{},push[3]{},depth{};};
 // with a 4-8 mm margin; the depth axis is normal x side): near a slit the value-3 exterior is cut by the removal field's smooth
 // surface (painter_slit.h), so a slash's edge is smooth instead of 2 mm cell steps.
 struct Slit {float centre[3]{},half_side{},side[3]{},half_normal{},normal[3]{},half_depth{};};
+struct Mesh;
+struct MeshPostWork {virtual ~MeshPostWork()=default;virtual void Run(const Mesh&)noexcept=0;};
 struct Mesh {
+    std::shared_ptr<MeshPostWork> post_work; // Optional pure-data work, frozen before renderer submission; no mesh ownership cycle.
     std::shared_ptr<const painter_detail::SkinOwnershipField> skin_ownership;
     std::shared_ptr<const painter_detail::AnalyticChannelField> analytic_channels;
     bool analytic_coverage_admitted=false; // Producer proof, never inferred from supported history.

@@ -17,7 +17,6 @@
 #include "member_order.h"
 #include "ai/stalker/ai_stalker.h"
 #include "../xrServerEntities/script_engine.h"
-#include "painter_ai/EngineCombatAdapter.h"
 
 #include "memory_manager.h"
 #include "visual_memory_manager.h"
@@ -1006,10 +1005,6 @@ bool CAgentEnemyManager::assigned_wounded(const CEntityAlive* wounded, const CAI
 
 bool CAgentEnemyManager::useful_enemy(const CEntityAlive* enemy, const CAI_Stalker* member) const
 {
-	// Native owned actors (Painter AI) keep their own perceived selection; squad allocation
-	// must not veto it. Membership and memory collection remain intact.
-	if (painter::combat::engine::owns(*member))
-		return true;
 	CAgentMemberManager& members = object().member();
 	const squad_mask_type member_mask = members.mask(member);
 	if (!(members.combat_mask() & member_mask))

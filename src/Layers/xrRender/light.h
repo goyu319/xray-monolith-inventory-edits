@@ -27,6 +27,8 @@ public:
 		u32 bVolumetric:1;
 		u32 bHudMode: 1;
 		u32 bOccq:       1;
+		u32 bFireSource: 1;
+		u32 bFireDetailed: 1;
 	} flags;
 
 	Fvector position;
@@ -62,6 +64,7 @@ public:
 	float m_volumetric_quality;
 	float m_volumetric_intensity;
 	float m_volumetric_distance;
+	float fire_beam = 0.f, fire_beam_reach = 1.f; // firebeams: a fire lamp's own shaft strength / reach share (PainterFire_impl.h)
 
 #ifndef XRCPU_PIPE_EXPORTS
 #ifndef _EDITOR

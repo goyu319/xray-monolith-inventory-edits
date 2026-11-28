@@ -405,6 +405,18 @@ public:
     void add_BloodWallmark(IWallMarkArray* array,const Fvector& P,float size,CDB::TRI* tri,Fvector* verts,
         float ttl,bool ignore_opt,float rotation,const BloodThermalStamp& stamp) override;
 	virtual void clear_static_wallmarks();
+    bool PainterBurnPublish(std::shared_ptr<const painter_burn::Delta>) override;
+    void PainterBurnClock(u32) override;
+    u32 PainterBurnEpoch() const override;
+    bool PainterFireBottle(const Fvector& position, float seconds, u32 seed) override;
+    bool PainterFireBottleThrown(const Fvector& position, float seconds, u32 seed, const Fvector& flew) override;
+    bool PainterFireBottleContact(const Fvector& position,float seconds,u32 seed,const Fvector& flew,const Fvector& hit) override;
+    bool PainterFireIgnite(const Fvector& position, float radius, float seconds) override;
+    bool PainterFireBody(u16 id, float seconds) override;
+    float PainterFireHeat(const Fvector& position) override;
+    u32 PainterFireSpots(Fvector* positions, float* sizes, u32 max) override; // firesoundspots
+    bool PainterFireLight(const Fvector& position) override;
+    bool PainterFireNear(const Fvector& position, float radius, Fvector& nearest) override;
 	virtual void add_SkeletonWallmark(intrusive_ptr<CSkeletonWallmark> wm);
 	virtual void add_SkeletonWallmark(const Fmatrix* xf, CKinematics* obj, ref_shader& sh, const Fvector& start,
 	                                  const Fvector& dir, float size, float ttl = 0.f, bool ignore_opt = false);
@@ -507,6 +519,7 @@ public:
 	virtual void rmNormal();
 	virtual u32 active_phase() { return phase; }; //Swartz: actor shadow
 	void RenderToTarget(RRT target) override;
+    void OnPlayableLevel() override;
 	// Constructor/destructor/loader
 	CRender();
 	virtual ~CRender();

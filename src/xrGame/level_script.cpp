@@ -67,8 +67,16 @@
 #include "cover_manager.h"
 #include "cover_point.h"
 #include "ActorCondition.h"
+#include "ai/monsters/basemonster/base_monster.h"
 #include "PainterDeformationSettings.h"
 #include "PainterExitSurface.h"
+#include "ai/stalker/ai_stalker.h"              // sitdiag
+#include "stalker_animation_manager.h"          // sitdiag
+#include "stalker_animation_script.h"           // sitdiag
+#include "game_object_space.h"                  // sitdiag
+#include "script_callback_ex.h"                 // sitdiag
+#include "../Include/xrRender/Kinematics.h"     // sitdiag
+#include "../Include/xrRender/animation_blend.h" // sitdiag
 
 using namespace luabind;
 // Synchronous exact-hit mesh exit; no positions, lookup identities or shot origins supplied by Lua are trusted.
@@ -133,12 +141,157 @@ static ::luabind::object painter_native_surface_hit(const ::luabind::object& req
     reply["triangle_id"]=double(surface.triangle);reply["point"]=point;reply["normal"]=normal;reply["ok"]=true;return reply;
 }
 
-// Version 1 includes the opt-in request and local projectile-submission hooks.
-static u32 tactical_grenade_bridge_version()
-{
-    return 1;
-}
 
+#include "PainterBurnAoe.inl"
+// Painter fire: a fire bottle broke at this place and its fire burns for `seconds`. True when the renderer draws it (the
+// caller then leaves its own explosion effect out); false when Painter fire is off or its files are missing.
+static bool painter_fire_bottle(const Fvector& position, float seconds)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireBottle(position, seconds, Device.dwTimeGlobal ^ (u32(position.x * 131.f) + u32(position.z * 71.f)));
+}
+// The same, told the way the bottle flew: a bottle that hit the ground on its way throws its fuel on ahead.
+static bool painter_fire_bottle_contact(const Fvector& p,float seconds,const Fvector& flew,const Fvector& hit)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireBottleContact(p,seconds,Device.dwTimeGlobal ^ (u32(p.x*131.f)+u32(p.z*71.f)),flew,hit);
+}
+static bool painter_fire_bottle_thrown(const Fvector& position, float seconds, const Fvector& flew)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireBottleThrown(position, seconds, Device.dwTimeGlobal ^ (u32(position.x * 131.f) + u32(position.z * 71.f)), flew);
+}
+// Painter fire: burning fuel lands at this place (thermite and the like); the fire spreads from it over what can burn.
+static bool painter_fire_ignite(const Fvector& position, float radius, float seconds)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireIgnite(position, radius, seconds);
+}
+// Painter fire: this body burns for at least `seconds` from now (call again while it does). True when the renderer draws
+// its fire - the caller then leaves its own flames on the body out.
+static bool painter_fire_body(u16 id, float seconds)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireBody(id, seconds);
+}
+// Painter fire: how hot the spreading fire is at a place, 0 no fire .. 1 a big one.
+// firesoundspots: the fires being lit now, for painter_fire_sound.script - painter_fire_spots() reads the list and returns
+// how many; painter_fire_spot(i) / painter_fire_spot_size(i) give the i-th fire's place and size (0-based)
+static Fvector painter_spot_pos[32];
+static float painter_spot_size[32];
+static u32 painter_spot_count = 0;
+static u32 painter_fire_spots()
+{
+    painter_spot_count = (g_dedicated_server || !::Render) ? 0 : ::Render->PainterFireSpots(painter_spot_pos, painter_spot_size, 32);
+    return painter_spot_count;
+}
+static Fvector painter_fire_spot(u32 i)
+{
+    Fvector p;
+    if (i < painter_spot_count) p = painter_spot_pos[i]; else p.set(0.f, 0.f, 0.f);
+    return p;
+}
+static float painter_fire_spot_size(u32 i) { return i < painter_spot_count ? painter_spot_size[i] : 0.f; }
+static float painter_fire_heat(const Fvector& position)
+{
+    if (g_dedicated_server || !::Render) return 0.f;
+    return ::Render->PainterFireHeat(position);
+}
+// Painter fire: a body stands or lies in the spreading fire. The body-burn system is told so with the fire's own strength
+// (0..1 for a tick of a quarter second) - as a fire contact, not as a hit: no damage, no hit handling. False when body
+// burning is switched off or this is no body.
+static bool painter_fire_burn_body(u16 id, float power)
+{
+    using namespace painter_burn_source;
+    if (!enabled() || !g_pGameLevel || !OnServer() || Device.dwPrecacheFrame || !std::isfinite(power) || !(power > 0.f)) return false;
+    CObject* target = Level().Objects.net_Find(id);
+    if (!target || target->getDestroy() || !isBody(*target)) return false;
+    Event e;
+    e.cause = Cause::Local;
+    e.lightBurn = 0;
+    e.sourceSerial = nextSerial();
+    e.pulse = e.sourceSerial;
+    e.tick16 = tick16(Device.dwTimeGlobal);
+    e.quanta = 4;
+    e.areaPeriodMs = 250;
+    e.power = power > 1.f ? 1.f : power;
+    e.emitterId = id;
+    confirm(*target, e);
+    return true;
+}
+// Painter fire: a small flame is held to the ground at this place (a match, a lighter): what is there catches if it can
+// burn and is not too wet. False = fire is switched off. Whether it caught shows a moment later (painter_fire_dist).
+static bool painter_fire_light(const Fvector& position)
+{
+    if (g_dedicated_server || !::Render) return false;
+    return ::Render->PainterFireLight(position);
+}
+// Painter fire: how far the nearest burning place of the spreading fire is, within `radius`; -1 = none.
+static float painter_fire_dist(const Fvector& position, float radius)
+{
+    Fvector nearest;
+    if (g_dedicated_server || !::Render || !::Render->PainterFireNear(position, radius, nearest)) return -1.f;
+    return nearest.distance_to(position);
+}
+// Painter fire: that nearest burning place (the position itself when there is none).
+static Fvector painter_fire_near(const Fvector& position, float radius)
+{
+    Fvector nearest = position;
+    if (!g_dedicated_server && ::Render) ::Render->PainterFireNear(position, radius, nearest);
+    return nearest;
+}
+// Painter fire: a mutant takes a place for a danger and runs from it, as from a shot it heard there (the engine's own
+// "heard danger" behaviour: run from the place, then stand scared). False = no living mutant with this number.
+static bool painter_world_fire_enabled() {return (PainterFireMasterStamp()&1u)!=0;}
+static unsigned painter_world_fire_stamp() {return PainterFireMasterStamp();}
+static bool painter_body_burning_enabled() {return (PainterBodyMasterStamp()&1u)!=0;}
+static bool painter_fire_scare(u16 id, const Fvector& place)
+{
+    if(!painter_world_fire_enabled())return false;
+    if (!g_pGameLevel) return false;
+    CBaseMonster* monster = smart_cast<CBaseMonster*>(Level().Objects.net_Find(id));
+    if (!monster || !monster->g_Alive()) return false;
+    monster->SoundMemory.HearSound(nullptr, SOUND_TYPE_WEAPON_SHOOTING, place, 1.f, Device.dwTimeGlobal);
+    return true;
+}
+int painter_sit_log = 0;
+static bool painter_sit_log_on() { return painter_sit_log != 0; }
+static LPCSTR painter_anim_debug(u16 id)
+{
+    static string512 out;
+    out[0] = 0;
+    if (!g_pGameLevel) return out;
+    CAI_Stalker* s = smart_cast<CAI_Stalker*>(Level().Objects.net_Find(id));
+    if (!s || !s->Visual())
+    {
+        xr_strcpy(out, "eng: no stalker");
+        return out;
+    }
+    IKinematics* K = s->Visual()->dcast_PKinematics();
+    const void* const mc = s->animation_movement();
+    LPCSTR root = "?";
+    if (K)
+    {
+        CBoneInstance& r = K->LL_GetBoneInstance(K->LL_GetBoneRoot());
+        root = !r.callback() ? "none" : (mc && r.callback_param() == mc) ? "ctrl" : "other";
+    }
+    CStalkerAnimationManager& a = s->animation();
+    const CStalkerAnimationManager::SCRIPT_ANIMATIONS& q = a.script_animations();
+    CBlend* const b = a.script().blend();
+    const MotionID& playing = a.script().animation();
+    Fvector c;
+    s->Center(c);
+    const bool view = ::Render && !!::Render->ViewBase.testSphere_dirty(c, s->Radius());
+    xr_sprintf(out, "eng: queued=%u q0=%u:%u q0_mc=%d q0_at=%d play=%u:%u blend=%d t=%.2f/%.2f amt=%.2f mc=%d root=%s cb=%d ik=%d view=%d cam=%.0f",
+        u32(q.size()),
+        q.empty() ? 0u : u32(q.front().animation().slot), q.empty() ? 0u : u32(q.front().animation().idx),
+        q.empty() ? 0 : int(q.front().use_movement_controller()), q.empty() ? 0 : int(q.front().has_transform()),
+        playing.valid() ? u32(playing.slot) : 0u, playing.valid() ? u32(playing.idx) : 0u,
+        b ? 1 : 0, b ? b->timeCurrent : 0.f, b ? b->timeTotal : 0.f, b ? b->blendAmount : 0.f,
+        mc ? 1 : 0, root, s->callback(GameObject::eScriptAnimation) ? 1 : 0,
+        s->character_ik_controller() ? 1 : 0, view ? 1 : 0, Device.vCameraPosition.distance_to(s->Position()));
+    return out;
+}
 extern bool painter_voxel_live_bind(u16 id);
 extern bool painter_voxel_live_bind_target(u16 id);
 extern bool painter_voxel_live_unbind(u16 id);
@@ -426,184 +579,6 @@ u32 vertex_link(u32 level_vertex_id, int index)
 	return ai().level_graph().vertex(level_vertex_id)->link(index);
 }
 
-#include "painter_building_scan_impl.h" // level.painter_building_scan(pos, radius): rooms, doorways, windows
-#include "painter_path_query_impl.h" // level.painter_path_corners / painter_nav_ray: AI-map paths and straight walks
-#include "painter_doors_query_impl.h" // level.painter_doors_near: physical doors near a point, their state
-#include "painter_batch_query_impl.h" // level.painter_rays / painter_cover_query: batched AI queries, rays on worker threads
-#include "painter_ai/EngineServices.h"
-#include "painter_ai/EngineCapture.h"
-// native combat AI: level.painter_combat_enabled() - its master switch as read at level start; level.painter_combat_set_flag(npc, name, value) - a script-only state the engine cannot see (names: EngineCapture.h)
-inline bool painter_combat_enabled() { return painter::combat::engine::combat_enabled(); }
-inline bool painter_combat_set_flag(CScriptGameObject* npc, LPCSTR name, bool value)
-{
-	return npc && name && painter::combat::engine::set_flag(npc->ID(), name, value);
-}
-// native combat AI compatibility push model (contract v2.21, painter_ai/EngineCompat.h), nil-safe: a missing / wrong
-// argument returns 0 / false, never a Lua error.
-//   token = level.painter_combat_compat_begin(npc)                      a new registration (0 = refused)
-//   level.painter_combat_compat_evaluator(npc, token, evaluator_id)      one required compatibility evaluator
-//   level.painter_combat_compat_fact(npc, token, domain, value)          domain: CombatIds compat::domain_names, value: bool
-//   level.painter_combat_compat_seal(npc, token)                         commit (every id resolves, every domain known)
-//   level.painter_combat_compat_invalidate(npc, token, domain)           domain nil = everything
-//   token = level.painter_combat_compat_token(npc)                       his current token (0 = none)
-#include "painter_ai/EngineCompat.h"
-inline CAI_Stalker* painter_combat_stalker(CScriptGameObject* npc)
-{
-	return npc ? smart_cast<CAI_Stalker*>(&npc->object()) : nullptr;
-}
-inline bool painter_combat_u32(const ::luabind::object& value, u32& out)
-{
-	if (value.type() != LUA_TNUMBER) return false;
-	const double number = ::luabind::object_cast<double>(value);
-	if (!(number >= 1. && number <= 4294967295.) || number != double(u32(number))) return false;
-	out = u32(number);
-	return true;
-}
-inline double painter_combat_compat_begin(CScriptGameObject* npc)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	return stalker ? double(painter::combat::engine::compat_begin(*stalker)) : 0.;
-}
-inline bool painter_combat_compat_evaluator(CScriptGameObject* npc, const ::luabind::object& token,
-                                            const ::luabind::object& evaluator_id)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	u32 t = 0, id = 0;
-	if (evaluator_id.type() == LUA_TNUMBER && ::luabind::object_cast<double>(evaluator_id) == 0.) id = 0;
-	else if (!painter_combat_u32(evaluator_id, id)) return false;
-	return stalker && painter_combat_u32(token, t) && painter::combat::engine::compat_evaluator(*stalker, t, id);
-}
-inline bool painter_combat_compat_fact(CScriptGameObject* npc, const ::luabind::object& token, const ::luabind::object& domain,
-                                       const ::luabind::object& value)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	u32 t = 0;
-	if (!stalker || !painter_combat_u32(token, t) || domain.type() != LUA_TSTRING || value.type() != LUA_TBOOLEAN)
-		return false;
-	return painter::combat::engine::compat_fact(*stalker, t, ::luabind::object_cast<LPCSTR>(domain),
-	                                            ::luabind::object_cast<bool>(value));
-}
-inline bool painter_combat_compat_seal(CScriptGameObject* npc, const ::luabind::object& token)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	u32 t = 0;
-	return stalker && painter_combat_u32(token, t) && painter::combat::engine::compat_seal(*stalker, t);
-}
-inline bool painter_combat_compat_invalidate(CScriptGameObject* npc, const ::luabind::object& token,
-                                             const ::luabind::object& domain)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	u32 t = 0;
-	if (!stalker || !painter_combat_u32(token, t)) return false;
-	const int kind = domain.type();
-	if (kind != LUA_TNIL && kind != LUA_TNONE && kind != LUA_TSTRING) return false;
-	return painter::combat::engine::compat_invalidate(*stalker, t,
-		kind == LUA_TSTRING ? ::luabind::object_cast<LPCSTR>(domain) : nullptr);
-}
-inline bool painter_combat_compat_invalidate_all(CScriptGameObject* npc, const ::luabind::object& token)
-{
-	return painter_combat_compat_invalidate(npc, token, ::luabind::object());   // domain omitted = everything
-}
-inline double painter_combat_compat_token(CScriptGameObject* npc)
-{
-	CAI_Stalker* const stalker = painter_combat_stalker(npc);
-	return stalker ? double(painter::combat::engine::compat_token(*stalker)) : 0.;
-}
-// level.painter_combat_set_aid(npc, allowed, claimed, claimant_id) - his side's state as the wounded one (contract v2.18):
-// may he be helped (xr_wounded not_for_help) and the stock helper's claim on him (claimant_id 65535 = none)
-inline bool painter_combat_set_aid(CScriptGameObject* npc, bool allowed, bool claimed, double claimant_id)
-{
-	if (!npc) return false;
-	const u16 claimant = claimant_id >= 0. && claimant_id < 65535. ? u16(claimant_id) : u16(65535);
-	painter::combat::engine::set_aid(npc->ID(), allowed, claimed, claimant);
-	return true;
-}
-inline double painter_combat_side_of(CScriptGameObject* npc)
-{
-	CEntityAlive* const entity = npc ? smart_cast<CEntityAlive*>(&npc->object()) : nullptr;
-	return entity ? double(painter::combat::engine::side_key(*entity)) : -1.0;
-}
-inline bool painter_combat_set_mission(double side, LPCSTR kind, double building, const ::luabind::object& entry_portal,
-                                       const ::luabind::object& rooms)
-{
-	using namespace painter::combat;
-	static const struct { LPCSTR name; MissionKind kind; } kinds[] = {{"none", MissionKind::none},
-		{"clear_building", MissionKind::clear_building}, {"defend", MissionKind::defend}, {"attack", MissionKind::attack},
-		{"hold", MissionKind::hold}};
-	Mission mission;
-	bool known = false;
-	for (const auto& row : kinds)
-		if (kind && !xr_strcmp(kind, row.name)) { mission.kind = row.kind; known = true; }
-	if (!known || !(side >= 0.0) || !(building >= 0.0)) return false;
-	mission.building = building >= 1.0 ? std::uint32_t(building) : invalid_room;
-	if (entry_portal.type() == LUA_TNUMBER)
-		mission.entry_portal = ::luabind::object_cast<std::uint32_t>(entry_portal);
-	else if (entry_portal.type() == LUA_TSTRING)
-	{
-		mission.entry_portal = engine::portal_named(mission.building, ::luabind::object_cast<LPCSTR>(entry_portal));
-		if (!mission.entry_portal) return false;
-	}
-	else if (entry_portal.type() != LUA_TNIL) return false;
-	if (rooms.type() == LUA_TTABLE)
-		for (int i = 1;; ++i)                       // by index: the order is the script's
-		{
-			const ::luabind::object room = rooms[i];
-			if (room.type() == LUA_TNIL) break;
-			std::uint32_t id = invalid_room;
-			if (room.type() == LUA_TNUMBER) id = ::luabind::object_cast<std::uint32_t>(room);
-			else if (room.type() == LUA_TSTRING) id = engine::room_named(::luabind::object_cast<LPCSTR>(room));
-			if (id == invalid_room || mission.rooms.count >= mission.rooms.items.size()) return false;
-			mission.rooms.items[mission.rooms.count++] = id;
-		}
-	else if (rooms.type() != LUA_TNIL) return false;
-	const std::uint64_t key = std::uint64_t(side);
-	engine::set_mission(key, mission);
-	Mission stored;
-	engine::mission_of(key, stored);
-	Msg("[painter_combat] phase=mission side=%llu revision=%u kind=%s building=%u entry_portal=%u rooms=%u", key,
-	    stored.revision, kind, mission.building, mission.entry_portal, unsigned(mission.rooms.count));
-	return true;
-}
-inline void painter_combat_clear_mission(double side)
-{
-	if (side >= 0.0) painter::combat::engine::clear_mission(std::uint64_t(side));
-}
-
-// Bulk node query for the AI layer (E1): position, the 4 links and the high/low cover toward the quadrant yaws +x, +z, -x,
-// -z in one call. Position and links equal vertex_position / vertex_link; the cover values use the heading normalized to
-// [0, 2pi) as the engine's own callers do, so they stay in [0, 1] (the per-direction exports extrapolate outside that
-// range for directions with a negative heading). {valid=false} for an invalid vertex id.
-::luabind::object vertex_info(u32 level_vertex_id)
-{
-	::luabind::object table = ::luabind::newtable(ai().script_engine().lua());
-	if (!ai().level_graph().valid_vertex_id(level_vertex_id))
-	{
-		table["valid"] = false;
-		return table;
-	}
-	table["valid"] = true;
-	Fvector const position = ai().level_graph().vertex_position(level_vertex_id);
-	table["x"] = position.x;
-	table["y"] = position.y;
-	table["z"] = position.z;
-	CLevelGraph::CVertex const* const vertex = ai().level_graph().vertex(level_vertex_id);
-	LPCSTR const link_keys[4] = {"link0", "link1", "link2", "link3"};
-	LPCSTR const high_keys[4] = {"high0", "high1", "high2", "high3"};
-	LPCSTR const low_keys[4] = {"low0", "low1", "low2", "low3"};
-	Fvector const directions[4] = {Fvector().set(1.f, 0.f, 0.f), Fvector().set(0.f, 0.f, 1.f), Fvector().set(-1.f, 0.f, 0.f),
-								   Fvector().set(0.f, 0.f, -1.f)};
-	for (u8 i = 0; i < 4; ++i)
-	{
-		table[link_keys[i]] = vertex->link(i);
-		float y, p;
-		directions[i].getHP(y, p);
-		// the cover interpolation expects [0, 2pi); getHP gives (-pi, pi] (the per-direction exports pass it unnormalized)
-		y = angle_normalize(y);
-		table[high_keys[i]] = ai().level_graph().high_cover_in_direction(y, level_vertex_id);
-		table[low_keys[i]] = ai().level_graph().low_cover_in_direction(y, level_vertex_id);
-	}
-	return table;
-}
 
 
 float high_cover_in_direction(u32 level_vertex_id, const Fvector& direction)
@@ -3127,7 +3102,28 @@ void CLevel::script_register(lua_State* L)
         def("painter_native_surface_hit", &painter_native_surface_hit),
         def("painter_deformation_api_version", &painter_deformation::api_version),
         def("painter_deformation_settings", &painter_deformation::settings),
-        def("tactical_grenade_bridge_version", &tactical_grenade_bridge_version),
+        def("painter_burn_aoe_begin", &painter_burn_source::beginAoe),
+        def("painter_burn_aoe_pulse", &painter_burn_source::aoePulse),
+        def("painter_burn_aoe_attached", &painter_burn_source::aoeAttached),
+        def("painter_fire_bottle", &painter_fire_bottle),
+        def("painter_fire_bottle_thrown", &painter_fire_bottle_thrown),
+        def("painter_fire_bottle_contact", &painter_fire_bottle_contact),
+        def("painter_fire_ignite", &painter_fire_ignite),
+        def("painter_fire_body", &painter_fire_body),
+        def("painter_fire_heat", &painter_fire_heat),
+        def("painter_fire_spots", &painter_fire_spots),
+        def("painter_fire_spot", &painter_fire_spot),
+        def("painter_fire_spot_size", &painter_fire_spot_size),
+        def("painter_fire_burn_body", &painter_fire_burn_body),
+        def("painter_fire_light", &painter_fire_light),
+        def("painter_fire_dist", &painter_fire_dist),
+        def("painter_fire_near", &painter_fire_near),
+        def("painter_fire_scare", &painter_fire_scare),
+        def("painter_sit_log", &painter_sit_log_on),        // sitdiag
+        def("painter_anim_debug", &painter_anim_debug),     // sitdiag
+        def("painter_fire_enabled", &painter_world_fire_enabled),
+        def("painter_fire_master_stamp", &painter_world_fire_stamp),
+        def("painter_body_burn_enabled", &painter_body_burning_enabled),
         def("painter_voxel_live_bind", &painter_voxel_live_bind),
         def("painter_voxel_live_bind_target", &painter_voxel_live_bind_target),
         def("painter_voxel_live_unbind", &painter_voxel_live_unbind),
@@ -3213,27 +3209,6 @@ void CLevel::script_register(lua_State* L)
 			def("vertex_link", vertex_link),
 			def("high_cover_in_direction", high_cover_in_direction),
 			def("low_cover_in_direction", low_cover_in_direction),
-			def("vertex_info", vertex_info),
-			def("painter_building_scan", painter_building_scan),
-			def("painter_map_hash", painter_map_hash),
-			def("painter_path_corners", painter_path_corners),
-			def("painter_nav_ray", painter_nav_ray),
-			def("painter_doors_near", painter_doors_near),
-			def("painter_rays", painter_rays),
-			def("painter_cover_query", painter_cover_query),
-			def("painter_combat_enabled", painter_combat_enabled),
-			def("painter_combat_set_flag", painter_combat_set_flag),
-			def("painter_combat_set_aid", painter_combat_set_aid),
-			def("painter_combat_compat_begin", painter_combat_compat_begin),
-			def("painter_combat_compat_evaluator", painter_combat_compat_evaluator),
-			def("painter_combat_compat_fact", painter_combat_compat_fact),
-			def("painter_combat_compat_seal", painter_combat_compat_seal),
-			def("painter_combat_compat_invalidate", painter_combat_compat_invalidate),
-			def("painter_combat_compat_invalidate", painter_combat_compat_invalidate_all),
-			def("painter_combat_compat_token", painter_combat_compat_token),
-			def("painter_combat_side_of", painter_combat_side_of),
-			def("painter_combat_set_mission", painter_combat_set_mission),
-			def("painter_combat_clear_mission", painter_combat_clear_mission),
 			def("vertex_in_direction", vertex_in_direction),
 			def("rain_factor", rain_factor),
 			def("rain_wetness", rain_wetness),

@@ -42,10 +42,6 @@ private:
 	CStalkerAnimationPair m_torso;
 	CStalkerAnimationPair m_legs;
 	CStalkerAnimationPair m_script;
-	// Attainment is certified only after both actual clip channels were played.
-	u32 m_painter_pose_frame = u32(-1);
-	u8 m_painter_pose_body = 0;
-	bool m_painter_pose_valid = false;
 
 private:
 	u32 m_direction_start;
@@ -76,23 +72,6 @@ private:
 	bool m_call_global_callback;
 	bool m_start_new_script_animation;
 
-	// Left-shoulder stance: the torso clip is swapped for its "<name>_ls" mirror when the bank has one (painter_mirrored_torso);
-	// the grip blend follows the torso crossfade (0 = right-hand weapon frame, 1 = left-hand frame) and is 0 whenever this
-	// frame played no torso clip (global / script animation, dead, vehicle).
-	bool m_painter_torso_mirrored;
-	bool m_painter_grip_active;
-	float m_painter_grip_blend;
-	float m_painter_grip_from;
-	// Spine compensation: the spine pose (model rotation) the current torso clip was authored on, from its own keys for
-	// the bones root..bip01_spine at the torso time; the spine1/spine2 callbacks rotate the upper body onto it.
-	Fquaternion m_painter_torso_spine;
-	bool m_painter_torso_spine_valid;
-	u16 m_painter_spine_chain[8];
-	u16 m_painter_spine_chain_count;
-
-
-	xr_map<u32, MotionID> m_painter_mirror_cache;
-
 #ifdef USE_HEAD_BONE_PART_FAKE
 private:
 	u32 m_script_bone_part_mask;
@@ -121,8 +100,6 @@ public:
 		CAI_Stalker const* m_object;
 		CBlend const* const* m_blend;
 		bool m_forward;
-		float m_lean_share; // share of the NPC's procedural lean (CAI_Stalker::painter_lean) rolled at this bone after the look rotation (0 = none)
-		float m_spine_comp; // share of the spine compensation applied at this bone (spine1 and spine2: 0.5 each; 0 = none)
 
 		callback_params()
 		{
@@ -135,8 +112,6 @@ public:
 			m_object = 0;
 			m_blend = 0;
 			m_forward = false;
-			m_lean_share = 0.f;
-			m_spine_comp = 0.f;
 		}
 	}; // struct callback_params
 
@@ -218,7 +193,6 @@ public:
 	virtual void reinit();
 	virtual void reload();
 	virtual void update();
-	bool painter_attained_pose(u8& body) const;
 	void play_fx(float power_factor, int fx_index);
 	void play_delayed_callbacks();
 
@@ -236,16 +210,6 @@ public:
 	IC CStalkerAnimationPair& head();
 	IC CStalkerAnimationPair& torso();
 	IC CStalkerAnimationPair& legs();
-	IC bool painter_torso_mirrored() const { return m_painter_torso_mirrored; }
-	IC float painter_grip_blend() const { return m_painter_grip_active ? m_painter_grip_blend : 0.f; }
-	IC u32 painter_legs_direction() const { return u32(m_current_direction); }
-	void painter_update_grip(bool torso_changed);
-	void painter_update_torso_spine();
-	IC bool painter_torso_spine(Fquaternion& spine) const { spine = m_painter_torso_spine; return m_painter_torso_spine_valid; }
-	IC u16 painter_spine_bone() const { return m_painter_spine_chain_count ? m_painter_spine_chain[m_painter_spine_chain_count - 1] : u16(BI_NONE); }
-
-
-	MotionID painter_mirrored_torso(MotionID const& animation);
 	IC CStalkerAnimationPair& script();
 	IC CAI_Stalker& object() const;
 	IC const float& target_speed() const;

@@ -132,7 +132,7 @@ static void pack(Session::Impl&i,const Grid&grid,const std::shared_ptr<const Res
   for(const auto&b:removedTiles){bool overlap=true;for(int a=0;a<3&&overlap;++a)overlap=b[a]<=hi[a]+grid.pitch&&b[3+a]>=lo[a]-grid.pitch;if(overlap)return true;}return false;};
  unsigned next=i.asset->original_children;
  for(const auto&c:birth.children){next=std::max(next,unsigned(c.child_index)+1);auto child=c;
-  if(!child.material&&!child.vertices.empty()&&!child.skin_clip)child.skin_clip=removedNear(child);mesh.children.push_back(std::move(child));}
+  if(!child.material&&!child.vertices.empty()&&!child.skin_clip)child.skin_clip=i.burn_surface_requested.load(std::memory_order_relaxed)||removedNear(child);mesh.children.push_back(std::move(child));}
  // New walls: this piece's weights (a bone the piece does not pose moves with its anchor), then their tiles for marks.
  std::vector<Cell> markTiles;std::vector<std::pair<unsigned,std::vector<packedchannel::OwnerTriangle>>> fresh;
  for(std::size_t c=0;c<packets.size();++c){const auto&k=keep[c];if(k.tris.empty())continue;const auto&src=packets[c]->geometry;
@@ -184,6 +184,7 @@ static void pack(Session::Impl&i,const Grid&grid,const std::shared_ptr<const Res
  struct FieldTiles {std::unordered_map<Cell,core::Tile,core::CellHash> tiles;const void* ownership=nullptr;double pitch;Vec origin;decltype(grid.size) size;};
  FieldTiles field{{},nullptr,grid.pitch,grid.origin,grid.size};
  for(const auto&t:grid.tiles){std::uint64_t any=0;for(auto w:t.second.removed)any|=w;if(any)field.tiles.emplace(t.first,t.second);}
+ grid.applyDisplayFloor(field.tiles);
  for(const auto*list:{&seed.marks,&marks})for(const auto&m:*list){auto&t=field.tiles[m.first];for(unsigned q=0;q<8;++q)t.removed[q]|=m.second.removed[q];st.marks+=1;}
  mesh.removal_field=painter_detail::buildDamageField(field);need(mesh.removal_field&&mesh.removal_field->available,"piece_removal_field");
  // Without birth walls, new walls use the same closure-field coverage proof as whole-body publication.
@@ -209,8 +210,9 @@ static void packMask(Session::Impl&i,const Grid&grid,const std::shared_ptr<Outpu
  struct FieldTiles {std::unordered_map<Cell,core::Tile,core::CellHash> tiles;const void* ownership=nullptr;double pitch;Vec origin;decltype(grid.size) size;};
  FieldTiles field{{},nullptr,grid.pitch,grid.origin,grid.size};
  for(const auto&t:grid.tiles){std::uint64_t any=0;for(auto w:t.second.removed)any|=w;if(any)field.tiles.emplace(t.first,t.second);}
+ grid.applyDisplayFloor(field.tiles);
  for(const auto&m:seed.marks){auto&t=field.tiles[m.first];for(unsigned q=0;q<8;++q)t.removed[q]|=m.second.removed[q];}
- mesh.removal_field=painter_detail::buildDamageField(field);need(mesh.removal_field&&mesh.removal_field->available,"mask_piece_removal_field");
+ mesh.removal_field=painter_detail::publishBlowoutTags(grid,painter_detail::buildDamageField(field));need(mesh.removal_field&&mesh.removal_field->available,"mask_piece_removal_field");
  mesh.tissue_field=birth.tissue_field;mesh.mask_volume=true;mesh.mask_piece=true;
  mesh.tears=birth.tears;mesh.tear_atlas=birth.tear_atlas; // slices 3 + 4: the piece keeps its tears and their drawing set; only the removal field changes
  if(history&&seed.history){std::vector<const ResolvedCutHistory*> chain;for(auto p=history.get();p;p=p->parent.get())chain.push_back(p);

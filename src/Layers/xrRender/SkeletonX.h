@@ -71,7 +71,7 @@ protected:
 	void _Render_soft(ref_geom& hGeom, u32 vCount, u32 iOffset, u32 pCount, CBoneInstance* bones);
 	// vBase: DrawIndexed base vertex (Fvisual::vBase; non-zero for runtime
 	// children that share one packet VB). Ignored by the software path.
-	void _Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount);
+	void _Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount, u32 localPrimitive);
 	void _Load(const char* N, IReader* data, u32& dwVertCount);
 
 	virtual void _Load_hw(Fvisual& V, void* data) = 0;
@@ -157,6 +157,8 @@ public:
 	bool AppendProjectionRanges(const U16Vec& bones, CSkeletonWallmark::ProjectionSnapshot& hit, bool require_gpu_ready = true) const;
 	bool HasProjectionSource() const { return m_ProjectionSource!=nullptr; }
     void SetWallmarkOwnership(const std::shared_ptr<PainterWallmarkOwnershipGpu>&field){m_WallmarkOwnership=field;}
+    const std::shared_ptr<const std::vector<u32>>& PainterBurnRemap()const{return m_WallmarkSourceFaces;}
+    u32 PainterBurnSourceChild()const{return m_WallmarkSourceChild==~0u?ChildIDX:m_WallmarkSourceChild;}
     void SetWallmarkProvenance(u32 child,const std::vector<u32>&faces){m_WallmarkSourceChild=child;m_WallmarkSourceFaces=std::make_shared<const std::vector<u32>>(faces);}
 	const CSkeletonWallmark::ProjectionSource* ProjectionSourceKey() const { return m_ProjectionSource.get(); }
 	const std::shared_ptr<const CSkeletonWallmark::ProjectionSource>& ProjectionSourceHandle() const { return m_ProjectionSource; }

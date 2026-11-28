@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../xrRender/PainterFire.h"
 #include "r4.h"
 #include "../xrRender/RuntimeShaderCache.h"
 #include "../xrRender/ResourceManager.h"
@@ -14,6 +15,7 @@
 #include "scope_vslr_renderer.h"
 
 #include "../xrRenderDX10/dx10BufferUtils.h"
+#include "../xrRender/PainterSpruceCard.h"
 #include "../xrRenderDX10/3DFluid/dx103DFluidVolume.h"
 
 #include "../xrRender/FHierrarhyVisual.h"
@@ -21,6 +23,7 @@
 
 #pragma warning(push)
 #pragma warning(disable:4995)
+#include "../../xrCore/ShaderSourceCRC.h"
 #include <malloc.h>
 #pragma warning(pop)
 
@@ -321,6 +324,40 @@ void tree_ib_reorder(u32 ib_id, u16* data, u32 ib_count, u32& cursor)
 	}
 }
 }
+void PainterParallelWarmShaders();
+void PainterPrepareLevelShaders(const char* reason);
+void PainterEndShaderSession(const char* reason);
+namespace {
+    struct ShaderLoadDisplay {
+        static thread_local ShaderLoadDisplay* active;
+        ULONGLONG started=GetTickCount64(),last=0;
+        unsigned lastCount=~0u;
+        ShaderLoadDisplay* previous=active;
+        ShaderLoadDisplay(){ active=this; }
+        ~ShaderLoadDisplay(){ active=previous; }
+    };
+    thread_local ShaderLoadDisplay* ShaderLoadDisplay::active=nullptr;
+}
+
+// Called on the load owner only, after releasing all scheduler locks.
+void PainterShaderLoadProgress(unsigned done,unsigned total)
+{
+    auto* display=ShaderLoadDisplay::active;
+    if (!display || !pApp || !total || done>=total) return;
+    const auto now=GetTickCount64();
+    if (now-display->started<500 || (display->last && now-display->last<250) || done==display->lastCount) return;
+    if (dxRenderDeviceRender::Instance().GetDeviceState()!=IRenderDeviceRender::dsOK) return;
+    display->lastCount=done;display->last=now;
+    struct RestoreTitle {
+        CApplication& app;
+        string2048 old;
+        RestoreTitle(CApplication& a):app(a){xr_strcpy(old,app.ls_header);}
+        ~RestoreTitle(){xr_strcpy(app.ls_header,old);}
+    } restore(*pApp);
+    xr_sprintf(pApp->ls_header,"Preparing shaders %u / %u",done,total);
+    pApp->LoadDraw();
+}
+
 
 void CRender::level_Load(IReader* fs)
 {
@@ -331,7 +368,14 @@ void CRender::level_Load(IReader* fs)
 	pApp->LoadBegin();
 	shader_warmup_start(); // pip/3DSS scope shaders compile on worker threads while the level loads
 	dxRenderDeviceRender::Instance().Resources->DeferredLoad(TRUE);
+    ShaderClosureLoadScope closureLoad;
+    if (!g_dedicated_server) {
+        ShaderLoadDisplay display;
+        PainterParallelWarmShaders();
+    }
 	IReader* chunk;
+    PainterSpruceCard::forget();
+    std::vector<const void*> barkShaders;
 
 	// Shaders
 	//	g_pGamePersistent->LoadTitle		("st_loading_shaders");
@@ -341,6 +385,7 @@ void CRender::level_Load(IReader* fs)
 		R_ASSERT2(chunk, "Level doesn't builded correctly.");
 		u32 count = chunk->r_u32();
 		Shaders.resize(count);
+        barkShaders.resize(count);
 		for (u32 i = 0; i < count; i++) // skip first shader as "reserved" one
 		{
 			string512 n_sh, n_tlist;
@@ -352,9 +397,11 @@ void CRender::level_Load(IReader* fs)
 			*delim = 0;
 			xr_strcpy(n_tlist, delim + 1);
 			Shaders[i] = dxRenderDeviceRender::Instance().Resources->Create(n_sh, n_tlist);
+            if(PainterSpruceCard::isStage(n_sh))barkShaders[i]=Shaders[i]._get();
 		}
 		chunk->close();
 	}
+	if (!g_dedicated_server) RuntimeShaderCache::WarmLevelInteriors();
 
 	// Components
 	Wallmarks = xr_new<CWallmarksEngine>();
@@ -371,8 +418,19 @@ void CRender::level_Load(IReader* fs)
 		{
 			CStreamReader* geom = FS.rs_open("$level$", "level.geom");
 			R_ASSERT2(geom, "level.geom");
-			LoadBuffers(geom,FALSE);
-			LoadSWIs(geom);
+            LoadSWIs(geom);
+            IReader* visuals=fs->open_chunk(fsL_VISUALS);
+            if(visuals) {
+                for(u32 n=0;;++n) {
+                    IReader* visual=visuals->open_chunk(n);
+                    if(!visual)break;
+                    PainterSpruceCard::registerVisual(visual,barkShaders,SWIs);
+                    visual->close();
+                }
+                visuals->close();
+            }
+            LoadBuffers(geom,FALSE);
+            PainterSpruceCard::sections.clear();
 			FS.r_close(geom);
 		}
 
@@ -427,6 +485,8 @@ void CRender::level_Load(IReader* fs)
 	// pApp->LoadTitle			("Loading lights...");
 	LoadLights(fs);
 
+    if (!g_dedicated_server) PainterPrepareLevelShaders("level");
+
 	// End
 	pApp->LoadEnd();
 
@@ -438,10 +498,13 @@ void CRender::level_Unload()
 {
 	if (0 == g_pGameLevel) return;
 	if (!b_loaded) return;
+    PainterEndShaderSession("level_unload");
+	PainterSpruceCard::forget();
 
 	shader_warmup_stop();
 	scope_vslr_destroy(); // scope reflections hold this level's sectors and captured scene
 	RuntimeShaderCache::Clear(false); // wound child shader handles of this level's NPCs
+	PainterFire::Clear(); // fires, their lights and shader handles
 
 	GMBase.clear();
 	GMRainWet.clear();
@@ -571,6 +634,7 @@ void CRender::LoadBuffers(CStreamReader* base_fs, BOOL _alternative)
 			BYTE* pData = xr_alloc<BYTE>(vCount * vSize);
 			fs->r(pData, vCount * vSize);
 			dx10BufferUtils::CreateVertexBuffer(&_VB[i], pData, vCount * vSize);
+            if(!_alternative)PainterSpruceCard::vertices(i,vCount,vSize,dcl,_VB[i],pData);
 			xr_free(pData);
 
 			//			fs->advance			(vCount*vSize);
@@ -618,6 +682,12 @@ void CRender::LoadBuffers(CStreamReader* base_fs, BOOL _alternative)
 				tree_stat_ticks += tree_timer.GetElapsed_ticks();
 			}
 			dx10BufferUtils::CreateIndexBuffer(&_IB[i], pData, iCount * 2);
+            if(!_alternative)PainterSpruceCard::indices(i,iCount,_IB[i],pData,[&](const u16* data,u32 size) {
+                ID3DIndexBuffer* compact=nullptr;
+                if(FAILED(dx10BufferUtils::CreateIndexBuffer(&compact,data,size)))return static_cast<ID3DIndexBuffer*>(nullptr);
+                if(compact)_IB.push_back(compact);
+                return compact;
+            });
 			xr_free(pData);
 
 			//			fs().advance		(iCount*2);

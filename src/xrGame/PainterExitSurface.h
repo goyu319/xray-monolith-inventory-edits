@@ -23,7 +23,7 @@ struct Context {
         weapon(h.weaponID),birth(o.PainterBirthCookie()),world(Level().PainterWorldCookie()),generation(0),
         visual(reinterpret_cast<std::uintptr_t>(o.Visual())),type(h.hit_type),contact(h.p_in_bone_space),
         direction(h.dir),known_ammo(h.ammo.valid()) {
-        if(auto* k=PKinematics(o.Visual()))generation=k->LL_RenderGeometryGeneration();
+        if(auto* k=PKinematics(o.Visual()))generation=k->LL_SurfaceGeometryGeneration();
         if(known_ammo)std::memcpy(ammo,h.ammo.section,sizeof(ammo));
     }
 };
@@ -112,7 +112,7 @@ inline bool query(const Request& r,Reply& out) {
     xrCriticalSectionGuard pose(&k->UCalc_Mutex);
     const u16 count=k->LL_BoneCount();
     if(!count||count>256||r.bone>=count||!k->LL_GetBoneVisible(u16(r.bone))||
-        k->LL_RenderGeometryGeneration()!=c->generation)return false;
+        k->LL_SurfaceGeometryGeneration()!=c->generation)return false;
     k->CalculateBones(TRUE);
     const Fmatrix world=owner->XFORM();Fvector contact,model,direction=c->direction;
     if(!unit(direction)||!finite(c->contact))return false;
@@ -166,7 +166,7 @@ inline bool query_entry(const Request& r,Reply& out) {
     xrCriticalSectionGuard pose(&k->UCalc_Mutex);
     const u16 count=k->LL_BoneCount();
     if(!count||count>256||r.bone>=count||!k->LL_GetBoneVisible(u16(r.bone))||
-        k->LL_RenderGeometryGeneration()!=c->generation)return false;
+        k->LL_SurfaceGeometryGeneration()!=c->generation)return false;
     k->CalculateBones(TRUE);
     const Fmatrix world=owner->XFORM();Fvector contact,model,direction=c->direction;
     if(!unit(direction)||!finite(c->contact))return false;

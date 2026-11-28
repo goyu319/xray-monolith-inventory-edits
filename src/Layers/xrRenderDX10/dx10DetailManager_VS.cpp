@@ -1918,13 +1918,20 @@ void CDetailManager::hw_Render_instanced(CDetail& Object, xr_vector<SlotItemVec*
 			if (scale <= 0 || Instance.alpha <= 0)
 				break;
 
+			// Painter fire: grass on burnt ground shrinks away while it burns and stays away, sooty on the way
+			const float painterBurnt = PainterFire::GrassBurnt(Instance.position);
+			if (painterBurnt >= .97f)
+				continue;
+			scale *= 1.f - painterBurnt;
+			const float painterSooty = 1.f - .75f * painterBurnt;
+
 			// Same five rows as the batched array/exdata constants: 3x4 transform, colour, terrain normal + alpha.
 			Fmatrix& M = Instance.mRotY_calculated;
 			Fvector4* row = rows + count * grass_rows_per_blade;
 			row[0].set(M._11 * scale, M._21 * scale, M._31 * scale, M._41);
 			row[1].set(M._12 * scale, M._22 * scale, M._32 * scale, M._42);
 			row[2].set(M._13 * scale, M._23 * scale, M._33 * scale, M._43);
-			row[3].set(Instance.c_sun, Instance.c_sun, Instance.c_sun, Instance.c_hemi);
+			row[3].set(Instance.c_sun * painterSooty, Instance.c_sun * painterSooty, Instance.c_sun * painterSooty, Instance.c_hemi * painterSooty);
 			row[4].set(Instance.normal.x, Instance.normal.y, Instance.normal.z, Instance.alpha);
 			++count;
 		}
@@ -2547,6 +2554,19 @@ void CDetailManager::hw_Render_dump(const Fvector4& consts, const Fvector4& wave
 						if (scale <= 0 || Instance.alpha <= 0)
 							break;
 
+						// Painter fire: grass on burnt ground shrinks away while it burns and stays away, sooty on the way
+						// (the fire lives in the DX11 renderer only; this file is also built for DX10)
+						float painterSooty = 1.f;
+#ifdef USE_DX11
+						{
+							const float painterBurnt = PainterFire::GrassBurnt(Instance.position);
+							if (painterBurnt >= .97f)
+								continue;
+							scale *= 1.f - painterBurnt;
+							painterSooty = 1.f - .75f * painterBurnt;
+						}
+#endif
+
 #ifdef USE_DX11
 						if (direct && !mapped)
 							map_direct();
@@ -2562,8 +2582,8 @@ void CDetailManager::hw_Render_dump(const Fvector4& consts, const Fvector4& wave
 
 						// Build color
 						// R2 only needs hemisphere
-						float h = Instance.c_hemi;
-						float s = Instance.c_sun;
+						float h = Instance.c_hemi * painterSooty;
+						float s = Instance.c_sun * painterSooty;
 						c_storage[base + 3].set(s, s, s, h);
 
 						if (c_ExData)

@@ -40,6 +40,8 @@
 #include "ai/stalker/ai_stalker.h"
 #include "CharacterPhysicsSupport.h"
 #include "painter_voxel/PainterExplosions.h"
+#include "PainterBurnExplosive.h"
+#include "../xrCore/PainterBurnTrace.h"
 #define EFFECTOR_RADIUS 30.f
 #include "painter_voxel/RocketStrike_impl.h" // rpgdirect: a rocket strike on a stalker (RocketStrike.h)
 
@@ -384,7 +386,12 @@ void CExplosive::Explode()
 
 	m_layered_sounds.PlaySound("sndExplode", pos, smart_cast<CObject*>(this), false, false, (u8)-1);
 	// Grenade gore: its fragments are recognised by this explosive's ID (PainterExplosions.h).
-	const PainterFragmentSource painter_fragment_emission=painter_explosions::record(*cast_game_object(), pos, m_fBlastRadius, cast_game_object()->cNameSect(), Initiator());
+
+    // The ordinary physical fragment loop is shared with fire explosives. Without a
+    // wound-source record its ammo-less impacts cannot enter the deformation worker.
+    // firethrow: a fire throwable's fragments make no gore either (PainterBurnExplosive.h fireOnly)
+    const PainterFragmentSource painter_fragment_emission=painter_burn_source::fireOnly(*cast_game_object(),m_eHitTypeBlast)
+        ? PainterFragmentSource{} : painter_explosions::record(*cast_game_object(), pos, m_fBlastRadius, cast_game_object()->cNameSect(), Initiator());
 
 	//показываем эффекты
 
@@ -630,6 +637,24 @@ void CExplosive::HideExplosive()
 	m_bAlreadyHidden = true;
 };
 
+// The accepted native explosion event starts surface fire independently of the body-burn setting.
+static void painter_fire_exploded_surface(LPCSTR section, ALife::EHitType type, const Fvector& position)
+{
+    if(!(PainterFireMasterStamp()&1u))return;
+	if (!OnServer() || Device.dwPrecacheFrame || !::Render || !_valid(position) || !section || !*section) return;
+	using painter_burn_source::ExplosiveKind;
+	const auto kind = painter_burn_source::explosiveKind(section);
+	if (kind != ExplosiveKind::FireOnly && !(kind == ExplosiveKind::BlastAndFire && type == ALife::eHitTypeExplosion)) return;
+	// Scripted emitters own their placement, including the directional bottle and derived sections.
+	if (!std::strcmp(section, "molotov_cocktail") || !pSettings || !pSettings->section_exist(section)) return;
+	if (pSettings->line_exist(section, "script_binding"))
+	{
+		LPCSTR binder = pSettings->r_string(section, "script_binding");
+		if (binder && *binder) return;
+	}
+	::Render->PainterFireIgnite(position, 1.6f, 25.f);
+}
+
 void CExplosive::OnEvent(NET_Packet& P, u16 type)
 {
 	switch (type)
@@ -648,6 +673,7 @@ void CExplosive::OnEvent(NET_Packet& P, u16 type)
 			SetInitiator(parent_id);
 			ExplodeParams(pos, normal);
 			Explode();
+			painter_fire_exploded_surface(cast_game_object()->cNameSect().c_str(), m_eHitTypeBlast, m_vExplodePos);
 			m_fExplodeDuration = m_fExplodeDurationMax;
 			break;
 		}
@@ -768,11 +794,20 @@ void CExplosive::ExplodeWaveProcessObject(collide::rq_results& storage, CPhysics
 	if (painter_rocket_strike::struck(*cast_game_object(), *l_pGO)) l_effect = 1.f;
 	// Grenade gore: craters facing the blast, before the blast hit itself (which may kill and ragdoll the body).
 	if (auto* npc = smart_cast<CAI_Stalker*>(l_pGO))
-		if (l_effect > 0.f && npc->character_physics_support())
+		if (l_effect > 0.f && !painter_burn_source::fireOnly(*cast_game_object(),m_eHitTypeBlast) && npc->character_physics_support()) // firethrow
 			{const PainterFragmentSource source=painter_explosions::source_for(*cast_game_object());
 			 npc->character_physics_support()->PainterVoxelBlast(m_vExplodePos, l_effect, cast_game_object()->cNameSect().c_str(), Initiator(),&source);}
 	float l_impuls = m_fBlastHitImpulse * l_effect;
 	float l_hit = m_fBlastHit * l_effect;
+    if(painter_burn_source::enabled()&&OnServer()&&!Device.dwPrecacheFrame&&l_hit>.001f&&std::isfinite(l_hit)){
+      using namespace painter_burn_source;
+      const auto kind=explosiveKind(cast_game_object()->cNameSect().c_str());
+      if(thermal(m_eHitTypeBlast)||(kind==ExplosiveKind::BlastAndFire&&m_eHitTypeBlast==ALife::eHitTypeExplosion)){
+        Event fire;fire.cause=thermal(m_eHitTypeBlast)?Cause::NativeFire:Cause::Fuel;
+        fire.sourceSerial=serial(*this);fire.pulse=nextSerial();fire.tick16=tick16(Device.dwTimeGlobal);
+        fire.quanta=16;fire.areaPeriodMs=250;fire.power=l_hit;fire.emitterId=cast_game_object()->ID();confirm(*l_pGO,fire);
+      }
+    }
 
 	if (l_impuls > .001f || l_hit > 0.001)
 	{

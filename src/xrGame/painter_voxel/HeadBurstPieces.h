@@ -15,6 +15,19 @@
 //    groups (one group in two pieces: each hides the other's cells, at cell size).
 // Inherited (not fresh) decide-once tears: kept as MaskPieces3 keeps them (voted, or a triangle of the piece in its region).
 namespace head_burst_pieces {
+struct FlightPass {
+ using Surfaces=std::vector<bound_surface::Piece>;
+ using Marks=std::vector<std::vector<std::pair<Cell,core::Tile>>>;
+ using Ids=std::vector<std::uint32_t>;
+ std::set<std::uint32_t> fitted;
+ const Ids* ids=nullptr;
+ const Surfaces* surfaces=nullptr;
+ const Marks* marks=nullptr;
+ bool consumed=false;
+ std::function<void()> admit;
+ static FlightPass*& current(){static thread_local FlightPass* pass=nullptr;return pass;}
+};
+
 inline unsigned lowBit64(std::uint64_t b){
 #ifdef _MSC_VER
  unsigned long i=0;_BitScanForward64(&i,b);return unsigned(i);
@@ -22,6 +35,7 @@ inline unsigned lowBit64(std::uint64_t b){
  return unsigned(__builtin_ctzll(b));
 #endif
 }
+#include "ChunkHaloFrontier.h"
 inline unsigned highBit64(std::uint64_t b){ // blockfine
 #ifdef _MSC_VER
  unsigned long i=0;_BitScanReverse64(&i,b);return unsigned(i);
@@ -795,6 +809,17 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
  const auto t0=core::Clock::now();const std::size_t P=components.size(),K=published.tears.size();
  need(P>=1&&P<=maxPieces&&stats.sig.size()==K,"head_burst_pieces_input");
  need(published.mask_volume&&published.removal_field&&published.removal_field->available&&!published.children.empty(),"head_burst_pieces_published_mesh");
+ auto* pass=FlightPass::current();
+ if(pass && pass->surfaces){
+  need(!pass->consumed && pass->ids && *pass->ids==components && pass->marks && marksOut,"flight_surface_epoch");
+  *marksOut=*pass->marks;pass->consumed=true;stats.used=true;return *pass->surfaces;
+ }
+ std::vector<char> deferred(P,0);
+ if(pass && marksOut && P>=2 && P<=13){
+  std::size_t stump=0;for(std::size_t k=1;k<P;++k)if(volume.components[components[k]].cells>volume.components[components[stump]].cells)stump=k;
+  for(std::size_t k=0;k<P;++k)deferred[k]=k!=stump && pass->fitted.count(components[k])!=0;
+ }
+ const bool flight=std::find(deferred.begin(),deferred.end(),char(1))!=deferred.end();
  stats.used=true;const PieceAt pieceAt(grid,volume,components);const std::uint32_t all=P>=32?~0u:((1u<<P)-1u);
  // ---- the records: their functions, each piece's groups, each group's pieces
  struct Rec {std::size_t t;head_burst_record::Function f;std::vector<std::uint32_t> mask,owners;std::vector<std::array<double,6>> box,cellBox;int main=-1;};
@@ -895,6 +920,9 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
   const double hd=std::sqrt(3.)*4*grid.pitch;std::atomic<std::size_t> dropped{0};
   lowpoly_pieces::eachBlock(cl.size(),16,[&](std::size_t a,std::size_t b,std::size_t){std::size_t dn=0;std::vector<char> perCell(hr.size(),0);
    for(std::size_t s=a;s<b;++s){core::Tile&t=*cl[s].second;const Cell tk=cl[s].first;
+    // Crack-face smoothing may restore cells of a new fracture. A previously
+    // contacted bone cell which the current field removes must stay removed.
+    for(unsigned w=0;w<8;++w)if(t.removed[w])t.removed[w]&=~grid.boneStrikeWord(tk,w);
     // per record: the whole tile held (1), none of it (0: every cell dropped), or cell by cell (-1)
     bool none=false;const Vec c0=grid.center(Cell{tk.x*8+4,tk.y*8+4,tk.z*8+4})-Vec{.5*grid.pitch,.5*grid.pitch,.5*grid.pitch};
     for(std::size_t i=0;i<hr.size()&&!none;++i){const auto&h=hr[i];perCell[i]=1;if(h.shareFar){perCell[i]=-1;continue;}
@@ -1288,7 +1316,7 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
   if(!first)continue;
   for(const auto&tr:published.tears)if(!fresh(tr)&&tr.block.get()==first){stOld|=1u<<k;break;}}
  std::vector<std::unordered_map<Cell,core::Tile,core::CellHash>> extra(P);
- {bool any=false;for(auto h:hideFrom)any=any||h;
+ auto markShared=[&](bool finishDetached){bool any=false;for(auto h:hideFrom)any=any||h;
   if(any){std::vector<int> pieceOf(volume.components.size(),-1);for(std::size_t k=0;k<P&&k<maxPieces;++k)if(components[k]<pieceOf.size())pieceOf[components[k]]=int(k);
    // only inside the piece's own cells' box + 4 cells: the programs search the volume there alone (TearAtlas row 0, + 2 cells), and
    // its triangles lie over its own cells (the selection above) - a small chunk sharing the far group never marks the whole neck
@@ -1297,17 +1325,17 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
      hi[a]=std::min((&grid.size.x)[a]-1,int(std::floor((r.f.B[a]+r.f.Rcut-grid.origin[a])/grid.pitch)));}
     for(const auto&col:volume.columns){if(col.x<lo[0]||col.x>hi[0]||col.y<lo[1]||col.y>hi[1])continue;
      for(auto si=col.first;si<col.first+col.count;++si){const auto&sp=volume.spans[si];if(sp.component>=pieceOf.size())continue;const int j=pieceOf[sp.component];if(j<0)continue;
-      for(std::size_t k=0;k<P;++k){if(!((hideFrom[k]>>j)&1u))continue;const auto&L=lim[k];
+      for(std::size_t k=0;k<P;++k){if(bool(deferred[k])!=finishDetached || !((hideFrom[k]>>j)&1u))continue;const auto&L=lim[k];
        if(!L.valid()||col.x<L.lo[0]||col.x>=L.hi[0]||col.y<L.lo[1]||col.y>=L.hi[1])continue;
        for(int z=std::max({sp.lo,lo[2],L.lo[2]});z<std::min({sp.hi,hi[2]+1,L.hi[2]});++z){const Cell c{col.x,col.y,z};auto&tile=extra[k][Grid::tileKey(c)];const auto l=Grid::local(c);tile.removed[l/64]|=std::uint64_t(1)<<(l%64);}}}}}
    // and 2 cells around them that are not the piece's own (the air at the other piece's skin: its exterior there is not this piece's)
-   for(std::size_t k=0;k<P;++k){if(!hideFrom[k])continue;std::vector<Cell> cells;
-    for(const auto&tl:extra[k])for(unsigned l=0;l<512;++l)if((tl.second.removed[l/64]>>(l%64))&1u)cells.push_back(Cell{tl.first.x*8+int(l>>6),tl.first.y*8+int((l>>3)&7u),tl.first.z*8+int(l&7u)});
+   for(std::size_t k=0;k<P;++k){if(bool(deferred[k])!=finishDetached || !hideFrom[k])continue;std::vector<Cell> cells;
+    gatherHaloFrontier(extra[k],cells);
     for(int it=0;it<2;++it){std::vector<Cell> next;
      for(const Cell&c:cells){const Cell nb[6]={{c.x-1,c.y,c.z},{c.x+1,c.y,c.z},{c.x,c.y-1,c.z},{c.x,c.y+1,c.z},{c.x,c.y,c.z-1},{c.x,c.y,c.z+1}};
       for(const Cell&n:nb){if(!grid.valid(n))continue;auto&tile=extra[k][Grid::tileKey(n)];const auto l=Grid::local(n);if((tile.removed[l/64]>>(l%64))&1u)continue;
        const Vec q=grid.center(n);if(pieceAt(q.x,q.y,q.z)==int(k))continue;tile.removed[l/64]|=std::uint64_t(1)<<(l%64);next.push_back(n);}}
-     cells.swap(next);}}}}
+     cells.swap(next);}}}
  // seethrough2: a piece whose first burst record is an older one marks the other pieces' cells inside this split's cut boxes (within
  // its own cells' box + 4 cells, lim) - no air ring (that is for a shared group's skin)
  if(stOld){std::vector<int> pieceOf2(volume.components.size(),-1);for(std::size_t k=0;k<P&&k<maxPieces;++k)if(components[k]<pieceOf2.size())pieceOf2[components[k]]=int(k);
@@ -1316,16 +1344,17 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
     hi[a]=std::min((&grid.size.x)[a]-1,int(std::floor((r.f.B[a]+r.f.Rcut-grid.origin[a])/grid.pitch)));}
    for(const auto&col:volume.columns){if(col.x<lo[0]||col.x>hi[0]||col.y<lo[1]||col.y>hi[1])continue;
     for(auto si=col.first;si<col.first+col.count;++si){const auto&sp=volume.spans[si];if(sp.component>=pieceOf2.size())continue;const int j=pieceOf2[sp.component];if(j<0)continue;
-     for(std::size_t k=0;k<P;++k){if(!((stOld>>k)&1u)||int(k)==j)continue;const auto&L=lim[k];
+     for(std::size_t k=0;k<P;++k){if(bool(deferred[k])!=finishDetached || !((stOld>>k)&1u)||int(k)==j)continue;const auto&L=lim[k];
       if(!L.valid()||col.x<L.lo[0]||col.x>=L.hi[0]||col.y<L.lo[1]||col.y>=L.hi[1])continue;
       for(int z=std::max({sp.lo,lo[2],L.lo[2]});z<std::min({sp.hi,hi[2]+1,L.hi[2]});++z){const Cell c{col.x,col.y,z};auto&tile=extra[k][Grid::tileKey(c)];const auto l=Grid::local(c);
        tile.removed[l/64]|=std::uint64_t(1)<<(l%64);++stMarked;}}}}}
-  if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_PIECE_LOG"))std::cerr<<"seethrough2 older_record_pieces="<<std::hex<<stOld<<std::dec<<" marked="<<stMarked<<std::endl;}
+  if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_PIECE_LOG"))std::cerr<<"seethrough2 older_record_pieces="<<std::hex<<stOld<<std::dec<<" marked="<<stMarked<<std::endl;}};
+ markShared(false);
  std::size_t farTriTiles=0,farTris=0;double farTriMs=0;bool olderRecord=false;
  for(std::size_t t=0;t<K;++t){const auto&tr=published.tears[t];if(!tr.block||!head_burst_record::is(*tr.block))continue;if(fresh(tr))break;if(tr.side==3){olderRecord=true;break;}}
- if(olderRecord&&zones.ok&&!std::getenv("GFY_HB_NO_FARTRI")){const auto f0=core::Clock::now();const int reachF=int(std::ceil(.08/grid.pitch));
+ auto markFar=[&](bool finishDetached){if(olderRecord&&zones.ok&&!std::getenv("GFY_HB_NO_FARTRI")){const auto f0=core::Clock::now();const int reachF=int(std::ceil(.08/grid.pitch));
   std::vector<std::size_t> farN(P,0);
-  lowpoly_pieces::eachBlock(P,1,[&](std::size_t kf,std::size_t kl,std::size_t){for(std::size_t k=kf;k<kl;++k){if(isMainPiece[k])continue;const CellBox&Lb=lim[k];if(!Lb.valid())continue;
+  lowpoly_pieces::eachBlock(P,1,[&](std::size_t kf,std::size_t kl,std::size_t){for(std::size_t k=kf;k<kl;++k){if(bool(deferred[k])!=finishDetached || isMainPiece[k])continue;const CellBox&Lb=lim[k];if(!Lb.valid())continue;
     std::vector<std::uint64_t> tiles; // packed tiles under the far-reaching triangles, outside the zone
     auto cellOf=[&](const Vec&q,int c[3]){c[0]=int(std::floor((q.x-grid.origin.x)/grid.pitch));c[1]=int(std::floor((q.y-grid.origin.y)/grid.pitch));c[2]=int(std::floor((q.z-grid.origin.z)/grid.pitch));};
     for(std::size_t c=0;c<children.size();++c){if(sel[c].tris.size()<=k)continue;const auto&src=children[c];
@@ -1343,14 +1372,17 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
     farN[k]|=tiles.size()<<32;}});
   for(std::size_t k=0;k<P;++k){farTriTiles+=farN[k]>>32;farTris+=farN[k]&0xffffffffu;}
   farTriMs=core::ms(f0);
-  if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_PIECE_LOG"))std::cerr<<"head_burst_far_triangles triangles="<<farTris<<" tiles="<<farTriTiles<<" ms="<<farTriMs<<std::endl;}
+  if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_PIECE_LOG"))std::cerr<<"head_burst_far_triangles triangles="<<farTris<<" tiles="<<farTriTiles<<" ms="<<farTriMs<<std::endl;}};
+ markFar(false);
  // ---- the marks of the two rules above (connected tissue; zones): into each piece's removal field
  std::size_t gearSeen=islandCells,gearMarks=zoneTiles;double gearMs=floodMs+zoneMs;
- for(std::size_t k=0;k<P;++k){
+ auto mergeMarks=[&](bool finishDetached){for(std::size_t k=0;k<P;++k){
+  if(bool(deferred[k])!=finishDetached)continue;
   for(const auto&m:floodMarks[k]){auto&tile=extra[k][m.first];for(unsigned q=0;q<8;++q)tile.removed[q]|=m.second.removed[q];}
-  for(const Cell&c:zoneMarks[k]){auto&tile=extra[k][c];for(auto&wd:tile.removed)wd=~std::uint64_t(0);}}
+  for(const Cell&c:zoneMarks[k]){auto&tile=extra[k][c];for(auto&wd:tile.removed)wd=~std::uint64_t(0);}}};
+ mergeMarks(false);
  // headmask2: the boolean remove (unattached, above) - every piece of the burst inside the cut's box
- {AttachStats ast;std::size_t big=0;for(std::size_t k=1;k<P;++k)if(volume.components[components[k]].cells>volume.components[components[big]].cells)big=k;
+ auto attach=[&](bool finishDetached){AttachStats ast;std::size_t big=0;for(std::size_t k=1;k<P;++k)if(volume.components[components[k]].cells>volume.components[components[big]].cells)big=k;
   // a burst's cut is more than its fragments: the box of the cells it broke out (the crack tiles, 16 cells out) is part of the
   // cut's box - a face blown away is no piece's, and the mask over it stood 2 to 3 cm off, outside the fragments' boxes; a
   // fragment is handed triangles up to 4 to 5 cm from its cells (the nearest centroid), so its own pass reaches 32 cells
@@ -1362,10 +1394,12 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
   const std::vector<Cell> agone=P>=2?goneBlocks(grid,tfF,cutB):std::vector<Cell>();
   PadCache apads;
   if(P>=2){auto cutBs=cutBoxes(ownB,big);addCluster(cutBs,crackB);for(std::size_t k=0;k<P;++k){ // the body: each cluster of the cut's boxes
+   if(bool(deferred[k])!=finishDetached)continue;
    if(k!=big){const CellBox pb=attachBox(ownB[k],fragGrow);unattached(grid,volume,pieceAt.pieceOf,k,pb,ag,apad.get(),tfF,agone,extra[k],NoZone{},ast,ag?std::vector<Cell>():shellCells(grid,children,sel,k,attachBox(pb,4)),apads,inherited,&crack,burstAir);continue;}
    for(const CellBox&cb:cutBs){const CellBox pb=attachClip(cb,ownB[k],bodyGrow);unattached(grid,volume,pieceAt.pieceOf,k,pb,ag,apad.get(),tfF,agone,extra[k],NoZone{},ast,ag?std::vector<Cell>():shellCells(grid,children,sel,k,attachBox(pb,4)),apads,inherited,&crack,burstAir);}}}
   if(std::getenv("GFY_M3_LOG")||std::getenv("GFY_PIECE_LOG"))std::cerr<<"boolean_remove burst pieces="<<ast.pieces<<" blocks="<<ast.marked<<" skipped="<<ast.skipped<<" gone_blocks="<<agone.size()<<" ms="<<ast.ms
-   <<" islands="<<ast.islands<<" medium="<<ast.medium<<" shell="<<ast.shell<<" pad_tiles="<<ast.padTiles<<" island_ms="<<ast.islandMs<<std::endl;}
+   <<" islands="<<ast.islands<<" medium="<<ast.medium<<" shell="<<ast.shell<<" pad_tiles="<<ast.padTiles<<" island_ms="<<ast.islandMs<<std::endl;};
+ attach(false);
  // seethrough: the burst boxes the body already has, each to the piece that keeps its crater (carryBoxes, above build())
  const auto stCarry=carryBoxes(children,pieceAt,P,ok);
  // hollowleg / cutends (2026-11-16): the body's cut-end children (a severed limb's or a shot-off head's end: no skin over the cut)
@@ -1379,7 +1413,11 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
  if(marksOut)marksOut->assign(P,{});
  // (parallel over the pieces: each writes only its own piece; counters and atlas stats merged after, in piece order)
  struct PieceStats {std::size_t selected=0,boxTriangles=0,boxes=0,fieldBytes=0,kept=0;bool empty=false;tear_atlas::Stats atlas;};std::vector<PieceStats> ps(P);
- lowpoly_pieces::eachBlock(P,1,[&](std::size_t kf,std::size_t kl,std::size_t){for(std::size_t k=kf;k<kl;++k){auto&S=ps[k];auto&piece=out[k];piece.volume_component=components[k];auto&mesh=piece.mesh;
+ auto assemble=[&](bool finishDetached){
+ lowpoly_pieces::eachBlock(P,1,[&](std::size_t kf,std::size_t kl,std::size_t){for(std::size_t k=kf;k<kl;++k){
+  if(finishDetached && !deferred[k])continue;
+  auto&S=ps[k];auto&piece=out[k];piece.volume_component=components[k];auto&mesh=piece.mesh;
+  if(!finishDetached){
   unsigned next=originalChildren; // splitfix: appended slots start right after the original children in every piece; numbered above the source's own appended slots, a cut part's pieces left a gap the native packet check refuses (no re-split was ever staged)
   for(std::size_t c=0;c<children.size();++c){const auto&src=children[c];const auto&list=sel[c].tris.empty()?std::vector<std::uint32_t>():sel[c].tris[k];if(list.empty())continue;
    for(const auto&a:sel[c].anchors[k]){auto [entry,freshA]=piece.constrained_anchors.emplace(a);need(freshA||entry->second==a.second,"head_burst_pieces_frozen_anchor_conflict");}
@@ -1449,8 +1487,14 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
    S.boxTriangles+=child.indices.size()/3;++S.boxes;boxTris+=child.indices.size()/3;mesh.children.push_back(std::move(child));}
   // hollowleg / cutends: the body's cut-end children this piece keeps, as the body had them
   for(const auto c:hlCut.of[k]){const std::size_t t=emitCutChild(mesh,children[c],next,ok[k]);boxTris+=t;S.boxTriangles+=t;if(t)++S.boxes;}
-  if(!piece.triangles)piece.triangles=boxTris; // a fragment inside the head is drawn by its box alone
+  if(!piece.triangles)piece.triangles=boxTris; } // a fragment inside the head is drawn by its box alone
   if(!piece.triangles){S.empty=true;continue;}
+  if(!finishDetached && deferred[k]){
+   mesh.removal_field=published.removal_field;mesh.tissue_field=published.tissue_field;
+   mesh.mask_volume=true;mesh.mask_piece=true;mesh.tears=keep[k];
+   if(inherited)(*marksOut)[k]=*inherited;
+   continue;
+  }
   // the removal field: the grid's removed tiles + the inherited marks + the cells of the pieces it hides (one group in two pieces)
   struct FieldTiles {std::unordered_map<Cell,core::Tile,core::CellHash> tiles;const void* ownership=nullptr;double pitch;Vec origin;decltype(grid.size) size;};
   FieldTiles field{{},nullptr,grid.pitch,grid.origin,grid.size};
@@ -1478,7 +1522,17 @@ inline std::vector<bound_surface::Piece> build(const gfy_packed::Mesh&published,
    tear_atlas::Box exteriorBox;
    if(isMain&&ownW.valid()){exteriorBox=ownW;for(const auto&ch:mesh.children)for(const auto&v:ch.vertices){if(v.surface[12]<=-999.f)continue;const double q[3]={v.surface[0],v.surface[1],v.surface[2]};exteriorBox.add(q);}
     exteriorBox=exteriorBox.padded(grid.pitch);}
-   mesh.tear_atlas=tear_atlas::build(mesh.tears,ownW,ownW.padded(.08),&S.atlas,&th,exteriorBox.valid()?&exteriorBox:nullptr);}}});
+   mesh.tear_atlas=tear_atlas::build(mesh.tears,ownW,ownW.padded(.08),&S.atlas,&th,exteriorBox.valid()?&exteriorBox:nullptr);}}});};
+ assemble(false);
+ if(flight){
+  const bool complete=std::none_of(ps.begin(),ps.end(),[](const PieceStats& p){return p.empty;});
+  if(complete && !sep::cancelRequested()){
+   struct Reset {FlightPass* p;~Reset(){p->ids=nullptr;p->surfaces=nullptr;p->marks=nullptr;p->consumed=false;}} reset{pass};
+   pass->ids=&components;pass->surfaces=&out;pass->marks=marksOut;pass->consumed=false;
+   try{pass->admit();}catch(...){/* A preview allocation failure leaves the exact worker available. */}
+  }
+  markShared(true);markFar(true);mergeMarks(true);attach(true);assemble(true);
+ }
  for(std::size_t k=0;k<P;++k){const auto&S=ps[k];stats.selected+=S.selected;stats.boxTriangles+=S.boxTriangles;stats.boxes+=S.boxes;stats.fieldBytes+=S.fieldBytes;stats.kept+=S.kept;
   stats.atlas.tears+=S.atlas.tears;stats.atlas.bytes+=S.atlas.bytes;stats.atlas.indexCells+=S.atlas.indexCells;stats.atlas.overlap3+=S.atlas.overlap3;
   stats.atlas.listEntries+=S.atlas.listEntries;stats.atlas.maxList=std::max(stats.atlas.maxList,S.atlas.maxList);stats.atlas.pruned+=S.atlas.pruned;

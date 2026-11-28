@@ -364,6 +364,7 @@ void CCustomZone::Load(LPCSTR section)
 
 BOOL CCustomZone::net_Spawn(CSE_Abstract* DC)
 {
+    m_painter_burn_clock={};
 	if (!inherited::net_Spawn(DC))
 		return (FALSE);
 
@@ -521,8 +522,15 @@ bool CCustomZone::AccumulateState()
 	return false;
 }
 
+#include "PainterBurnZone.inl"
+
 void CCustomZone::UpdateWorkload(u32 dt)
 {
+    if(painter_burn_source::thermal(m_eHitTypeBlowout)){
+        const unsigned mode=PainterThermalMode();
+        if(!painter_burn_source::enabled()||!IsEnabled()||mode==2)m_painter_burn_clock.stop();
+        else if(mode==1)PainterEmitThermal(m_fMaxPower,false);
+    }
 	m_iPreviousStateTime = m_iStateTime;
 	m_iStateTime += (int)dt;
 
@@ -572,6 +580,7 @@ void CCustomZone::UpdateWorkload(u32 dt)
 
 	if (m_zone_flags.test(eUseSecondaryHit) && m_eZoneState != eZoneStateIdle && m_eZoneState != eZoneStateDisabled)
 	{
+		if(PainterThermalMode()==0 && painter_burn_source::thermal(m_eHitTypeBlowout))PainterEmitThermal(m_fSecondaryHitPower,false);
 		UpdateSecondaryHit();
 	}
 }
@@ -598,6 +607,17 @@ void CCustomZone::shedule_Update(u32 dt)
 
 		// update
 		feel_touch_update(P, s.R);
+        // The native zone already queried candidates. Its AI visibility policy can
+        // veto stalkers for health/avoidance even when a lit fire contains them.
+        // Keep only verified collision-shape contacts for visual exposure.
+        m_painter_fire_occupants.clear_not_free();
+        if(OnServer()&&painter_burn_source::enabled()&&PainterThermalMode()==1&&painter_burn_source::thermal(m_eHitTypeBlowout)){
+          for(auto* candidate:q_nearest){
+            if(!candidate||candidate->getDestroy()||!painter_burn_source::isBody(*candidate))continue;
+            if(painterInZoneFire(*this,candidate)) // campfirefeet: the living only with their feet in it
+              m_painter_fire_occupants.emplace_back(candidate->ID(),candidate->PainterBirthCookie());
+          }
+        }
 
 		//пройтись по всем объектам в зоне
 		//и проверить их состояние
@@ -1181,6 +1201,16 @@ void CCustomZone::AffectObjects()
 
 	if (Device.dwPrecacheFrame)
 		return;
+    if(PainterThermalMode()==0 && painter_burn_source::thermal(m_eHitTypeBlowout))PainterEmitThermal(m_fMaxPower,true);
+	// (Painter fire, 2026-11-22) a fire anomaly that erupts sets its place alight - not a camp fire; once in 20 s at most for
+	// one anomaly, only while the player is within 80 m
+	if ((m_eHitTypeBlowout == ALife::eHitTypeBurn || m_eHitTypeBlowout == ALife::eHitTypeLightBurn) && ::Render &&
+		!strstr(cNameSect().c_str(), "campfire") && Device.dwTimeGlobal >= m_painter_fire_at &&
+		Device.vCameraPosition.distance_to_sqr(Position()) < 80.f * 80.f)
+	{
+		m_painter_fire_at = Device.dwTimeGlobal + 20000;
+		::Render->PainterFireIgnite(Position(), clampr(m_fEffectiveRadius, .8f, 3.f), 8.f);
+	}
 
 
 	OBJECT_INFO_VEC_IT it;

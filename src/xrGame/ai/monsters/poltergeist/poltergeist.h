@@ -1,5 +1,6 @@
 #pragma once
 #include "../BaseMonster/base_monster.h"
+#include "../../../PainterBurnSourceEvent.h"
 #include "../telekinesis.h"
 #include "../energy_holder.h"
 #include "../../../../xrServerEntities/script_export_space.h"
@@ -235,6 +236,7 @@ class CPolterFlame : public CPolterSpecialAbility
 	u32 m_delay; // between 2 flames
 
 	u32 m_time_flame_started;
+	u32 m_painter_trail_at = 0; // Painter fire: when the ground under it catches next
 
 	float m_min_flame_dist;
 	float m_max_flame_dist;
@@ -270,9 +272,11 @@ class CPolterFlame : public CPolterSpecialAbility
 public:
 	struct SFlameElement
 	{
+        painter_burn_source::Gate painter_burn_clock;
 		const CObject* target_object;
 		Fvector position;
 		Fvector target_dir;
+		Fvector target_pos; // where it was aimed (Painter fire: what it sets alight)
 		u32 time_started;
 		ref_sound sound;
 		CParticlesObject* particles_object;

@@ -32,7 +32,7 @@ extern int r_blood_gpu, r_blood_gpu_create;
 std::atomic<u64> g_blood_projection_epoch{1};
 BloodProjectionCpuCounters g_blood_projection_cpu;
 // triggerhitch (2026-11-15): one posed copy of every child's vertices for CKinematics::LL_PickNearest, kept for the body last
-// asked in this frame (the pellets of one shot share it). Valid only for the same body, frame, geometry generation, children
+// asked. Reuse requires the same live body, geometry generation, child vertex and index
 // arrays and bone render matrices (compared byte for byte). Main thread; its own lock; never destroyed.
 namespace
 {
@@ -51,7 +51,6 @@ struct PainterPickMemo
     };
     std::mutex mutex;
     const CKinematics* owner = nullptr;
-    u32 frame = 0;
     u64 generation = 0;
     bool valid = false;
     std::vector<Fmatrix> pose;
@@ -1086,6 +1085,11 @@ void CKinematics::Spawn()
 void CKinematics::Depart()
 {
 #ifdef USE_DX11
+    {
+        PainterPickMemo& memo = painter_pick_memo();
+        std::lock_guard<std::mutex> lock(memo.mutex);
+        if (memo.owner == this) { memo.valid = false; memo.owner = nullptr; }
+    }
     ClearBloodCells();
 #endif
 	// Pool reuse must expose the original family again.
@@ -1094,6 +1098,8 @@ void CKinematics::Depart()
 	// R65: and come back as a fresh instance - the clears above advanced the generation, and Painter binds only generation 0, so the
 	// next NPC given this pooled instance was refused (no wounds). Stale stages of the old owner fail their owner-cookie check.
 	m_render_geometry_generation = 0;
+    m_flight_detail_swaps = 0;
+    m_flight_first_draw = false;
 	inherited::Depart();
 	// wallmarks
 	ClearWallmarks();
@@ -1374,8 +1380,8 @@ int CKinematics::LL_PickNearest(const Fmatrix& parent_xform, IKinematics::pick_r
     if (count != bones || !bones || children.empty()) return -1;
     PainterPickMemo& memo = painter_pick_memo();
     std::lock_guard<std::mutex> lock(memo.mutex);
-    bool current = memo.valid && memo.owner == this && memo.frame == RDEVICE.dwFrame &&
-        memo.generation == m_render_geometry_generation && memo.pose.size() == bones && memo.children.size() == children.size();
+    bool current = memo.valid && memo.owner == this &&
+        memo.generation == LL_SurfaceGeometryGeneration() && memo.pose.size() == bones && memo.children.size() == children.size();
     for (u16 b = 0; current && b < bones; ++b)
         current = !std::memcmp(&memo.pose[b], &LL_GetBoneInstance(b).mRenderTransform, sizeof(Fmatrix));
     for (u32 i = 0; current && i < children.size(); ++i)
@@ -1389,8 +1395,7 @@ int CKinematics::LL_PickNearest(const Fmatrix& parent_xform, IKinematics::pick_r
     {
         memo.valid = false;
         memo.owner = this;
-        memo.frame = RDEVICE.dwFrame;
-        memo.generation = m_render_geometry_generation;
+        memo.generation = LL_SurfaceGeometryGeneration();
         memo.pose.resize(bones);
         for (u16 b = 0; b < bones; ++b)
             std::memcpy(&memo.pose[b], &LL_GetBoneInstance(b).mRenderTransform, sizeof(Fmatrix));
@@ -1550,8 +1555,8 @@ bool CKinematics::AddWallmark(const Fmatrix* parent_xform, const Fvector3& start
 		const u16 bones = LL_BoneCount();
 		if (!bones || children.empty()) return false;
 		PainterPickMemo& memo = painter_pick_memo();
-		bool current = memo.valid && memo.owner == this && memo.frame == RDEVICE.dwFrame &&
-			memo.generation == m_render_geometry_generation && memo.pose.size() == bones && memo.children.size() == children.size();
+		bool current = memo.valid && memo.owner == this &&
+			memo.generation == LL_SurfaceGeometryGeneration() && memo.pose.size() == bones && memo.children.size() == children.size();
 		for (u16 b = 0; current && b < bones; ++b)
 			current = !std::memcmp(&memo.pose[b], &LL_GetBoneInstance(b).mRenderTransform, sizeof(Fmatrix));
 		for (u32 i = 0; current && i < children.size(); ++i)
@@ -1564,8 +1569,7 @@ bool CKinematics::AddWallmark(const Fmatrix* parent_xform, const Fvector3& start
 		if (current) return true;
 		memo.valid = false;
 		memo.owner = this;
-		memo.frame = RDEVICE.dwFrame;
-		memo.generation = m_render_geometry_generation;
+		memo.generation = LL_SurfaceGeometryGeneration();
 		memo.pose.resize(bones);
 		for (u16 b = 0; b < bones; ++b)
 			std::memcpy(&memo.pose[b], &LL_GetBoneInstance(b).mRenderTransform, sizeof(Fmatrix));
@@ -1989,7 +1993,11 @@ struct zero_wm_pred
 void CKinematics::CalculateWallmarks()
 {
 #ifdef USE_DX11
-    RefreshBloodCells(); // immediate-context owner, before children enter the render graph
+    RefreshBloodCells();
+#if RENDER==R_R4
+    if(m_burn_binding)PainterBurnRefresh();
+#endif
+    // immediate-context owner, before children enter the render graph
 #endif
 	PROF_EVENT("Calculate Wallmarks");
 	xrCriticalSectionGuard guard(wallmarks_cs);
@@ -2509,6 +2517,7 @@ CSkeletonWallmark::~CSkeletonWallmark()
 #endif
 
 #include "PainterBloodBake_impl.h"
+#include "PainterBurnBridge_impl.h"
 #include "SkeletonRuntimeGeometry_impl.h"
 
 #ifdef USE_DX11

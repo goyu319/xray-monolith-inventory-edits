@@ -4,6 +4,7 @@
 #include "../../memory_manager.h"
 #include "../../visual_memory_manager.h"
 #include "../../enemy_manager.h"
+#include "../../level.h"
 #include "../../ai_object_location.h"
 #include "monster_home.h"
 #include "Dog/dog.h"
@@ -186,22 +187,33 @@ void CMonsterEnemyMemory::remove_non_actual()
 	TTime cur_time = Device.dwTimeGlobal;
 
 	// удалить 'старых' врагов и тех, расстояние до которых > 30м и др.
-	for (ENEMIES_MAP_IT it = m_objects.begin(), nit;
-	     it != m_objects.end();
-	     it = nit)
+	for (auto it = m_objects.begin(); it != m_objects.end();)
 	{
-		nit = it;
-		++nit;
+		const CEntityAlive* const enemy = it->first;
 		// проверить условия удаления
 		if (!it->first ||
 			!it->first->g_Alive() ||
 			it->first->getDestroy() ||
 			(it->second.time + time_memory < cur_time) ||
-			(it->first->g_Team() == monster->g_Team()) ||
-			!monster->memory().enemy().is_useful(it->first))
+			(enemy->g_Team() == monster->g_Team()))
 		{
-			m_objects.erase(it);
+			it = m_objects.erase(it);
+			continue;
 		}
+
+		// An enemy callback can run a script action and update this same map.
+		// Preserve the record identity, then resume by key in the current tree.
+		const auto target_id = enemy->ID();
+		const auto last_seen = it->second.time;
+		const auto birth = enemy->PainterBirthCookie();
+		if (!monster->memory().enemy().is_useful(enemy))
+		{
+			const auto current = m_objects.find(enemy);
+			if (current != m_objects.end() && current->second.time == last_seen &&
+				(Level().Objects.net_Find(target_id) != enemy || enemy->PainterBirthCookie() == birth))
+				m_objects.erase(current);
+		}
+		it = m_objects.upper_bound(enemy);
 	}
 }
 

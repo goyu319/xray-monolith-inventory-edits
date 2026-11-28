@@ -108,6 +108,7 @@ void runtime_shader_request_program(const xr_string& vs, const xr_string& ps, in
     const xr_string id = vs + "|" + ps + "|" + xr_string(std::to_string(sample).c_str()) + "|" + xr_string(std::to_string(skinning).c_str());
     if (std::find(c.known_programs.begin(), c.known_programs.end(), id) != c.known_programs.end()) return;
     c.known_programs.push_back(id);
+    PainterBloodPrograms::requestBurn(vs.c_str(), skinning, ps.c_str(), sample); // body burning: this pair's burn twin goes with it
     RuntimeShaderCacheState::PendingProgram job; job.vs = vs; job.ps = ps; job.sample = sample; job.skinning = skinning;
     c.pending_programs.push_back(job);
 }
@@ -171,8 +172,10 @@ void runtime_shader_request_painter_programs(RuntimeShaderCacheState& c)
         static const char* const jobs[] = {"wall", "piece", "tear"};
         for (int j = 0; j < 3 && j < mode; ++j)
         {
-            const xr_string deferred = xr_string("painter_blood_painter_vmi_") + jobs[j], shadow = xr_string("painter_vmi_shadow_") + jobs[j];
-            runtime_shader_request_program("painter_vmi_model", deferred, -1); runtime_shader_request_program("painter_vmid_model", deferred, -1);
+            const xr_string deferred = xr_string("painter_blood_painter_vmi_") + jobs[j], shadow = xr_string("painter_vmi_shadow_") + (j == 1 ? "wall" : jobs[j]);
+            const bool wallBounds = j == 0 && PainterRemovalMaterial::wallBoundsShaders();
+            runtime_shader_request_program(wallBounds ? "painter_wall_bounds_model" : "painter_vmi_model", deferred, -1);
+            runtime_shader_request_program(wallBounds ? "painter_wall_bounds_dent_model" : "painter_vmid_model", deferred, -1);
             runtime_shader_request_program("painter_vmi_shadow_model", shadow, -1); runtime_shader_request_program("painter_vmid_shadow_model", shadow, -1);
         }
     }
@@ -182,7 +185,152 @@ bool runtime_shader_loading_screen()
 {
     return load_screen_renderer.IsActive() || Device.dwPrecacheFrame != 0;
 }
+void runtime_shader_resolve_burn(bool prepareSwitches=false)
+{
+    if (!prepareSwitches && !PainterBurnOn()) return;
+    const int mode = PainterMaskOnlyMode();
+    static int resolved_mode = -1; // another value of painter_voxel_mask_only: other wound programs, every recipe once more
+    std::deque<PainterBloodPrograms::Pair> bases;
+    PainterBloodPrograms::burnTake(bases, prepareSwitches || mode != resolved_mode);
+    resolved_mode = mode;
+    for (const auto& base : bases)
+    {
+        PainterBloodPrograms::burnPair(base.vertex, base.skin, base.pixel, base.sample);
+        PainterRemovalMaterial::ProgramPair pair;
+        if (!PainterRemovalMaterial::programNames(base.vertex.c_str(), base.pixel.c_str(), pair)) continue;
+        pair.sample = base.sample;
+        PainterBloodPrograms::burnPair(base.vertex, 4, base.pixel, base.sample); // the recipe itself on a wounded body (skinning 4)
+        auto queueMode = [&](int maskMode) {
+            PainterRemovalMaterial::clonePairPrograms(pair, maskMode, [](const xr_string& vs,const xr_string& ps,int sample) {
+                PainterBloodPrograms::burnPair(vs.c_str(),4,ps.c_str(),sample);
+            });
+        };
+        if (prepareSwitches) {
+            for (int maskMode=0; maskMode<=3; ++maskMode) queueMode(maskMode);
+        } else queueMode(mode);
+    }
 }
+}
+#include "PainterMaterialWarmKeys.h"
+extern bool PainterWarmBurnBakeProgram();
+
+// Only the render owner mutates the resource manager, the skinning context and the MSAA sample.
+// The same pinned stage handles satisfy subsequent ordinary clones, plus the blood clone's find().
+// The same mounted program list feeds both bytecode preparation and owner-side handle retention.
+void PainterVisitWarmStock(void(*emit)(const char*,const char*,int,int))
+{
+    if (!emit) return;
+    auto mounted = [](const char* name, const char* stage) {
+        string_path relative;
+        strconcat(sizeof(relative), relative, ::Render->getShaderPath(), name, ".", stage);
+        return FS.exist("$game_shaders$", relative) != nullptr;
+    };
+    auto add = [&](const char* name, const char* stage, int skin=-1, int sample=-1) {
+        if (mounted(name,stage)) emit(name,stage,skin,sample);
+    };
+
+    add("heatvision","ps");
+    add("effects_wallmark_blood","vs");
+    add("effects_wallmark_blood","ps");
+    add("painter_static_blood","ps");
+    add("painter_static_blood_color","ps");
+    add("lod","vs");
+    add("lod","ps");
+    add("combine_1","vs");
+    add("combine_1_nomsaa","ps");
+    if (RImplementation.o.dx10_msaa) {
+        add("combine_1_msaa","ps");
+        for (int s=0;s<int(RImplementation.o.dx10_msaa_samples);++s)
+            add("combine_1_msaa","ps",-1,s);
+    }
+
+    add("models_scope_reticle","ps");
+    add("models_scope_reticle_precise","ps");
+    for (int skin=-1;skin<=4;++skin)
+        add("models_scope_reticle","vs",skin);
+
+    // The tree/lightmapped blenders choose existing leaf or wood programs by source texture,
+    // alpha test and detail mode. These variants are already mounted before the level loads.
+    string_path dir;
+    FS.update_path(dir,"$game_shaders$",::Render->getShaderPath());
+    FS_FileSet foliage;
+    FS.file_list(foliage,dir,FS_ListFiles|FS_RootOnly,"painter_leaf_*.ps,painter_wood_deffer_*.ps");
+    const bool atoc=RImplementation.o.dx10_msaa_alphatest==CRender::MSAA_ATEST_DX10_0_ATOC;
+    for (const auto& entry:foliage) {
+        const std::string filename=entry.name.c_str();
+        if (filename.size()<4 || filename.compare(filename.size()-3,3,".ps")) continue;
+        if (filename.find("_atoc_")!=std::string::npos && !atoc) continue;
+        const std::string name=filename.substr(0,filename.size()-3);
+        emit(name.c_str(),"ps",-1,-1);
+    }
+}
+
+void PainterWarmStockPrograms()
+{
+    const int savedSkin=Engine.External.GetSkinningMode();
+    const int savedSample=::Render->m_MSAASample;
+    PainterVisitWarmStock([](const char* name,const char* stage,int skin,int sample) {
+        Engine.External.SetSkinningMode(skin);
+        ::Render->m_MSAASample=sample;
+        if (*stage=='v') PainterBloodPrograms::warmVertex(name,skin);
+        else PainterBloodPrograms::warmPixel(name,sample);
+    });
+    Engine.External.SetSkinningMode(savedSkin);
+    ::Render->m_MSAASample=savedSample;
+}
+
+void PainterWarmMaterialPrograms()
+{
+    if (!HW.pDevice || g_dedicated_server) return;
+    string_path directory;
+    FS.update_path(directory,"$game_shaders$",::Render->getShaderPath());
+    FS_FileSet programs;
+    FS.file_list(programs,directory,FS_ListFiles|FS_RootOnly,"painter_*.vs,painter_*.ps,painter_*.cs");
+    const painter_material_warm::Settings active = {
+        PainterMaskOnlyMode(), PainterBurnOn(),
+        RImplementation.o.dx10_msaa_alphatest == CRender::MSAA_ATEST_DX10_0_ATOC,
+        RImplementation.o.advancedpp && ps_r2_ls_flags.test(R2FLAG_DETAIL_BUMP),
+        RImplementation.o.dx10_msaa ? int(RImplementation.o.dx10_msaa_samples) : 1
+    };
+    const int savedSkin = Engine.External.GetSkinningMode();
+    const int savedSample = ::Render->m_MSAASample;
+    unsigned selected=0, failed=0;
+    ::Render->m_MSAASample=-1;
+    for (const auto& source : programs)
+    {
+        painter_material_warm::visitLiveSettings(source.name.c_str(),active,[&](const char* stage,const std::string& name,int skin,int sample) {
+            bool ready=false;
+            ++selected;
+            if (stage[0]=='v') {
+                PainterBloodPrograms::warmVertex(name,skin);
+                ready=PainterBloodPrograms::cache().vertices.count({name,skin})!=0;
+            }
+            else {
+                Engine.External.SetSkinningMode(skin);
+                if (stage[0]=='p') {
+                    PainterBloodPrograms::warmPixel(name,sample);
+                    ready=PainterBloodPrograms::cache().pixels.count({name,sample})!=0;
+                } else {
+                    ready=PainterWarmBurnBakeProgram();
+                }
+            }
+            if (!ready) {
+                ++failed;
+                Msg("! [painter_shader_load] stage_failed %s.%s skin=%d sample=%d",name.c_str(),stage,skin,sample);
+            }
+        });
+    }
+    Engine.External.SetSkinningMode(savedSkin);
+    ::Render->m_MSAASample=savedSample;
+    // Include actual material passes from mounted models using custom Lua recipes. Models can also load off-thread;
+    // only the name queue is shared. Native program creation and all D3D access stay on this thread.
+    runtime_shader_resolve_burn(true);
+    PainterBloodPrograms::pump(true);
+    Msg("[painter_shader_load] material_files=%u chosen=%u failed=%u mode=%d burn=%u samples=%d",
+        unsigned(programs.size()),selected,failed,active.maskMode,unsigned(active.burn),active.samples);
+}
+
+
 void RuntimeShaderCache::RequestClonePrograms(const ref_shader& shader) { runtime_shader_request_clone_programs(shader); }
 shared_str RuntimeShaderCache::ExpectedShader(const shared_str& shader_def)
 {
@@ -230,9 +378,35 @@ void RuntimeShaderCache::RequestWarm(const shared_str& shader_def, const shared_
     ++c.stats.requested;
     c.stats.pending = unsigned(c.pending.size());
 }
+void RuntimeShaderCache::WarmLevelInteriors()
+{
+    static const char* const pixels[] = {"painter_blood_painter_vmi_wall", "painter_blood_painter_vmi_piece", "painter_blood_painter_vmi_tear"};
+    const int mode = PainterMaskOnlyMode();
+    if (mode <= 0) return;
+    auto& cache = runtime_shader_cache();
+    const int skin = Engine.External.GetSkinningMode(), sample = ::Render->m_MSAASample;
+    Engine.External.SetSkinningMode(4);
+    ::Render->m_MSAASample = -1;
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    unsigned ready = 0;
+    for (int i = 0; i < mode && i < 3; ++i)
+    {
+        string_path shader;
+        strconcat(sizeof(shader), shader, "r3\\", pixels[i], ".ps");
+        if (!FS.exist("$game_shaders$", shader)) continue;
+        PainterSoftShaderGuard soft;
+        ref_ps program = DEV->_CreatePS(pixels[i]);
+        if (program && program->ps) { cache.pinned_ps.push_back(program); ++ready; }
+    }
+    Engine.External.SetSkinningMode(skin);
+    ::Render->m_MSAASample = sample;
+    Msg("[painter_wound_load] mode=%d ready=%u ms=%.2f", mode, ready, RuntimeStageMs(start));
+}
 unsigned RuntimeShaderCache::Warm(unsigned budget)
 {
     const bool loading = budget && runtime_shader_loading_screen();
+    if (loading) runtime_shader_resolve_burn(); // body burning: the burn twins of what was asked for, made by the pump below
     if(budget)PainterBloodPumpPrograms(loading); // shaderslim: the blood aliases asked for - all behind the loading screen, one pair per frame in play
     if(PainterTissueCache::Warm(budget,loading)&&!loading)return unsigned(runtime_shader_cache().pending.size());
     auto& c = runtime_shader_cache();
@@ -296,6 +470,7 @@ unsigned RuntimeShaderCache::Warm(unsigned budget)
 unsigned RuntimeShaderCache::Pending() { return unsigned(runtime_shader_cache().pending.size()); }
 void RuntimeShaderCache::Clear(bool rewarm)
 {
+    PainterPassLayouts::cache().clear();
     if(!rewarm)PainterBloodClearPrograms(); // same-device reset keeps warmed shader handles
     RuntimeRequiredFieldCache::Clear(rewarm); // R25: a same-device reset keeps the field textures
     PainterTissueCache::Clear(rewarm);

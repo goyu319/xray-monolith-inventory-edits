@@ -32,6 +32,35 @@ inline bool admit_line() {
 }
 inline unsigned take_skipped() { const unsigned n = skipped_lines; skipped_lines = 0; return n; }
 
+// Measure the union of received multi-pellet intervals on the owner thread.
+// The innermost active phase owns each millisecond, also across nested Hit records.
+struct VolleyFrame {
+    unsigned frame=0, contacts=0;
+    double total=0, script=0, surface=0, peak=0;
+};
+inline thread_local VolleyFrame volley;
+struct VolleyPath {
+    unsigned depth=0;
+    Part phase=PartCount;
+    Clock::time_point last{};
+};
+inline thread_local VolleyPath volley_path;
+inline void flush_volley(unsigned frame) {
+    if (!volley_path.depth && volley.contacts && volley.frame != frame) {
+        Msg("[painter_perf] phase=shotgun_frame frame=%u contacts=%u received_ms=%.2f script_ms=%.2f surface_ms=%.2f max_contact_ms=%.2f",
+            volley.frame,volley.contacts,volley.total,volley.script,volley.surface,volley.peak);
+        volley = {};
+    }
+}
+inline Part volley_phase(Part next, Clock::time_point now) {
+    const Part previous=volley_path.phase;
+    const double ms=std::chrono::duration<double, std::milli>(now-volley_path.last).count();
+    if(previous==Script) volley.script+=ms;
+    if(previous==Surface) volley.surface+=ms;
+    volley_path.phase=next;
+    volley_path.last=now;
+    return previous;
+}
 class PartScope;
 struct Record {
     unsigned id = 0;
@@ -45,6 +74,8 @@ inline thread_local Record* current = nullptr;
 class PartScope {
     Record* record_;
     PartScope* outer_ = nullptr;
+    Part previous_volley_phase_=PartCount;
+    bool tracks_volley_=false;
     unsigned part_;
     double inner_ = 0.0;
     Clock::time_point start_;
@@ -54,11 +85,17 @@ public:
         outer_ = record_->top;
         record_->top = this;
         start_ = Clock::now();
+        if(volley_path.depth) {
+            tracks_volley_=true;
+            previous_volley_phase_=volley_phase(part,start_);
+        }
     }
     // Ends the part before its block ends (the innermost open part only); the destructor then does nothing.
     void stop() {
         if (!record_) return;
-        const double ms = since_ms(start_);
+        const auto now=Clock::now();
+        const double ms=std::chrono::duration<double, std::milli>(now-start_).count();
+        if(tracks_volley_) volley_phase(previous_volley_phase_,now);
         record_->part[part_] += ms - inner_;
         ++record_->calls[part_];
         if (outer_) outer_->inner_ += ms;
@@ -72,6 +109,7 @@ public:
 
 class Hit {
     Record record_;
+    bool volley_contact_=false;
     Record* previous_;
     const char* stage_;
     bool active_;
@@ -83,9 +121,29 @@ public:
         current = &record_;
         start_ = Clock::now();
     }
+    void mark_multi_pellet(unsigned frame) {
+        if(!active_ || volley_contact_) return;
+        if(!volley_path.depth) {
+            flush_volley(frame);
+            volley.frame=frame;
+            volley_path.last=start_;
+            volley_path.phase=PartCount;
+        }
+        ++volley_path.depth;
+        volley_contact_=true;
+    }
     ~Hit() {
         if (!active_) return;
-        const double total = since_ms(start_);
+        const auto now=Clock::now();
+        const double total=std::chrono::duration<double, std::milli>(now-start_).count();
+        if(volley_contact_) {
+            ++volley.contacts;
+            if(total>volley.peak) volley.peak=total;
+            if(--volley_path.depth==0) {
+                volley_phase(PartCount,now);
+                volley.total+=total;
+            }
+        }
         current = previous_;
         if (previous_) previous_->nested += total;
         if (total < threshold_ms || !admit_line()) return;

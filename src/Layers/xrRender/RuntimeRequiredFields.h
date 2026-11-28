@@ -23,7 +23,12 @@ inline void Collect(){PainterWallmarkOwnershipCache::Collect();PainterSkinOwners
 struct PainterTearGpu { // slice 4: a piece's drawing set (all of its torn ends, TearAtlas.h)
     ID3D11Texture2D *params=nullptr,*map=nullptr;ID3D11Texture3D *bake=nullptr;ref_texture params_texture,map_texture,bake_texture;
     ~PainterTearGpu(){_RELEASE(params);_RELEASE(map);_RELEASE(bake);}
-    bool Build(ID3D11Device*device,const gfy_packed::TearAtlas&a,const void*key){
+    ID3D11Device* built_device = nullptr;
+    bool Build(ID3D11Device*device,const gfy_packed::TearAtlas&a){
+        // Owner-thread resource names must survive their originating field packet.
+        static u64 serial = 0;
+        const u64 key = ++serial;
+        built_device = device;
         // cutfix: a set by reference (TearAtlas.h: blocks + places, no arrays): its textures are made empty and each block uploaded
         const bool byRef=!a.blocks.empty();
         if(!device||!a.K||!a.paramsRows||a.paramsRows>16384||a.params.size()!=std::size_t(a.paramsRows)*104||!a.mapW||!a.mapH||a.mapW>16384||a.mapH>16384||
@@ -47,7 +52,7 @@ struct PainterTearGpu { // slice 4: a piece's drawing set (all of its torn ends,
                 HW.pContext->UpdateSubresource(map,0,&mb,b.map.data(),5u*b.map_dim[0]*16u,0);
                 const D3D11_BOX fb={q[2],q[3],q[4],q[2]+b.bake_dim[0],q[3]+b.bake_dim[1],q[4]+b.bake_dim[2]};
                 HW.pContext->UpdateSubresource(bake,0,&fb,b.bake.data(),b.bake_dim[0],b.bake_dim[0]*b.bake_dim[1]);}
-            auto bind=[&](ref_texture&texture,const char*kind,ID3D11Resource*surface){string128 name;xr_sprintf(name,"$user$painter_tear_%s_%p",kind,key);
+            auto bind=[&](ref_texture&texture,const char*kind,ID3D11Resource*surface){string128 name;xr_sprintf(name,"$user$painter_tear_%s_%llu",kind,key);
                 texture.create(name);if(!texture)return false;texture->surface_set(surface);texture->flags.bLoaded=true;texture->PostLoad();return true;};
             if(!bind(params_texture,"params",params)||!bind(map_texture,"map",map)||!bind(bake_texture,"bake",bake))return false;
             Msg("[painter_mask_only] tear_piece_bound tears=%u map=%ux%u field=%ux%ux%u kb=%u by_reference=1",a.K,a.mapW,a.mapH,a.fieldDim[0],a.fieldDim[1],a.fieldDim[2],unsigned(a.bytes/1024));
@@ -61,7 +66,7 @@ struct PainterTearGpu { // slice 4: a piece's drawing set (all of its torn ends,
         v.Usage=D3D11_USAGE_IMMUTABLE;v.BindFlags=D3D11_BIND_SHADER_RESOURCE;D3D11_SUBRESOURCE_DATA t={};t.pSysMem=a.field.data();
         t.SysMemPitch=a.fieldDim[0];t.SysMemSlicePitch=a.fieldDim[0]*a.fieldDim[1];
         if(FAILED(device->CreateTexture3D(&v,&t,&bake))){_RELEASE(params);_RELEASE(map);return false;}
-        auto bind=[&](ref_texture&texture,const char*kind,ID3D11Resource*surface){string128 name;xr_sprintf(name,"$user$painter_tear_%s_%p",kind,key);
+        auto bind=[&](ref_texture&texture,const char*kind,ID3D11Resource*surface){string128 name;xr_sprintf(name,"$user$painter_tear_%s_%llu",kind,key);
             texture.create(name);if(!texture)return false;texture->surface_set(surface);texture->flags.bLoaded=true;texture->PostLoad();return true;};
         if(!bind(params_texture,"params",params)||!bind(map_texture,"map",map)||!bind(bake_texture,"bake",bake))return false;
         Msg("[painter_mask_only] tear_piece_bound tears=%u map=%ux%u field=%ux%ux%u kb=%u",a.K,a.mapW,a.mapH,a.fieldDim[0],a.fieldDim[1],a.fieldDim[2],unsigned(a.bytes/1024));return true;}
@@ -226,7 +231,7 @@ inline bool RuntimeBindRequiredFields(const std::shared_ptr<RuntimeRequiredField
                 anatomyPages=fields->anatomy->page_texture;anatomyData=fields->anatomy->data_texture;}
             ref_texture tearParams,tearMap,tearBake; // slice 3: a piece's baked decide-once tear (built once per publish, main thread)
             if(tissue&&fields->mask_piece&&fields->tear_atlas){
-                if(!fields->tear_gpu){auto t=std::make_shared<PainterTearGpu>();if(t->Build(HW.pDevice,*fields->tear_atlas,fields.get()))fields->tear_gpu=t;
+                if(!fields->tear_gpu){auto t=std::make_shared<PainterTearGpu>();if(t->Build(HW.pDevice,*fields->tear_atlas))fields->tear_gpu=t;
                     else{Msg("! [painter_mask_only] tear_textures_refused");fields->tear_atlas.reset();}}
                 if(fields->tear_gpu){tearParams=fields->tear_gpu->params_texture;tearMap=fields->tear_gpu->map_texture;tearBake=fields->tear_gpu->bake_texture;}}
             ref_texture dentTexture; // melee (value 3): the body's dents for every pass's dent vertex program (painter_vmaskd_* / painter_maskd_*)

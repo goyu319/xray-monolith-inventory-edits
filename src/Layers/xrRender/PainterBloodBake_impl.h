@@ -4,6 +4,7 @@
 #include "PainterBloodTexture.h"
 #include "PainterBloodProjection.h"
 #include "PainterBloodOwner.h"
+#include "../../xrCore/PainterBurnTrace.h"
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
@@ -161,6 +162,7 @@ void PainterBloodNotePrograms(const ref_shader& source){PainterBloodPrograms::no
 void PainterBloodRequestPrograms(const char* vs,int skinning,const char* ps,int sample){PainterBloodPrograms::requestPair(vs?vs:"",skinning,ps?ps:"",sample);}
 void PainterBloodPumpPrograms(bool all){PainterBloodPrograms::pump(all);}
 int PainterMaskOnlyMode(){int lo=0,hi=0;return Console?Console->GetInteger("painter_voxel_mask_only",lo,hi):0;}
+bool PainterBurnOn(){return (PainterBodyMasterStamp()&1u)!=0;}
 void PainterBloodClearPrograms(){PainterBloodPrograms::clear();}
 void PainterBloodFramePump()
 {

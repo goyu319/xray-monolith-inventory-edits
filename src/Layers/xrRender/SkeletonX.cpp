@@ -204,7 +204,7 @@ void CSkeletonX::_Copy(CSkeletonX* B)
 }
 
 //////////////////////////////////////////////////////////////////////
-void CSkeletonX::_Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount)
+void CSkeletonX::_Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u32 pCount, u32 localPrimitive)
 {
     // Preserve upstream hiding of opaque parts sharing a kept glass bone.
     // The bone itself stays animated, so the glass does not collapse or freeze.
@@ -212,6 +212,20 @@ void CSkeletonX::_Render(ref_geom& hGeom, u32 vBase, u32 vCount, u32 iOffset, u3
         && (ScopeGlassBoneMask() & Parent->PhysicalScopeGlassMask) && !IsPhysicalScopeGlass()) return;
 	xrCriticalSectionGuard guard(&Parent->UCalc_Mutex);
 	PROF_EVENT("CSkeletonX::_Render");
+#if defined(USE_DX11) && RENDER==R_R4
+    // Restore the original program even when this draw group reuses its pass for another owner.
+    struct BurnProgramScope {
+        ID3D11PixelShader* previous=nullptr;
+        ~BurnProgramScope(){if(previous)RCache.set_PS(previous);}
+    } burnProgram;
+    if(Parent->HasPainterBurnBinding()){
+        auto* selected=Parent->PainterBurnDraw(this,localPrimitive);
+        if(selected && selected!=RCache.painterBoundPS()){
+            burnProgram.previous=RCache.painterBoundPS();
+            RCache.set_PS(selected);
+        }
+    }
+#endif
 	Fmatrix p_WV, p_WVP;
 	CBoneInstance* render_bones = Parent->bone_instances;
 

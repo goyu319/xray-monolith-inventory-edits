@@ -6,6 +6,9 @@
 #include "BloodThermalStamp.h"
 #include "../../xrCore/intrusive_ptr.h"
 #include <memory>
+#include <vector>
+namespace painter_burn {struct Delta;struct SourceFaces;}
+
 #include "OriginalSkinProxySource.h"
 namespace painter_detail {struct TissueField;}
 
@@ -128,6 +131,12 @@ public:
 	virtual bool LL_InstallGeometryVariant(IRenderVisual*& staged) { return false; }
 	virtual void LL_ClearGeometryVariant() {}
 	virtual u64 LL_RenderGeometryGeneration() const { return 0; }
+    virtual std::shared_ptr<const painter_burn::SourceFaces> LL_PainterBurnStageSource() const {return {};}
+    virtual int LL_TryBurnPublication(){return 1;}
+    virtual void LL_EndBurnPublication(){}
+    virtual void LL_PainterBurnSplitOwner(u64,u64,u64,u64,u64,std::shared_ptr<const painter_burn::SourceFaces>) {}
+    virtual void LL_PainterBurnOwner(u64,u64,u64,std::shared_ptr<const painter_burn::SourceFaces>) {}
+    virtual std::vector<unsigned char> LL_PainterBurnMaterialRoles() const {return {};}
 	virtual bool LL_InstallRuntimeGeometry(const RuntimeSkinUpdate&, u64 current_owner_cookie) { return false; }
 	virtual bool LL_PrepareRuntimeGeometry(const RuntimeSkinUpdate&, u64 current_owner_cookie) { return false; }
 	// Snapshot another live skeleton's marks during this owner-barrier call only.
@@ -144,7 +153,7 @@ public:
 	// stage keeps packed alive. Install admits again and commits atomically.
 	virtual IRuntimeGeometryStage* LL_StageRuntimeGeometry(const RuntimeSkinUpdate& header,
 		const std::shared_ptr<const gfy_packed::Mesh>& packed, LPCSTR cavity_shader, LPCSTR cavity_texture,
-		const xr_vector<shared_str>* tissue_textures, u64 current_owner_cookie, int& outcome) { outcome = 3; return nullptr; }
+		const xr_vector<shared_str>* tissue_textures, u64 current_owner_cookie, int& outcome, std::shared_ptr<const painter_burn::SourceFaces> burnSource={}) { outcome = 3; return nullptr; }
 	virtual bool LL_InstallStagedRuntimeGeometry(IRuntimeGeometryStage* stage, const RuntimeSkinUpdate& header,
 		u64 current_owner_cookie) { return false; }
 	// Adopt a completed stage WITHOUT changing visible geometry. Donor marks
@@ -205,6 +214,21 @@ public:
     // available (ask PickBone bone by bone as before), 0 = none (or the old loop's refusal), 1 = r as the old loop's last answer.
     virtual int LL_PickNearest(const Fmatrix& parent_xform, pick_result& r, float range, const Fvector& start,
                                const Fvector& dir, u16 count) { return -1; }
+    // Deferred surface queries must expire when only a piece's display mesh changes.
+    virtual u64 LL_SurfaceGeometryGeneration() const { return LL_RenderGeometryGeneration(); }
+    virtual bool LL_FlightPreviewAllowed() const { return false; }
+};
+
+class PainterBurnPublication {
+    IKinematics* model;
+    int status;
+public:
+    explicit PainterBurnPublication(IKinematics* k):model(k),status(k?k->LL_TryBurnPublication():1){}
+    PainterBurnPublication(const PainterBurnPublication&)=delete;
+    PainterBurnPublication& operator=(const PainterBurnPublication&)=delete;
+    bool ready()const{return status!=0;}
+    void release(){if(status==2){model->LL_EndBurnPublication();status=1;}}
+    ~PainterBurnPublication(){release();}
 };
 
 IC IKinematics* PKinematics(IRenderVisual* V) { return V ? V->dcast_PKinematics() : 0; }

@@ -43,26 +43,11 @@ IC ObjectHandlerSpace::EWorldProperties CObjectHandlerPlanner::object_property(
 	case MonsterSpace::eObjectActionAimForceFull1: return (ObjectHandlerSpace::eWorldPropertyAimForceFull1);
 	case MonsterSpace::eObjectActionAimForceFull2: return (ObjectHandlerSpace::eWorldPropertyAimForceFull2);
 	case MonsterSpace::eObjectActionUse: return (ObjectHandlerSpace::eWorldPropertyUsed);
-	// a reload goal is the stock reload to a full magazine, then aim (CStalkerActionCombatBase::aim_ready_force_full);
-	// without these cases NODEFAULT let a release build jump into the image header
-	case MonsterSpace::eObjectActionReload1: return (ObjectHandlerSpace::eWorldPropertyAimForceFull1);
-	case MonsterSpace::eObjectActionReload2: return (ObjectHandlerSpace::eWorldPropertyAimForceFull2);
-	default: break;
+	default: NODEFAULT;
 	}
-	// no goal for this action (the old handler's show / hide / take / misfire / empty, or a bad value): logged once per
-	// value, then idle
-	static u32 reported_low = 0;
-	static bool reported_high = false;
-	const u32 value = u32(object_action);
-	if (value < 32 ? !(reported_low & (1u << value)) : !reported_high)
-	{
-		if (value < 32)
-			reported_low |= 1u << value;
-		else
-			reported_high = true;
-		Msg("! [object_handler] unsupported object action %d", int(object_action));
-	}
-	return (ObjectHandlerSpace::eWorldPropertyIdle);
+#ifdef DEBUG
+	return	(ObjectHandlerSpace::eWorldPropertyDummy);
+#endif
 }
 
 void CObjectHandlerPlanner::set_goal(MonsterSpace::EObjectAction object_action, CGameObject* game_object,

@@ -19,7 +19,69 @@ void CountFallback(bool capacity) noexcept
 }
 
 #ifdef USE_DX11
-#include <d3dcompiler.h>
+#include "PainterFixedBloodPrograms.h"
+#include "PainterBloodTextureWorker.h"
+#include "PainterFixedBloodBytes.h"
+
+namespace PainterFixedBloodPrograms
+{
+// The fixed-skinning, projection and particle backends use the main render
+// device on the render thread. Each backend gets its own COM reference.
+static ID3D11Device* owner = nullptr;
+static ID3D11ComputeShader* objects[Count] = {};
+static std::atomic<unsigned> fixedCreations{0};
+unsigned directObjectCount() noexcept {
+    return fixedCreations.load(std::memory_order_relaxed) + PainterBloodTextureWorker::bank().creations.load(std::memory_order_relaxed);
+}
+
+void clear() noexcept
+{
+    for (auto& shader : objects) {
+        if (shader) shader->Release();
+        shader = nullptr;
+    }
+    owner = nullptr;
+}
+
+HRESULT acquire(ID3D11Device* device, Program program, ID3D11ComputeShader** out) noexcept
+{
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (!device || unsigned(program) >= Count) return E_INVALIDARG;
+    if (device != owner) {
+        clear();
+        owner = device;
+    }
+    auto& object = objects[program];
+    if (!object) {
+        const auto& b = bytecode[program];
+        HRESULT hr = device->CreateComputeShader(b.data, b.size, nullptr, &object);
+        if (FAILED(hr)) return hr;
+        fixedCreations.fetch_add(1,std::memory_order_relaxed);
+    }
+    object->AddRef();
+    *out = object;
+    return S_OK;
+}
+
+void prepareTextureReaders(ID3D11Device* device) noexcept
+{
+    try { PainterBloodTextureWorker::preload(device); }
+    catch (const std::exception& e) { Msg("! [painter_shader_load] phase=private_decoder_prepare_failed reason=%s",e.what()); }
+}
+void releaseTextureReaders() noexcept { PainterBloodTextureWorker::clearPrepared(); }
+
+void warm(ID3D11Device* device) noexcept
+{
+    for (unsigned i = 0; i < Count; ++i) {
+        ID3D11ComputeShader* shader = nullptr;
+        const HRESULT hr = acquire(device, Program(i), &shader);
+        if (shader) shader->Release();
+        else Msg("! [painter_shader_load] fixed_compute=%u failed=0x%08x", i, (unsigned)hr);
+    }
+}
+}
+
 namespace BloodGpuParticles
 {
 namespace
@@ -126,14 +188,7 @@ bool Initialize() noexcept
     if (state.shader) return true;
     if (state.attempted || !HW.pDevice || !HW.pContext || HW.FeatureLevel < D3D_FEATURE_LEVEL_11_0) return false;
     state.device = HW.pDevice; state.attempted = true;
-    ID3DBlob *code = nullptr, *error = nullptr;
-    HRESULT hr = D3DCompile(ShaderSource, sizeof(ShaderSource) - 1, "blood_gpu_particles", nullptr, nullptr,
-        "expand", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_IEEE_STRICTNESS |
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &error);
-    if (FAILED(hr) && error) Msg("! Blood particle shader: %.240s", static_cast<const char*>(error->GetBufferPointer()));
-    Release(error);
-    if (SUCCEEDED(hr)) hr = HW.pDevice->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &state.shader);
-    Release(code);
+    HRESULT hr = PainterFixedBloodPrograms::acquire(HW.pDevice, PainterFixedBloodPrograms::Expand, &state.shader);
     D3D11_BUFFER_DESC desc{};
     desc.ByteWidth = MaxSprites * sizeof(Input); desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;

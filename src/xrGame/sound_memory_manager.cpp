@@ -58,7 +58,6 @@ void CSoundMemoryManager::Load(LPCSTR section)
 
 void CSoundMemoryManager::reinit()
 {
-	m_personal_sounds.clear();
 	m_sounds = 0;
 	m_priorities.clear();
 	m_last_sound_time = 0;
@@ -299,9 +298,6 @@ void CSoundMemoryManager::add(const CObject* object, int sound_type, const Fvect
 		}
 	}
 
-	// Accepted personal sound only: the shared squad row below is not its provenance.
-	if (m_stalker) m_personal_sounds.add(Device.dwTimeGlobal,u32(sound_type),game_object,
-	    game_object?game_object->ID():u16(-1),position.x,position.y,position.z,sound_power);
 	const CGameObject* self = m_object;
 
 	xr_vector<CSoundObject>::iterator J = std::find(m_sounds->begin(), m_sounds->end(), object_id(object));
@@ -398,7 +394,6 @@ struct CSoundObjectPredicate
 
 void CSoundMemoryManager::remove_links(CObject* object)
 {
-	m_personal_sounds.forget_source(object);
 	if (m_sounds)
 	{
 		SOUNDS::iterator I = std::find_if(m_sounds->begin(), m_sounds->end(), CSoundObjectPredicate(object));

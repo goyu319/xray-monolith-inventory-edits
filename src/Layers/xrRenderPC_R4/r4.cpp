@@ -1,5 +1,16 @@
 #include "stdafx.h"
+#ifdef USE_DX11
+#include "../xrRender/PainterStaticBloodOutputs.h"
+#include "../xrRender/PainterFixedBloodPrograms.h"
+#endif
 #include "../xrRender/PainterBloodOwner.h"
+namespace painter_burn {struct Delta;}
+bool PainterBurnPublishNative(std::shared_ptr<const painter_burn::Delta>);
+#include "../xrRender/PainterFire.h"
+void PainterBurnFramePump();
+void PainterBurnHostClock(u32);
+u32 PainterBurnNativeEpoch();
+void PainterBurnShutdown();
 #include "r4.h"
 #include "../xrRender/fbasicvisual.h"
 #include "../../xrEngine/xr_object.h"
@@ -26,6 +37,130 @@
 #include "D3DX10Core.h"
 
 CRender RImplementation;
+
+// The loaders and their ref_shader tables belong to the render owner thread.
+// Off-thread shader compilation also contributes to the diagnostic totals.
+void PainterWarmMaterialPrograms();
+void PainterWarmStockPrograms();
+void PainterParallelWarmShaders();
+void NormalizeSceneSsaoQuality();
+void PainterStartShaderWork();
+void PainterTickShaderWork();
+void PainterStopShaderWork();
+
+namespace {
+    struct EarlyShaderShutdown final : pureAppEnd {
+        void _BCL OnAppEnd() override { PainterStopShaderWork(); }
+    } earlyShaderShutdown;
+}
+
+
+namespace
+{
+    std::atomic<u32> totalShaderMakes{0}, totalSourceCompiles{0};
+    std::atomic<bool> reportingShaderPlay{false};
+    std::atomic<u32> lateShaderRows{0};
+
+    struct LoadTimings { u64 closure=0, object=0, driver=0, reflect=0, parse=0; };
+    thread_local LoadTimings* loadTiming=nullptr;
+    struct LoadTimingScope {
+        LoadTimings* previous;
+        explicit LoadTimingScope(LoadTimings& t):previous(loadTiming){loadTiming=&t;}
+        ~LoadTimingScope(){loadTiming=previous;}
+    };
+    struct DetailClock {
+        u64* sum;
+        u64 start;
+        explicit DetailClock(u64 LoadTimings::*field):
+            sum(loadTiming ? &(loadTiming->*field) : nullptr),start(sum ? CPU::QPC() : 0) {}
+        ~DetailClock(){if (sum) *sum+=CPU::QPC()-start;}
+    };
+    template<class Fn>
+    auto timedShaderCall(u64 LoadTimings::*field,Fn work) -> decltype(work()) {
+        DetailClock clock(field);
+        return work();
+    }
+
+    bool waitingForShaderPlay = false;
+    u32 playStartMakes = 0, playStartCompiles = 0, playStartDirect = 0;
+
+    void PainterObserveShader(const char* name, const char* target, u64 compileTicks)
+    {
+        totalShaderMakes.fetch_add(1, std::memory_order_relaxed);
+        if (compileTicks)
+            totalSourceCompiles.fetch_add(1, std::memory_order_relaxed);
+        if (reportingShaderPlay.load(std::memory_order_acquire) &&
+            lateShaderRows.fetch_add(1, std::memory_order_relaxed) < 64)
+            Msg("[painter_shader_load] phase=play_program name=%s target=%s from_source=%u",
+                name, target, compileTicks ? 1u : 0u);
+    }
+
+    void PainterBeginShaderPlay()
+    {
+        if (!waitingForShaderPlay || reportingShaderPlay.load(std::memory_order_acquire)) return;
+        waitingForShaderPlay = false;
+        playStartMakes = totalShaderMakes.load(std::memory_order_relaxed);
+        playStartCompiles = totalSourceCompiles.load(std::memory_order_relaxed);
+        playStartDirect = PainterFixedBloodPrograms::directObjectCount();
+        lateShaderRows.store(0, std::memory_order_relaxed);
+        reportingShaderPlay.store(true, std::memory_order_release);
+        Msg("[painter_shader_load] phase=play_begin");
+    }
+}
+
+void CRender::OnPlayableLevel()
+{
+    PainterBeginShaderPlay();
+}
+
+void PainterEndShaderSession(const char* reason)
+{
+    waitingForShaderPlay = false;
+    if (reportingShaderPlay.exchange(false, std::memory_order_acq_rel))
+        Msg("[painter_shader_load] phase=play_end reason=%s made=%u from_source=%u direct_creates=%u",
+            reason, totalShaderMakes.load(std::memory_order_relaxed) - playStartMakes,
+            totalSourceCompiles.load(std::memory_order_relaxed) - playStartCompiles,
+            PainterFixedBloodPrograms::directObjectCount()-playStartDirect);
+}
+
+void PainterPrepareLevelShaders(const char* reason)
+{
+    ShaderClosureLoadScope closureLoad;
+    LoadTimings totals;
+    LoadTimingScope timing(totals);
+    PainterEndShaderSession(reason);
+    const u64 start = CPU::QPC();
+    const u32 beforeMakes = totalShaderMakes.load(std::memory_order_relaxed);
+    const u32 beforeSource = totalSourceCompiles.load(std::memory_order_relaxed);
+    struct RestoreProgramContext
+    {
+        int skinning = Engine.External.GetSkinningMode();
+        int sample = ::Render->m_MSAASample;
+        ~RestoreProgramContext()
+        {
+            Engine.External.SetSkinningMode(skinning);
+            ::Render->m_MSAASample = sample;
+        }
+    } restore;
+    Engine.External.SetSkinningMode(-1);
+    ::Render->m_MSAASample = -1;
+    PainterWarmStockPrograms();
+    const u64 stockEnd = CPU::QPC();
+    PainterFire::PrewarmShaders();
+    const u64 fireEnd = CPU::QPC();
+    PainterWarmMaterialPrograms();
+    const u64 materialEnd = CPU::QPC();
+    const double ms = 1000.0 / CPU::qpc_freq;
+    Msg("[painter_shader_load] phase=prepare_detail stock_ms=%.3f fire_ms=%.3f material_ms=%.3f closure_ms=%.3f object_reflect_parse_ms=%.3f driver_ms=%.3f reflect_ms=%.3f constant_parse_ms=%.3f",
+        (stockEnd-start)*ms,(fireEnd-stockEnd)*ms,(materialEnd-fireEnd)*ms,
+        totals.closure*ms,totals.object*ms,totals.driver*ms,totals.reflect*ms,totals.parse*ms);
+    Msg("[painter_shader_load] phase=prepared reason=%s ms=%.3f made=%u from_source=%u",
+        reason, (CPU::QPC() - start) * 1000.0 / CPU::qpc_freq,
+        totalShaderMakes.load(std::memory_order_relaxed) - beforeMakes,
+        totalSourceCompiles.load(std::memory_order_relaxed) - beforeSource);
+    waitingForShaderPlay = true;
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 class CGlow : public IRender_Glow
@@ -576,10 +711,32 @@ void CRender::create()
 	FluidManager.SetScreenSize(dlss::RenderWidth(), dlss::RenderHeight());
 
 	Device.ModelDefferClear = xr_make_delegate(Models, &CModelPool::DeleteQueuedDeffer);
+    if (!g_dedicated_server) {
+        Device.seqAppEnd.Add(&earlyShaderShutdown, REG_PRIORITY_HIGH);
+        PainterStartShaderWork();
+    }
 }
 
+bool CRender::PainterBurnPublish(std::shared_ptr<const painter_burn::Delta> d){return PainterBurnPublishNative(std::move(d));}
+void CRender::PainterBurnClock(u32 t){PainterBurnHostClock(t);}
+u32 CRender::PainterBurnEpoch() const{return PainterBurnNativeEpoch();}
+bool CRender::PainterFireBottle(const Fvector& position, float seconds, u32 seed){return PainterFire::Bottle(position, seconds, seed);}
+bool CRender::PainterFireBottleContact(const Fvector& position,float seconds,u32 seed,const Fvector& flew,const Fvector& hit){return PainterFire::BottleImpact(position,seconds,seed,flew,&hit);}
+bool CRender::PainterFireBottleThrown(const Fvector& position, float seconds, u32 seed, const Fvector& flew){return PainterFire::BottleThrown(position, seconds, seed, flew);}
+bool CRender::PainterFireIgnite(const Fvector& position, float radius, float seconds){return PainterFire::Ignite(position, radius, seconds);}
+bool CRender::PainterFireBody(u16 id, float seconds){return PainterFire::Body(id, seconds);}
+float CRender::PainterFireHeat(const Fvector& position){return PainterFire::Heat(position);}
+u32 CRender::PainterFireSpots(Fvector* positions, float* sizes, u32 max){return PainterFire::Spots(positions, sizes, max);} // firesoundspots
+bool CRender::PainterFireLight(const Fvector& position){return PainterFire::Light(position);}
+bool CRender::PainterFireNear(const Fvector& position, float radius, Fvector& nearest){return PainterFire::Near(position, radius, nearest);}
 void CRender::destroy()
 {
+    if (!g_dedicated_server) {
+        Device.seqAppEnd.Remove(&earlyShaderShutdown);
+        PainterStopShaderWork();
+    }
+    PainterEndShaderSession("destroy");
+    PainterBurnShutdown();
 	m_bMakeAsyncSS = false;
 	FluidManager.Destroy();
 	GMBase.destroy();
@@ -599,6 +756,9 @@ void CRender::destroy()
 
 void CRender::reset_begin()
 {
+    if (!g_dedicated_server) PainterStopShaderWork();
+    PainterEndShaderSession("device_reset");
+    PainterBurnShutdown();
 	RuntimeShaderCache::Clear(true); // handles are re-created after the reset, one pair per frame
 	if (Wallmarks) Wallmarks->ResetGpuWallmarks(true); // R26: the device survives a vid_restart; the GPU decal state stays
 	//AVO: let's reload details while changed details options on vid_restart
@@ -619,10 +779,13 @@ void CRender::reset_begin()
 
 void CRender::reset_end()
 {
+    NormalizeSceneSsaoQuality();
+    if (b_loaded && !g_dedicated_server) PainterParallelWarmShaders();
 	HWOCC.occq_create(occq_size);
 
 	Target = xr_new<CRenderTarget>();
 	TargetMain = Target;
+    if(Wallmarks)Wallmarks->WarmStaticSnapshots();
 
 	//AVO: let's reload details while changed details options on vid_restart
 	if (b_loaded && ((dm_current_size != dm_size) || (ps_r__Detail_density != ps_current_detail_density) || (
@@ -638,13 +801,19 @@ void CRender::reset_end()
 	// Set this flag true to skip the first render frame,
 	// that some data is not ready in the first frame (for example device camera position)
 	m_bFirstFrameAfterReset = true;
+    if (b_loaded && !g_dedicated_server) PainterPrepareLevelShaders("device_reset");
+    else if (!b_loaded && !g_dedicated_server) PainterStartShaderWork();
 }
 
 void CRender::OnFrame()
 {
 	PROF_EVENT("CRender::OnFrame()");
+    if (!b_loaded && !g_pGameLevel && !g_dedicated_server && g_loading_events.empty()) PainterTickShaderWork();
+    if (waitingForShaderPlay && b_loaded && g_loading_events.empty() && !Device.dwPrecacheFrame && !load_screen_renderer.IsActive())
+        PainterBeginShaderPlay();
 	
 	Models->DeleteQueue();
+	PainterFire::Update();
 
 	//Lights Delete queue
 	for (light* L : v_all_lights_dque)
@@ -657,6 +826,7 @@ void CRender::OnFrame()
 	// Runtime (wound) child shaders queued at bind: one pair per frame on the
 	// main thread, before the first hit needs them.
 	RuntimeShaderCache::Warm(1);
+    PainterBurnFramePump();
     PainterBloodFramePump(); // one global 0.5 ms upload budget, all bodies combined
 }
 
@@ -1042,15 +1212,15 @@ static HRESULT create_shader(
 	bool const disasm
 )
 {
-	result->sh = ShaderTypeTraits<T>::CreateHWShader(buffer, buffer_size);
+	result->sh = timedShaderCall(&LoadTimings::driver, [&] { return ShaderTypeTraits<T>::CreateHWShader(buffer, buffer_size); });
 
 	ID3DShaderReflection* pReflection = 0;
 
-	HRESULT const _hr = D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection));
+	HRESULT const _hr = timedShaderCall(&LoadTimings::reflect, [&] { return D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection)); });
 	if (SUCCEEDED(_hr) && pReflection)
 	{
 		// Parse constant table data
-		result->constants.parse(pReflection, ShaderTypeTraits<T>::GetShaderDest());
+		timedShaderCall(&LoadTimings::parse, [&] { return result->constants.parse(pReflection, ShaderTypeTraits<T>::GetShaderDest()); });
 
 		_RELEASE(pReflection);
 	}
@@ -1071,12 +1241,13 @@ static HRESULT create_shader(
 	bool const disasm
 )
 {
+	DetailClock elapsed(&LoadTimings::object);
 	HRESULT _result = E_FAIL;
 	if (pTarget[0] == 'p')
 	{
 		SPS* sps_result = (SPS*)result;
 #ifdef USE_DX11
-		_result = HW.pDevice->CreatePixelShader(buffer, buffer_size, 0, &sps_result->ps);
+		_result = timedShaderCall(&LoadTimings::driver, [&] { return HW.pDevice->CreatePixelShader(buffer, buffer_size, 0, &sps_result->ps); });
 #else // #ifdef USE_DX11
 		_result			= HW.pDevice->CreatePixelShader(buffer, buffer_size, &sps_result->ps);
 #endif // #ifdef USE_DX11
@@ -1090,7 +1261,7 @@ static HRESULT create_shader(
 		ID3DShaderReflection* pReflection = 0;
 
 #ifdef USE_DX11
-        _result = D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection));
+        _result = timedShaderCall(&LoadTimings::reflect, [&] { return D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection)); });
 #else
 		_result			= D3D10ReflectShader( buffer, buffer_size, &pReflection);
 #endif
@@ -1100,7 +1271,11 @@ static HRESULT create_shader(
 		if (SUCCEEDED(_result) && pReflection)
 		{
 			//	Let constant table parse it's data
-			sps_result->constants.parse(pReflection, RC_dest_pixel);
+			timedShaderCall(&LoadTimings::parse, [&] { return sps_result->constants.parse(pReflection, RC_dest_pixel); });
+#ifdef USE_DX11
+            if(sps_result->cName.size() && !strncmp(*sps_result->cName,"effects_wallmark_blood",21))
+                painter_static_blood_outputs::remember(sps_result->ps,pReflection);
+#endif
 
 			_RELEASE(pReflection);
 		}
@@ -1114,7 +1289,7 @@ static HRESULT create_shader(
 	{
 		SVS* svs_result = (SVS*)result;
 #ifdef USE_DX11
-		_result = HW.pDevice->CreateVertexShader(buffer, buffer_size, 0, &svs_result->vs);
+		_result = timedShaderCall(&LoadTimings::driver, [&] { return HW.pDevice->CreateVertexShader(buffer, buffer_size, 0, &svs_result->vs); });
 #else // #ifdef USE_DX11
 		_result			= HW.pDevice->CreateVertexShader(buffer, buffer_size, &svs_result->vs);
 #endif // #ifdef USE_DX11
@@ -1128,7 +1303,7 @@ static HRESULT create_shader(
 
 		ID3DShaderReflection* pReflection = 0;
 #ifdef USE_DX11
-        _result = D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection));
+        _result = timedShaderCall(&LoadTimings::reflect, [&] { return D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection)); });
 #else
 		_result			= D3D10ReflectShader( buffer, buffer_size, &pReflection);
 #endif
@@ -1150,7 +1325,7 @@ static HRESULT create_shader(
 			_RELEASE(pSignatureBlob);
 
 			//	Let constant table parse it's data
-			svs_result->constants.parse(pReflection, RC_dest_vertex);
+			timedShaderCall(&LoadTimings::parse, [&] { return svs_result->constants.parse(pReflection, RC_dest_vertex); });
 
 			_RELEASE(pReflection);
 		}
@@ -1164,7 +1339,7 @@ static HRESULT create_shader(
 	{
 		SGS* sgs_result = (SGS*)result;
 #ifdef USE_DX11
-		_result = HW.pDevice->CreateGeometryShader(buffer, buffer_size, 0, &sgs_result->gs);
+		_result = timedShaderCall(&LoadTimings::driver, [&] { return HW.pDevice->CreateGeometryShader(buffer, buffer_size, 0, &sgs_result->gs); });
 #else // #ifdef USE_DX11
 		_result			= HW.pDevice->CreateGeometryShader(buffer, buffer_size, &sgs_result->gs);
 #endif // #ifdef USE_DX11
@@ -1178,7 +1353,7 @@ static HRESULT create_shader(
 		ID3DShaderReflection* pReflection = 0;
 
 #ifdef USE_DX11
-        _result = D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection));
+        _result = timedShaderCall(&LoadTimings::reflect, [&] { return D3DReflect(buffer, buffer_size, IID_PPV_ARGS(&pReflection)); });
 #else
 		_result			= D3D10ReflectShader( buffer, buffer_size, &pReflection);
 #endif
@@ -1188,7 +1363,7 @@ static HRESULT create_shader(
 		if (SUCCEEDED(_result) && pReflection)
 		{
 			//	Let constant table parse it's data
-			sgs_result->constants.parse(pReflection, RC_dest_geometry);
+			timedShaderCall(&LoadTimings::parse, [&] { return sgs_result->constants.parse(pReflection, RC_dest_geometry); });
 
 			_RELEASE(pReflection);
 		}
@@ -1278,17 +1453,27 @@ public:
 		string_path pname;
 		strconcat(sizeof(pname), pname, ::Render->getShaderPath(), pFileName);
 		IReader* R = FS.r_open("$game_shaders$", pname);
+		bool openedDirectly = false;
 		if (0 == R)
 		{
 			// possibly in shared directory or somewhere else - open directly
 			R = FS.r_open("$game_shaders$", pFileName);
 			if (0 == R) return E_FAIL;
+			openedDirectly = true;
+		}
+
+		// source edits (configs/painter_source_edits) apply to the installed include
+		const void* source = R->pointer();
+		u32 size = R->length();
+		{
+			string_path editPath;
+			strconcat(sizeof(editPath), editPath, "shaders\\", openedDirectly ? pFileName : pname);
+			painterSourceEdits(editPath, R->pointer(), R->length(), source, size);
 		}
 
 		// duplicate and zero-terminate
-		u32 size = R->length();
 		u8* data = xr_alloc<u8>(size + 1);
-		CopyMemory(data, R->pointer(), size);
+		CopyMemory(data, source, size);
 		data[size] = 0;
 		FS.r_close(R);
 
@@ -1306,6 +1491,10 @@ public:
 
 static inline bool match_shader_id(LPCSTR const debug_shader_id, LPCSTR const full_shader_id,
                                    FS_FileSet const& file_set, string_path& result);
+
+#include "PainterPortableRecord.h"
+#include "PainterTornDrawLoad.h"
+#include "PainterParallelShaderLoad.inc"
 
 // The defines every shader compiles with and the shader cache name they make, for the current settings and a
 // skinning mode (shader_compile with the engine's current one; the shader warm-up, r4_shader_warmup.cpp)
@@ -2044,6 +2233,15 @@ HRESULT CRender::shader_compile(
 	DWORD Flags,
 	void*& result)
 {
+	// The stall recorder (PainterFire) is told how long every shader program takes to make, and how much of that was a
+	// compile from source (no cached build): the log line of a long frame can then name it.
+	struct PainterShaderClock
+	{
+		LPCSTR name, target;
+		u64 start = CPU::QPC(), compile = 0;
+		PainterShaderClock(LPCSTR n, LPCSTR t) : name(n), target(t) {}
+		~PainterShaderClock() { if (painter_compile_load::active) return; PainterFire::ShaderMade(CPU::QPC() - start, compile); PainterObserveShader(name, target, compile); }
+	} painterShaderClock(name, pTarget);
 	ShaderCompileOptions options;
 	shader_compile_options(options, Engine.External.GetSkinningMode());
 	D3D_SHADER_MACRO* const defines = options.defines;
@@ -2051,6 +2249,10 @@ HRESULT CRender::shader_compile(
 
 	pTarget = shader_compile_target(pFunctionName, pTarget);
 
+    if(painter_startup::profileProbe){
+        painter_startup::probeMacroSet(sh_name,defines);
+        return S_OK;
+    }
 	HRESULT _result = E_FAIL;
 
 	string_path folder_name, folder;
@@ -2065,12 +2267,14 @@ HRESULT CRender::shader_compile(
 	FS.update_path(folder_name, "$game_shaders$", folder);
 	xr_strcat(folder_name, "\\");
 
-	m_file_set.clear();
-	FS.file_list(m_file_set, folder_name, FS_ListFiles | FS_RootOnly, "*");
-
 	string_path temp_file_name, file_name;
-	bool const useGeneratedShaderCache =
-		psDeviceFlags2.test(rsPrecompiledShaders) || !match_shader_id(name, sh_name, m_file_set, temp_file_name);
+	bool useGeneratedShaderCache = psDeviceFlags2.test(rsPrecompiledShaders);
+	if (!useGeneratedShaderCache) {
+		m_file_set.clear();
+		FS.file_list(m_file_set, folder_name, FS_ListFiles | FS_RootOnly, "*");
+		useGeneratedShaderCache = !match_shader_id(name, sh_name, m_file_set, temp_file_name);
+	}
+
 	if (useGeneratedShaderCache)
 	{
 		string_path file;
@@ -2089,9 +2293,27 @@ HRESULT CRender::shader_compile(
 	}
 
 	u32 source_crc = 0;
-	if (useGeneratedShaderCache)
-		source_crc = getShaderSourceCrc32(pSrcData, SrcDataLen, ::Render->getShaderPath());
+	if (useGeneratedShaderCache) {
+        DetailClock elapsed(&LoadTimings::closure);
+        source_crc = getShaderSourceCrc32(pSrcData, SrcDataLen, ::Render->getShaderPath());
+    }
 
+    auto createForRequest = [&](LPCSTR target, DWORD const* code, u32 size, LPCSTR path, void*& destination, bool disasm) -> HRESULT {
+        const HRESULT hr=::create_shader(target,code,size,path,destination,disasm);
+        const unsigned tornSamples=o.dx10_msaa?unsigned(o.dx10_msaa_samples):1u;
+        if(SUCCEEDED(hr) && loadTiming && !painter_compile_load::active && useGeneratedShaderCache &&
+           !strcmp(name,"painter_burn_painter_blood_painter_vmi_tear") &&
+           !o.dx11_hdr10 && o.mrtmixdepth && !o.albedo_wo && m_ShaderOptions.empty() &&
+           !strcmp(target,"ps_5_0") && !strcmp(pFunctionName,"main") && Flags==D3DCOMPILE_PACK_MATRIX_ROW_MAJOR &&
+           ((tornSamples==1u && !strcmp(sh_name,"2560111100110000000000100000111302110110280123240012410000007")) ||
+            (tornSamples==2u && !strcmp(sh_name,"2560111100110000000000100000111302110110280123240012411210017")) ||
+            (tornSamples==4u && !strcmp(sh_name,"2560111100110000000000100000111302110110280123240012411410017")))){
+            includer inputs;
+            painter_torn_optional::attach(static_cast<SPS*>(destination)->ps,code,size,
+                name,pFunctionName,target,Flags,pSrcData,SrcDataLen,defines,inputs,tornSamples);
+        }
+        return hr;
+    };
 	// r__shader_debug skips the cache read so a cached optimized blob does not shadow the debug build
 	if (!r__shader_debug && FS.exist(file_name))
 	{
@@ -2108,7 +2330,7 @@ HRESULT CRender::shader_compile(
 
 					if (real_crc == crc)
 					{
-						_result = create_shader(pTarget, (DWORD*)file->pointer(), file->elapsed(), file_name, result, o.disasm);
+						_result = painter_compile_load::active ? painter_compile_load::checkedCache(file->pointer(), file->elapsed()) : createForRequest(pTarget, (DWORD*)file->pointer(), file->elapsed(), file_name, result, o.disasm);
 					}
 				}
 				else
@@ -2126,10 +2348,200 @@ HRESULT CRender::shader_compile(
 
 			if (real_crc == crc)
 			{
-				_result = create_shader(pTarget, (DWORD*)file->pointer(), file->elapsed(), file_name, result, o.disasm);
+				_result = painter_compile_load::active ? painter_compile_load::checkedCache(file->pointer(), file->elapsed()) : createForRequest(pTarget, (DWORD*)file->pointer(), file->elapsed(), file_name, result, o.disasm);
 			}
 		}
 		file->close();
+	}
+
+    // Use the same packaged layout, active settings key and source/bytecode CRCs
+    // as the original burn seeds. Special entry points and ad-hoc macro lists
+    // continue through the ordinary compiler.
+    const auto acceptsPackagedProgram = [](const char* resource) {
+        if (!strncmp(resource, "painter_", 8)) return true;
+        static const char* const edited[] = {"combine_1", "combine_1_nomsaa",
+            "combine_1_msaa", "effects_wallmark_blood", "lod", "heatvision",
+            "models_scope_reticle", "models_scope_reticle_precise"};
+        for (const char* base : edited) {
+            const size_t len = strlen(base);
+            if (strncmp(resource, base, len) != 0) continue;
+            const char* tail = resource + len;
+            if (!*tail || (tail[0]=='_' && tail[1]>='0' && tail[1]<='7' && !tail[2]))
+                return true;
+        }
+        return false;
+    };
+    if (FAILED(_result) && useGeneratedShaderCache && m_ShaderOptions.empty() &&
+        !xr_strcmp(pFunctionName, "main") && Flags == D3D10_SHADER_PACK_MATRIX_ROW_MAJOR &&
+        (!xr_strcmp(pTarget, "ps_5_0") || !xr_strcmp(pTarget, "vs_5_0") ||
+         !xr_strcmp(pTarget, "cs_5_0") || !xr_strcmp(pTarget, "gs_5_0") ||
+         !xr_strcmp(pTarget, "hs_5_0") || !xr_strcmp(pTarget, "ds_5_0")) &&
+        acceptsPackagedProgram(name))
+    {
+        string_path path;
+        xr_sprintf(path, "r3\\painter_wound_cache\\%s\\%08x\\%s", name, source_crc, sh_name);
+        if (IReader* seed = FS.r_open("$game_shaders$", path))
+        {
+            if (seed->length() >= 40 && seed->length() <= 1048576 && seed->r_u32() == source_crc)
+            {
+                const u32 checksum = seed->r_u32();
+                if (!memcmp(seed->pointer(), "DXBC", 4) && checksum == crc32(seed->pointer(), seed->elapsed()))
+                    _result = painter_compile_load::active ? painter_compile_load::checkedCache(seed->pointer(), seed->elapsed()) : createForRequest(pTarget, (DWORD*)seed->pointer(), seed->elapsed(), path, result, o.disasm);
+            }
+            FS.r_close(seed);
+            if (SUCCEEDED(_result)) Msg("[painter_wound_load] seed=%s", name);
+        }
+    }
+
+    if (FAILED(_result) && useGeneratedShaderCache && m_ShaderOptions.empty() &&
+        !strncmp(name,"painter_",8) && !xr_strcmp(pFunctionName,"main") && Flags==D3DCOMPILE_PACK_MATRIX_ROW_MAJOR)
+    {
+        string_path lookup;
+        xr_sprintf(lookup,"r3\\painter_wound_cache\\equivalent\\%s.%s.pse",name,extension);
+        if (IReader* index=FS.r_open("$game_shaders$",lookup)) {
+            includer activeIncludes;
+            painter_portable_shader::Digest digest{};
+            painter_portable_shader::Reference reference;
+            const bool indexed=index->length()>=12 && index->length()<=16384 &&
+                painter_portable_shader::key(name,pFunctionName,pTarget,Flags,pSrcData,SrcDataLen,defines,activeIncludes,digest) &&
+                painter_portable_shader::reference(index->pointer(),index->length(),digest,reference);
+            FS.r_close(index);
+            if (indexed) {
+                string_path alias;
+                xr_sprintf(alias,"r3\\painter_wound_cache\\%s\\%08x\\%s",name,reference.sourceCRC,reference.option.c_str());
+                if (IReader* record=FS.r_open("$game_shaders$",alias)) {
+                    if (record->length()>=40 && record->length()<=1048576 && record->r_u32()==reference.sourceCRC) {
+                        const u32 savedCrc=record->r_u32();
+                        if (crc32(record->pointer(),record->elapsed())==savedCrc &&
+                            painter_portable_shader::payload(record->pointer(),record->elapsed(),reference.expected)) {
+                            _result=painter_compile_load::active ? painter_compile_load::checkedCache(record->pointer(),record->elapsed()) :
+                                createForRequest(pTarget,(DWORD*)record->pointer(),record->elapsed(),alias,result,o.disasm);
+                        }
+                    }
+                    FS.r_close(record);
+                }
+            }
+        }
+    }
+
+
+    if (FAILED(_result) && useGeneratedShaderCache && m_ShaderOptions.empty() &&
+        !strncmp(name,"painter_burn_painter_blood_",27)) {
+        includer localIncludes;
+        const auto recipe=painter_surface_selector::identify(name,pFunctionName,pTarget,Flags,pSrcData,SrcDataLen,defines,localIncludes);
+        if(recipe.entry){
+            // Side records preserve both original member cache keys through upgrades and rollback.
+            const std::string normal(file_name);
+            char memberKey[48];xr_sprintf(memberKey,"s1_%08x_%.24s",source_crc,recipe.entry->code);
+            const std::string side=normal.substr(0,normal.find_last_of("/\\")+1)+memberKey;
+            if(side.size()<sizeof(string_path)){
+                IReader* saved=FS.r_open(side.c_str());
+                if(saved){
+                    if(saved->length()>=40 && saved->length()<=1024*1024 && saved->r_u32()==source_crc){
+                        const u32 sum=saved->r_u32();
+                        if(crc32(saved->pointer(),saved->elapsed())==sum &&
+                            painter_surface_selector::valid(recipe,saved->pointer(),saved->elapsed()))
+                            _result=painter_compile_load::active?painter_compile_load::checkedCache(saved->pointer(),saved->elapsed()):
+                                createForRequest(pTarget,(DWORD*)saved->pointer(),saved->elapsed(),side.c_str(),result,o.disasm);
+                    }
+                    FS.r_close(saved);
+                    if(SUCCEEDED(_result))return _result;
+                }
+                if(painter_compile_load::active){
+                    auto& batch=*painter_compile_load::active;
+                    const size_t before=batch.jobs.size();
+                    if(batch.capture(side.c_str(),name,source_crc,pSrcData,SrcDataLen,defines,pFunctionName,pTarget,Flags,localIncludes)){
+                        if(batch.jobs.size()>before){auto& job=batch.jobs.back();job.exterior=recipe;job.ordinaryPath=file_name;}
+                        return S_OK;
+                    }
+                }else{
+                    ID3DBlob* bytes=nullptr;
+                    if(SUCCEEDED(painter_surface_selector::compile(recipe,&bytes))){
+                        const auto* data=bytes->GetBufferPointer();const auto size=(u32)bytes->GetBufferSize();
+                        _result=createForRequest(pTarget,(DWORD*)data,size,side.c_str(),result,o.disasm);
+                        if(SUCCEEDED(_result)){
+                            IWriter* save=FS.w_open(side.c_str());
+                            if(save){if(save->valid()){save->w_u32(source_crc);save->w_u32(crc32(data,size));save->w(data,size);}FS.w_close(save);}
+                        }
+                        bytes->Release();
+                        if(SUCCEEDED(_result))return _result;
+                    }
+                }
+            }
+        }
+    }
+
+#include "PainterShadowCastRequest.inc"
+    // Scene MRT1 uses eight-bit albedo only with mixed formats and ordinary albedo storage.
+    if (FAILED(_result) && useGeneratedShaderCache && m_ShaderOptions.empty() &&
+        !o.dx11_hdr10 && o.mrtmixdepth && !o.albedo_wo &&
+        (!strcmp(name,"painter_burn_painter_blood_painter_vmi_tear") ||
+         !strcmp(name,"painter_burn_painter_blood_painter_vmi_wall") ||
+         !strcmp(name,"painter_burn_painter_blood_painter_vmi_piece")) && !strcmp(pTarget,"ps_5_0") &&
+        !strcmp(pFunctionName,"main") && Flags==D3DCOMPILE_PACK_MATRIX_ROW_MAJOR) {
+        includer inputs;
+        painter_portable_shader::Digest signature{};
+        const unsigned samples=o.dx10_msaa ? unsigned(o.dx10_msaa_samples) : 1u;
+        const char* certified=nullptr;
+        if(painter_portable_shader::key(name,pFunctionName,pTarget,Flags,pSrcData,SrcDataLen,defines,inputs,signature) &&
+           (certified=painter_burn_tear_link::certifiedProfile(samples,painter_portable_shader::hex(signature)))!=nullptr) {
+            const std::string usual(file_name);
+            const std::string side=usual.substr(0,usual.find_last_of("/\\")+1)+"bc2_ldr_"+std::to_string(samples)+"_"+std::string(certified,24);
+            if(side.size()<sizeof(string_path)){
+                bool rejectedByDevice=false;
+                if(IReader* saved=FS.r_open(side.c_str())){
+                    if(saved->length()>=40 && saved->length()<=1048576 && saved->r_u32()==source_crc){
+                        const auto recorded=saved->r_u32();
+                        if(crc32(saved->pointer(),saved->elapsed())==recorded &&
+                           painter_burn_tear_link::certifiedPayload(saved->pointer(),saved->elapsed(),certified)){
+                            _result=painter_compile_load::active ? painter_compile_load::checkedCache(saved->pointer(),saved->elapsed()) :
+                                createForRequest(pTarget,(DWORD*)saved->pointer(),saved->elapsed(),side.c_str(),result,o.disasm);
+                            rejectedByDevice=FAILED(_result);
+                        }
+                    }
+                    FS.r_close(saved);
+                    if(SUCCEEDED(_result))return _result;
+                }
+                if(!rejectedByDevice){
+                    if(painter_compile_load::active){
+                        auto& batch=*painter_compile_load::active;
+                        if(batch.paths.count(side)){++batch.duplicate;return S_OK;}
+                        auto recipe=painter_burn_tear_link::capture(batch.tornLibraries,name,pFunctionName,pTarget,Flags,pSrcData,SrcDataLen,defines,&inputs);
+                        recipe.certified=certified;
+                        if(recipe.ready()){
+                            const auto before=batch.jobs.size();
+                            if(batch.capture(side.c_str(),name,source_crc,pSrcData,SrcDataLen,defines,pFunctionName,pTarget,Flags,inputs)){
+                                if(batch.jobs.size()>before){
+                                    auto& job=batch.jobs.back();job.burnedTorn=std::move(recipe);job.ordinaryPath=usual;
+                                    for(const auto& part:job.burnedTorn.parts)batch.tornParts.emplace_back(part,Flags);
+                                }
+                                return S_OK;
+                            }
+                        }
+                    }else{
+                        painter_tear_modules::Cache modules;
+                        auto recipe=painter_burn_tear_link::capture(modules,name,pFunctionName,pTarget,Flags,pSrcData,SrcDataLen,defines,&inputs);
+                        recipe.certified=certified;
+                        Microsoft::WRL::ComPtr<ID3DBlob> compiled;
+                        if(recipe.ready() && painter_burn_tear_link::make(recipe,Flags,compiled.GetAddressOf())){
+                            const auto* data=compiled->GetBufferPointer();const auto size=(u32)compiled->GetBufferSize();
+                            _result=createForRequest(pTarget,(DWORD*)data,size,side.c_str(),result,o.disasm);
+                            if(SUCCEEDED(_result)){
+                                if(IWriter* saved=FS.w_open(side.c_str())){
+                                    if(saved->valid()){saved->w_u32(source_crc);saved->w_u32(crc32(data,size));saved->w(data,size);}
+                                    FS.w_close(saved);
+                                }
+                                return _result;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+	if (painter_compile_load::active) {
+		if (SUCCEEDED(_result)) return _result;
+		return painter_compile_load::miss(file_name,name,source_crc,pSrcData,SrcDataLen,defines,pFunctionName,pTarget,Flags,useGeneratedShaderCache);
 	}
 
 	if (FAILED(_result))
@@ -2143,8 +2555,24 @@ HRESULT CRender::shader_compile(
 		DWORD compileFlags = Flags;
 		if (r__shader_debug)
 			compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-		_result = pShaderBuf ? S_OK :
-			D3DCompile(
+		const u64 painterCompileStart = CPU::QPC();
+        Microsoft::WRL::ComPtr<ID3DBlob> tornCode;
+        bool tornReady=false;
+        if (!pShaderBuf && !r__shader_debug && painter_tear_link::eligible(name,pFunctionName,pTarget,Flags)) {
+            painter_tear_modules::Cache modules;
+            auto recipe=painter_tear_link::capture(modules,name,pFunctionName,pTarget,Flags,
+                pSrcData,SrcDataLen,defines,&Includer);
+            if (recipe.ready() && painter_tear_link::make(recipe,Flags,tornCode.GetAddressOf())) {
+                pShaderBuf=tornCode.Get();
+                _result=createForRequest(pTarget,(DWORD*)pShaderBuf->GetBufferPointer(),(u32)pShaderBuf->GetBufferSize(),
+                    file_name,result,o.disasm);
+                tornReady=SUCCEEDED(_result);
+                if (!tornReady) pShaderBuf=nullptr;
+            }
+        }
+        if (tornReady || pShaderBuf) { if (!tornReady) _result = S_OK; }
+        else
+            _result=D3DCompile(
 				pSrcData,
 				SrcDataLen,
 				"", //NULL, //LPCSTR pFileName,	//	NVPerfHUD bug workaround.
@@ -2154,6 +2582,7 @@ HRESULT CRender::shader_compile(
 				&pShaderBuf,
 				&pErrorBuf
 			);
+		painterShaderClock.compile = CPU::QPC() - painterCompileStart;
 
 		if (SUCCEEDED(_result))
 		{
@@ -2172,7 +2601,7 @@ HRESULT CRender::shader_compile(
 				FS.w_close(file);
 			}
 
-			_result = create_shader(pTarget, (DWORD*)pShaderBuf->GetBufferPointer(), (u32)pShaderBuf->GetBufferSize(),
+			if (!tornReady) _result = createForRequest(pTarget, (DWORD*)pShaderBuf->GetBufferPointer(), (u32)pShaderBuf->GetBufferSize(),
 			                        file_name, result, o.disasm);
 		}
 		else
