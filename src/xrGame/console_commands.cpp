@@ -82,6 +82,7 @@ extern int painter_sever_hold;    // R63 (PainterVoxelLive_impl.h): 1 = a killin
 extern int painter_sever_hold_ms; // longest wait (real ms) before the frozen shell starts anyway
 extern XRCORE_API int g_painter_log; // xrCore/log.cpp: 1 = Painter's lines reach the log (the MCM support log switch)
 extern int painter_bone_visibility_timing;
+BOOL print_ik_warnings = FALSE; // was declared by Painter's removed combat AI
 int g_goyu_bone_hide_rebuild = 0; // rebuild a body's physics shell when a script hides/shows a bone (Painter merge, upstream 2026.11)
 
 #ifdef DEBUG

@@ -311,9 +311,6 @@ public:
 	IC void set_xform_project(const Fmatrix& M);
 
 	IC void set_xform_world_prev(const Fmatrix& M);
-	// Forget the bound texture lists, so that the next draw binds them again (after the surface of a bound
-	// CTexture was replaced).
-	void InvalidateTextures();
 	IC void set_xform_view_prev(const Fmatrix& M);
 	IC void set_xform_project_prev(const Fmatrix& M);
 
