@@ -239,6 +239,8 @@ int ps_r__tree_ib_reorder = 1;
 float ps_r__WallmarkTTL = 50.f;
 #ifdef USE_DX11
 int ps_blood_snapshots=1;
+// GOYU: 1 = Painter compiles shaders in helper copies of the exe (BloodEngine default); 0 = in this process
+ECORE_API int ps_r__painter_shader_workers=0;
 int ps_blood_snapshot_mb=64;
 #endif
 float ps_r__WallmarkSHIFT = 0.0001f;
@@ -2054,6 +2056,7 @@ void xrRender_initconsole()
 	CMD4(CCC_Float, "r__wallmark_ttl", &ps_r__WallmarkTTL, 1.0f, 10.f*60.f);
 #ifdef USE_DX11
     CMD4(CCC_Integer,"r__blood_snapshots",&ps_blood_snapshots,0,1);
+    CMD4(CCC_Integer,"r__painter_shader_workers",&ps_r__painter_shader_workers,0,1);
     CMD4(CCC_Integer,"r__blood_snapshot_vram_mb",&ps_blood_snapshot_mb,4,256);
 #endif
 

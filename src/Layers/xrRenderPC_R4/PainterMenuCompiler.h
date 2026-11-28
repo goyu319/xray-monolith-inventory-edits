@@ -237,6 +237,11 @@ public:
     Service(const Service&)=delete;Service& operator=(const Service&)=delete;
     ~Service(){cancel();}
     bool submit(Input input,unsigned cost){
+        // GOYU: r__painter_shader_workers 0 (default) keeps every compile in this process (the level's own threads).
+        // The helper processes are copies of the game exe started with a command line; under Mod Organizer and with
+        // the DX12 bridge's dxgi proxy they did not answer, and the level load waited on them for ever.
+        extern ECORE_API int ps_r__painter_shader_workers;
+        if(!ps_r__painter_shader_workers)return false;
         if(!wire::fitsPacket(input))return false;
         std::lock_guard<std::mutex> l(lock);
         if(unavailable)return false;

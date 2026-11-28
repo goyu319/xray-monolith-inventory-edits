@@ -97,7 +97,20 @@ void PainterParallelWarmShaders() {
     // Preserve the proven linked shader and paired exterior programs in their original process.
     // Use the waiting owner's single lane while the full-process pool handles ordinary misses.
     // Exterior members share one source-checked worker result; ordinary fallback handles a refused result.
-    while(!s.workers.waitFor(150))PainterShaderLoadProgress(s.workers.total()-s.workers.pending(),s.workers.total());
+    {
+        // GOYU: never wait for ever on helper processes. With no progress for 30 s the rest is compiled here.
+        unsigned lastPending=s.workers.pending();ULONGLONG lastChange=GetTickCount64();
+        while(!s.workers.waitFor(150)){
+            const unsigned now=s.workers.pending();
+            PainterShaderLoadProgress(s.workers.total()-now,s.workers.total());
+            if(now!=lastPending){lastPending=now;lastChange=GetTickCount64();continue;}
+            if(GetTickCount64()-lastChange>30000){
+                Msg("! [GOYU] Painter shader helpers made no progress for 30 s (%u left); compiling them here",now);
+                s.workers.cancel();
+                break;
+            }
+        }
+    }
     for(auto& j:batch.jobs)acceptLibraries(j);
     unsigned adopted=0;
     for(auto& j:batch.jobs)if(ordinary(j) && accept(batch,j))++adopted;
