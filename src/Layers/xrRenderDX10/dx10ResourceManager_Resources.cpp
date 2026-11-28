@@ -693,7 +693,7 @@ ref_texture CResourceManager::_CreateTexture(LPCSTR _Name)
             // Painter fire: the burnt-leaf proxy samples its source texture; it never loads a DDS of its own.
             const char* sourceName=Name+sizeof(leafPrefix)-1;
             if (*sourceName && !strstr(sourceName,"$user$")) {
-                T->painterLeafSource = _CreateTexture(sourceName);
+                T->painterLeafSource._set(_CreateTexture(sourceName)._get());
                 T->bind=xr_make_delegate(T,&CTexture::apply_leaf_wood);
             }
         }

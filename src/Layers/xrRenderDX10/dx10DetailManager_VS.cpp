@@ -16,6 +16,7 @@
 #include "../xrRender/ResourceManager.h"
 #include "../xrRender/dxRenderDeviceRender.h"
 #include "../xrRender/PainterSoftShader.h"
+#include "../xrRender/PainterFire.h"
 // The structured buffer slot the "<vs>_inst" grass shaders declare: StructuredBuffer<float4> grass_rows : register(t15).
 // Engine textures use vertex slots 0-3 only, so nothing else binds or clears it.
 static const u32 grass_rows_slot = 15;
