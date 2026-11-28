@@ -241,6 +241,7 @@ float ps_r__WallmarkTTL = 50.f;
 int ps_blood_snapshots=1;
 // GOYU: 1 = Painter compiles shaders in helper copies of the exe (BloodEngine default); 0 = in this process
 ECORE_API int ps_r__painter_shader_workers=0;
+ECORE_API int ps_r__painter_tissue_mb=0; // GOYU: Painter anatomy GPU cache, 0 = auto (PainterTissueField.h)
 int ps_blood_snapshot_mb=64;
 #endif
 float ps_r__WallmarkSHIFT = 0.0001f;
@@ -2057,6 +2058,7 @@ void xrRender_initconsole()
 #ifdef USE_DX11
     CMD4(CCC_Integer,"r__blood_snapshots",&ps_blood_snapshots,0,1);
     CMD4(CCC_Integer,"r__painter_shader_workers",&ps_r__painter_shader_workers,0,1);
+    CMD4(CCC_Integer,"r__painter_tissue_mb",&ps_r__painter_tissue_mb,0,4096);
     CMD4(CCC_Integer,"r__blood_snapshot_vram_mb",&ps_blood_snapshot_mb,4,256);
 #endif
 

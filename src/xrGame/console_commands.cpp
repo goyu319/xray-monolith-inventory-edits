@@ -82,6 +82,7 @@ extern int painter_sever_hold;    // R63 (PainterVoxelLive_impl.h): 1 = a killin
 extern int painter_sever_hold_ms; // longest wait (real ms) before the frozen shell starts anyway
 extern XRCORE_API int g_painter_log; // xrCore/log.cpp: 1 = Painter's lines reach the log (the MCM support log switch)
 extern int painter_bone_visibility_timing;
+int g_goyu_painter_asset_cap_mb = 0; // 0 = auto (PainterVoxelLive_impl.h)
 BOOL print_ik_warnings = FALSE; // was declared by Painter's removed combat AI
 int g_goyu_bone_hide_rebuild = 0; // rebuild a body's physics shell when a script hides/shows a bone (Painter merge, upstream 2026.11)
 
@@ -3713,6 +3714,7 @@ void CCC_RegisterCommands()
 	CMD1(CCC_PainterAliveReference, "painter_alive_reference_id");
 	CMD4(CCC_Integer, "painter_bone_visibility_timing", &painter_bone_visibility_timing, 0, 1);
 	CMD4(CCC_Integer, "goyu_bone_hide_rebuild", &g_goyu_bone_hide_rebuild, 0, 1);
+	CMD4(CCC_Integer, "painter_asset_cap_mb", &g_goyu_painter_asset_cap_mb, 0, 16384); // body data budget, 0 = auto; read once per session
 	CMD1(CCC_PainterGeometryProbe, "painter_butcher_geometry_test");
 	CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result",&painter_runtime_result);
     CMD2(CCC_PainterRuntimeStatus,"painter_runtime_result_owner",&painter_runtime_result_owner);

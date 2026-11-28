@@ -251,7 +251,12 @@ void install_memory_policy(){
     policy.dispatch_commit_floor=64ull<<20;policy.separation_bytes=128ull<<20;gfy_live::set_memory_policy(policy);
     arm_cushion();xr_set_oom_release(&release_cushion);xr_alloc_oom_hook=&release_cushion_for_lua;
     const auto m=system_memory();const u64 phys=m.valid?m.total_phys:(16ull<<30);
-    asset_cap_bytes=std::max<u64>(512ull<<20,std::min<u64>(2048ull<<20,phys/16));
+    // GOYU: BloodEngine allowed phys/16, at most 2 GB. With GFY's many outfits a level's NPCs held 2.3-3.4 GB of body
+    // data, so most of them waited for a bind and only showed holes and blood. Default phys/8 up to 4 GB;
+    // painter_asset_cap_mb (read here, before the first body is bound) sets it by hand.
+    extern int g_goyu_painter_asset_cap_mb;
+    asset_cap_bytes=g_goyu_painter_asset_cap_mb>0?u64(g_goyu_painter_asset_cap_mb)<<20:
+        std::max<u64>(512ull<<20,std::min<u64>(4096ull<<20,phys/8));
     xr_pool_stats lua_pool{};XR_POOL_STATS(&lua_pool);
     Msg("[painter_memory] phase=policy heavy_join_mb=%llu commit_margin_mb=%llu dispatch_floor_mb=%llu asset_cap_mb=%llu total_phys_mb=%llu avail_commit_mb=%llu lua_pool_floor_mb=%llu lua_pool_committed_mb=%llu lua_pool_used_mb=%llu",
         policy.heavy_bytes>>20,policy.commit_margin>>20,policy.dispatch_commit_floor>>20,asset_cap_bytes>>20,phys>>20,m.valid?m.avail_commit>>20:0ull,

@@ -41,7 +41,11 @@ inline std::size_t budget(){
     // shared-memory adapters; allocation failure still takes the old material path.
     DXGI_ADAPTER_DESC desc={};
     const std::size_t memory=HW.m_pAdapter&&SUCCEEDED(HW.m_pAdapter->GetDesc(&desc))?desc.DedicatedVideoMemory:0;
-    return std::min<std::size_t>(512u<<20,std::max<std::size_t>(96u<<20,memory/32)); // 2026-09-29: 256 MiB hid 2 wounds
+    // GOYU: 1/32 of a 12 GB card (384 MB) was full in a firefight and later bodies fell back to the old material.
+    // Default 1/16 up to 1 GB; r__painter_tissue_mb sets it by hand.
+    extern ECORE_API int ps_r__painter_tissue_mb;
+    if(ps_r__painter_tissue_mb>0)return std::size_t(ps_r__painter_tissue_mb)<<20;
+    return std::min<std::size_t>(1024u<<20,std::max<std::size_t>(96u<<20,memory/16));
 }
 inline bool installed(){return FS.exist("$game_shaders$","r3\\models_painter_anatomy.s");}
 inline std::shared_ptr<PainterTissueGpu> Find(const std::shared_ptr<const painter_detail::TissueField>&field){
