@@ -1,6 +1,7 @@
 // body_hit_outcomes_v1
 // Explicit native hit diagnostic. CPU worker is compiled separately with /EHsc.
 // No helper calls a prepared state; accepted fire-wound SHit events drive jobs.
+extern int g_goyu_painter_asset_cap_mb; // GOYU: console_commands.cpp (painter_asset_cap_mb)
 #include <deque>
 #include <chrono>
 #include "PainterBurnHost.h"
@@ -254,7 +255,6 @@ void install_memory_policy(){
     // GOYU: BloodEngine allowed phys/16, at most 2 GB. With GFY's many outfits a level's NPCs held 2.3-3.4 GB of body
     // data, so most of them waited for a bind and only showed holes and blood. Default phys/8 up to 4 GB;
     // painter_asset_cap_mb (read here, before the first body is bound) sets it by hand.
-    extern int g_goyu_painter_asset_cap_mb;
     asset_cap_bytes=g_goyu_painter_asset_cap_mb>0?u64(g_goyu_painter_asset_cap_mb)<<20:
         std::max<u64>(512ull<<20,std::min<u64>(4096ull<<20,phys/8));
     xr_pool_stats lua_pool{};XR_POOL_STATS(&lua_pool);

@@ -1,5 +1,6 @@
 #pragma once
 #ifdef USE_DX11
+extern ECORE_API int ps_r__painter_tissue_mb; // GOYU: xrRender_console.cpp (r__painter_tissue_mb)
 #include "../../Include/xrRender/SparseTissueField.h"
 #include "RuntimeShaderCache.h"
 #include <atomic>
@@ -43,7 +44,6 @@ inline std::size_t budget(){
     const std::size_t memory=HW.m_pAdapter&&SUCCEEDED(HW.m_pAdapter->GetDesc(&desc))?desc.DedicatedVideoMemory:0;
     // GOYU: 1/32 of a 12 GB card (384 MB) was full in a firefight and later bodies fell back to the old material.
     // Default 1/16 up to 1 GB; r__painter_tissue_mb sets it by hand.
-    extern ECORE_API int ps_r__painter_tissue_mb;
     if(ps_r__painter_tissue_mb>0)return std::size_t(ps_r__painter_tissue_mb)<<20;
     return std::min<std::size_t>(1024u<<20,std::max<std::size_t>(96u<<20,memory/16));
 }
