@@ -39,9 +39,10 @@ static bool PainterLogLine(LPCSTR m)
 		++m;
 	if (*m != '[')
 		return false;
+	// GOYU: only BloodEngine's own wound / blood tags. The upscaler, PiP, grass and shader warm-up lines of this exe
+	// stay in the log: they are how its DLSS / frame generation / PiP problems are found.
 	static const char* const tags[] = {"[painter", "[Painter", "[PAINTER", "[blood_", "[BLOOD", "[Blood]", "[butcher_",
-		"[runtime_", "[short_range_blood", "[AR3]", "[CCAL]", "[GROUND]", "[MOTOR_TEST]", "[FLUID]", "[dlss_menu]", "[DLSS]",
-		"[FSR3]", "[Upscaler]", "[DETAILS] Grass", "[SVP-", "[PIP-", "[DT-", "[SHADER-WARMUP]", "[Physical glass", "[scope-glass]"};
+		"[runtime_", "[short_range_blood", "[AR3]", "[CCAL]", "[GROUND]", "[MOTOR_TEST]", "[FLUID]"};
 	for (const char* tag : tags)
 		if (!strncmp(m, tag, strlen(tag)))
 			return true;
